@@ -51,17 +51,26 @@
 
 ### Remaining Improvements Needed
 
-1. **Automated Recovery for WebSocket Disconnections**:
+1. **CRITICAL: WebSocket Close Frame Issues**:
+   - Fix error: `Error sending command: no close frame received or sent`
+   - Problem occurs when sending commands with `wait_for_prompt: true` in Claude Desktop
+   - Add proper WebSocket close frame sending/receiving
+   - Implement graceful error recovery for WebSocket frame failures
+   - Investigate potential race conditions in async command execution
+   - Add detailed logging around WebSocket frame handling
+   - Test with different session identifier patterns
+
+2. **Automated Recovery for WebSocket Disconnections**:
    - Implement automatic reconnection when connections are dropped
    - Add detection of closed WebSocket connections
    - Create session reacquisition after connection loss
 
-2. **Persistent Session Management**:
+3. **Persistent Session Management**:
    - Add ability to list available persistent sessions
    - Implement cleanup of old/inactive persistent sessions
    - Improve reconnection helpers for specific use cases
 
-3. **Code Organization**:
+4. **Code Organization**:
    - Refactor common error handling patterns into utility functions
    - Extract WebSocket management logic for better testability
    - Standardize event notification patterns across modules
