@@ -224,3 +224,23 @@ python -m iterm_mcp_python.server.main
 pip install modelcontextprotocol-inspector
 python -m modelcontextprotocol_inspector iterm_mcp_python.server.main
 ```
+
+## Recent Changes (March 2025)
+
+### 1. MCP Server Stability Improvements
+- Implemented robust error handling in all async functions with detailed logging
+- Fixed WebSocket connection issues by improving error handling and adding proper shutdown procedures
+- Changed screen monitoring from subscription-based to polling-based for better reliability
+- Fixed parameter mismatch in create_layout function (session_names vs pane_names)
+- Added attribute checking to prevent missing attribute errors
+
+### 2. Code Robustness
+- Added explicit checks with hasattr() before accessing potentially missing attributes
+- Added fallback values for missing or failed operations
+- Improved logging with more detailed information about errors and operations
+- Added comprehensive try/except blocks to all critical functions
+
+### 3. Testing Status
+- Basic functionality tests are passing
+- Advanced features tests still have 2 failures related to monitoring and filtering
+- Next focus should be on fixing the race conditions in these tests and ensuring monitoring starts/stops correctly
