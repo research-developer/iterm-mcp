@@ -77,7 +77,24 @@ class ItermSession:
     @property
     def is_processing(self) -> bool:
         """Check if the session is currently processing a command."""
-        return self.session.is_processing
+        try:
+            # Try to access the is_processing attribute of the iTerm2 session
+            if hasattr(self.session, 'is_processing'):
+                return self.session.is_processing
+            else:
+                # If it doesn't exist, log a warning and return a default value
+                import logging
+                logging.getLogger("iterm-mcp-session").warning(
+                    f"Session {self.id} ({self._name}) does not have is_processing attribute"
+                )
+                return False
+        except Exception as e:
+            # Handle any exceptions that might occur
+            import logging
+            logging.getLogger("iterm-mcp-session").error(
+                f"Error checking is_processing for session {self.id} ({self._name}): {str(e)}"
+            )
+            return False
     
     def set_logger(self, logger: ItermSessionLogger) -> None:
         """Set the logger for this session.
@@ -179,7 +196,8 @@ class ItermSession:
         """Start monitoring the screen for changes.
         
         This allows real-time capture of terminal output without requiring explicit
-        calls to get_screen_contents().
+        calls to get_screen_contents(). Uses polling-based approach as a fallback
+        since subscription-based approach may have WebSocket issues.
         
         Args:
             update_interval: How often to check for updates (in seconds)
@@ -189,26 +207,47 @@ class ItermSession:
             
         self._monitoring = True
         
-        async def monitor_screen():
+        async def monitor_screen_polling():
+            """Polling-based screen monitoring as a fallback approach."""
             try:
-                # Subscribe to screen updates
-                async with self.session.async_subscribe_to_screen_updates() as subscription:
-                    self.logger.log_custom_event("MONITORING_STARTED", "Screen monitoring started")
-                    
-                    while self._monitoring:
-                        update = await subscription.async_get()
-                        if update:
-                            content = await self.get_screen_contents()
+                import logging
+                logger = logging.getLogger("iterm-mcp-session")
+                logger.info(f"Starting polling-based screen monitoring for session {self.id}")
+                
+                if self.logger:
+                    self.logger.log_custom_event("MONITORING_STARTED", "Polling-based screen monitoring started")
+                
+                last_content = await self.get_screen_contents()
+                
+                while self._monitoring:
+                    try:
+                        # Get current content
+                        current_content = await self.get_screen_contents()
+                        
+                        # Check if content has changed
+                        if current_content != last_content:
                             # Process the content through any registered callbacks
                             for callback in self._monitor_callbacks:
-                                asyncio.create_task(callback(content))
+                                # Run each callback in a separate task to prevent blocking
+                                try:
+                                    # Using ensure_future instead of create_task for better compatibility
+                                    asyncio.ensure_future(callback(current_content))
+                                except Exception as callback_error:
+                                    logger.error(f"Error in callback: {str(callback_error)}")
+                            
+                            # Update last content and timestamp
+                            last_content = current_content
                             self._last_screen_update = time.time()
                         
-                        # Throttle updates to avoid excessive CPU usage
+                        # Sleep to prevent excessive CPU usage
+                        await asyncio.sleep(update_interval)
+                    except Exception as poll_error:
+                        logger.error(f"Error in polling loop: {str(poll_error)}")
                         await asyncio.sleep(update_interval)
             except asyncio.CancelledError:
-                pass
+                logger.info(f"Polling monitor task cancelled for session {self.id}")
             except Exception as e:
+                logger.error(f"Fatal error in polling monitor: {str(e)}")
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_ERROR", f"Error in screen monitoring: {str(e)}")
             finally:
@@ -216,7 +255,9 @@ class ItermSession:
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_STOPPED", "Screen monitoring stopped")
         
-        self._monitor_task = asyncio.create_task(monitor_screen())
+        # Use polling-based approach instead of subscription-based approach
+        # to avoid WebSocket frame errors
+        self._monitor_task = asyncio.create_task(monitor_screen_polling())
         
     def stop_monitoring(self) -> None:
         """Stop monitoring the screen for changes."""
