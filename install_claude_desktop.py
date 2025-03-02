@@ -26,17 +26,42 @@ def main():
     # Make sure the script is executable
     os.chmod(SERVER_SCRIPT, 0o755)
 
-    # Install the server in Claude Desktop using MCP CLI
+    # Install the server in Claude Desktop by editing the configuration directly
     try:
-        cmd = [
-            "mcp", "install",
-            str(SERVER_SCRIPT),
-            "--name", "iTerm Terminal Controller"
-        ]
+        import json
         
-        # Run the command
+        # Get the Claude Desktop configuration path
+        config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+        
+        if not config_path.exists():
+            print(f"Error: Claude Desktop configuration file not found at {config_path}")
+            return 1
+            
+        # Read the existing configuration
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+            
+        # Ensure mcpServers section exists
+        if 'mcpServers' not in config:
+            config['mcpServers'] = {}
+            
+        # Use the current Python interpreter path
+        python_path = sys.executable
+        
+        # Add or update our server configuration
+        config['mcpServers']['iTerm Terminal Controller'] = {
+            "command": python_path,
+            "args": [
+                str(SERVER_SCRIPT)
+            ]
+        }
+        
+        # Write the updated configuration
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+            
+        # Log the installation
         print(f"Installing iTerm MCP server in Claude Desktop...")
-        subprocess.run(cmd, check=True)
         
         print("Installation successful!")
         print("You can now use the iTerm Terminal Controller in Claude Desktop.")
