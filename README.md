@@ -1,113 +1,115 @@
 # iTerm MCP
 
-A Model Context Protocol server that provides access to iTerm2 terminal sessions with support for multiple panes and layouts.
+A Python implementation for controlling iTerm2 terminal sessions with support for multiple panes and layouts. This implementation uses the iTerm2 Python API for improved reliability and functionality.
 
 ## Features
 
-**Named Panes with Split Layouts:** Create and manage multiple terminal panes with descriptive names for different tasks. Choose from various predefined layouts (side-by-side, stacked, quad).
-
-**Natural Integration:** Share iTerm with AI models. Models can inspect terminal output and execute commands while you monitor progress.
-
-**Full Terminal Control:** Execute commands, read output, and send control characters (like Ctrl+C) to manage interactive sessions.
-
-**Background Process Support:** Run commands asynchronously and check their status to monitor long-running processes.
-
-**Session Persistence:** Named sessions maintain identity across operations, allowing models to reliably target specific terminal panes.
-
-**Reliable Native API:** Uses the official iTerm2 Python API for maximum reliability and functionality.
-
-<a href="https://glama.ai/mcp/servers/h89lr05ty6"><img width="380" height="200" src="https://glama.ai/mcp/servers/h89lr05ty6/badge" alt="iTerm Server MCP server" /></a>
-
-## Safety Considerations
-
-* The user is responsible for using the tool safely.
-* No built-in restrictions: iterm-mcp makes no attempt to evaluate the safety of commands that are executed.
-* Models can behave in unexpected ways. The user is expected to monitor activity and abort when appropriate.
-* For multi-step tasks, you may need to interrupt the model if it goes off track. Start with smaller, focused tasks until you're familiar with how the model behaves.
-
-## Available Tools
-
-### Terminal Interaction
-- `write_to_terminal` - Writes text or commands to a terminal session
-- `read_terminal_output` - Reads the specified number of lines from a terminal session
-- `send_control_character` - Sends a control character (e.g., Ctrl+C) to a terminal session
-
-### Session Management
-- `list_sessions` - Lists all available terminal sessions with their names and status
-- `focus_session` - Makes a specific session active for user interaction
-- `check_session_status` - Checks if a session is currently processing a command
-
-### Layout Management
-- `create_layout` - Creates a predefined layout with named panes (single, split, etc.)
+- Named terminal sessions with persistent identity
+- Multiple pane layouts (single, horizontal split, vertical split, quad, etc.)
+- Command execution and output capture
+- Session status monitoring
+- Log management for sessions
+- Background process execution
+- Control character support (Ctrl+C, etc.)
 
 ## Requirements
 
-* iTerm2 must be installed and running
-* Python 3.8 or greater
-* iTerm2 Python API enabled (Settings > General > Enable Python API)
+- Python 3.7+
+- iTerm2 3.3+ with Python API enabled
 
 ## Installation
 
-### Using pip
-
+1. Clone this repository
+2. Install dependencies:
 ```bash
-pip install iterm-mcp
+pip install -r requirements.txt
 ```
 
-### From source
+## Project Structure
 
-```bash
-git clone https://github.com/ferrislucas/iterm-mcp.git
-cd iterm-mcp
-pip install -e .
+```
+iterm-mcp/
+├── pyproject.toml                # Python packaging configuration
+└── iterm_mcp_python/             # Main package
+    ├── __init__.py               # Package initialization
+    ├── core/                     # Core functionality
+    │   ├── __init__.py
+    │   ├── session.py            # iTerm session management
+    │   ├── terminal.py           # Terminal window/tab management
+    │   └── layouts.py            # Predefined layouts
+    ├── server/                   # Demo implementation
+    │   ├── __init__.py
+    │   └── main.py               # Main demo entry point
+    └── utils/                    # Utility functions
+        ├── __init__.py
+        └── logging.py            # Logging utilities
 ```
 
-To use with Claude Desktop, add the server config:
+## Usage
 
-On macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-On Windows: `%APPDATA%/Claude/claude_desktop_config.json`
+### Running the Demo
 
-```json
-{
-  "mcpServers": {
-    "iterm-mcp": {
-      "command": "iterm-mcp",
-      "args": []
-    }
-  }
-}
-```
-
-### Installing via Smithery
-
-To install iTerm for Claude Desktop automatically via [Smithery](https://smithery.ai/server/iterm-mcp):
-
-```bash
-npx -y @smithery/cli install iterm-mcp --client claude
-```
-[![smithery badge](https://smithery.ai/badge/iterm-mcp)](https://smithery.ai/server/iterm-mcp)
-
-## Development
-
-Install development dependencies:
-```bash
-pip install -e ".[dev]"
-```
-
-Run the server:
 ```bash
 python -m iterm_mcp_python.server.main
 ```
 
-### Debugging
+This will:
+1. Create a new window with a horizontal split layout
+2. Send commands to both panes
+3. Show the output from each pane
+4. Demonstrate focus switching between panes
 
-Standard Python debugging techniques can be used. Logs are written to `~/.iterm-mcp.log`.
+### Using in Your Own Scripts
 
-For MCP protocol debugging, we recommend using the [MCP Inspector](https://github.com/modelcontextprotocol/inspector):
+```python
+import asyncio
+import iterm2
+from iterm_mcp_python.core.terminal import ItermTerminal
+from iterm_mcp_python.core.layouts import LayoutManager, LayoutType
 
-```bash
-pip install modelcontextprotocol-inspector
-python -m modelcontextprotocol_inspector iterm_mcp_python.server.main
+async def my_script():
+    # Connect to iTerm2
+    connection = await iterm2.Connection.async_create()
+    
+    # Initialize terminal and layout manager
+    terminal = ItermTerminal(connection)
+    await terminal.initialize()
+    layout_manager = LayoutManager(terminal)
+    
+    # Create a layout with named panes
+    session_map = await layout_manager.create_layout(
+        layout_type=LayoutType.HORIZONTAL_SPLIT,
+        pane_names=["Code", "Terminal"]
+    )
+    
+    # Get sessions by name
+    code_session = await terminal.get_session_by_name("Code")
+    terminal_session = await terminal.get_session_by_name("Terminal")
+    
+    # Send commands to sessions
+    await code_session.send_text("vim myfile.py\n")
+    await terminal_session.send_text("python -m http.server\n")
+
+# Run the script
+asyncio.run(my_script())
 ```
 
-The Inspector will provide a URL to access debugging tools in your browser.
+## Testing
+
+Run the tests with:
+
+```bash
+python -m unittest discover tests
+```
+
+## Logging
+
+All session activity is logged to `~/.iterm_logs` by default. This includes:
+- Commands sent to sessions
+- Output received from sessions
+- Control characters sent
+- Session lifecycle events (creation, renaming, closure)
+
+## License
+
+[MIT](LICENSE)
