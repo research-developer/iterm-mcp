@@ -134,13 +134,13 @@ class ItermMCPServer:
         async def create_layout(
             layout_type: str, 
             ctx: Context,
-            session_names: Optional[List[str]] = None
+            pane_names: Optional[List[str]] = None
         ) -> str:
             """Create a new terminal layout with named sessions.
             
             Args:
                 layout_type: The layout type (single, horizontal, vertical, quad)
-                session_names: Optional list of names for sessions (defaults to generic names)
+                pane_names: Optional list of names for panes (defaults to generic names)
             """
             if not self.terminal or not self.layout_manager:
                 await self.initialize()
@@ -165,7 +165,7 @@ class ItermMCPServer:
                 # Create the layout
                 sessions = await self.layout_manager.create_layout(
                     layout_type=layout_type_enum,
-                    session_names=session_names
+                    pane_names=pane_names
                 )
                 
                 # Return information about created sessions
