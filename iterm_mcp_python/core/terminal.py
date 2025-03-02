@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import iterm2
 
@@ -317,3 +317,67 @@ class ItermTerminal:
         # Remove from our sessions dictionary
         if session_id in self.sessions:
             del self.sessions[session_id]
+            
+    async def create_multiple_sessions(self, configs: List[Dict[str, Any]]) -> Dict[str, str]:
+        """Create multiple sessions with different initial commands.
+        
+        Args:
+            configs: List of session configs with parameters:
+                - name: Name for the session
+                - command: (Optional) Command to run
+                - layout: (Optional) Layout type if splitting from previous session
+                - vertical: (Optional) Whether to split vertically (True) or horizontally (False)
+                - monitor: (Optional) Whether to start monitoring the session
+                
+        Returns:
+            Dictionary mapping session names to their IDs
+        """
+        results = {}
+        prev_session = None
+        
+        for config in configs:
+            session_name = config.get("name")
+            command = config.get("command")
+            monitor = config.get("monitor", False)
+            
+            if not session_name:
+                continue
+                
+            # If no previous session or not using layout, create a new window
+            if not prev_session or "layout" not in config:
+                session = await self.create_window()
+            else:
+                # Split from previous session
+                vertical = config.get("vertical", False)
+                session = await self.create_split_pane(
+                    session_id=prev_session.id,
+                    vertical=vertical,
+                    name=session_name
+                )
+                
+            # Set session name
+            await session.set_name(session_name)
+            
+            # Start monitoring if requested
+            if monitor and session.logger:
+                await session.start_monitoring()
+                
+            # Execute command if provided
+            if command:
+                await session.send_text(f"{command}\n")
+                
+            # Save the session
+            results[session_name] = session.id
+            prev_session = session
+            
+            # Small delay to avoid race conditions
+            await asyncio.sleep(0.2)
+            
+        # Log the batch creation
+        if self.enable_logging and hasattr(self, "log_manager"):
+            self.log_manager.log_app_event(
+                "BATCH_CREATED",
+                f"Created {len(results)} sessions in batch: {', '.join(results.keys())}"
+            )
+            
+        return results
