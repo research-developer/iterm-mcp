@@ -7,7 +7,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Pattern, Union
+from typing import Dict, List, Optional, Pattern, Union, Any
 
 
 class ItermSessionLogger:
@@ -27,7 +27,9 @@ class ItermSessionLogger:
         self,
         session_id: str,
         session_name: str,
-        log_dir: Optional[str] = None
+        log_dir: Optional[str] = None,
+        max_snapshot_lines: int = 1000,
+        persistent_id: Optional[str] = None
     ):
         """Initialize the session logger.
         
@@ -35,9 +37,13 @@ class ItermSessionLogger:
             session_id: The unique ID of the session
             session_name: The name of the session
             log_dir: Optional override for the log directory
+            max_snapshot_lines: Maximum number of lines to keep in snapshot
+            persistent_id: Optional persistent ID for this session
         """
         self.session_id = session_id
         self.session_name = session_name
+        self.persistent_id = persistent_id
+        self.max_snapshot_lines = max_snapshot_lines
         
         # Set up logging directory
         self.log_dir = log_dir or os.path.expanduser("~/.iterm_mcp_logs")
@@ -57,6 +63,12 @@ class ItermSessionLogger:
         self.snapshot_file = os.path.join(
             self.log_dir,
             f"latest_{safe_name}_{session_id[:8]}.txt"
+        )
+        
+        # Create overflow file for additional output beyond what's shown
+        self.overflow_file = os.path.join(
+            self.log_dir,
+            f"overflow_{safe_name}_{session_id[:8]}.txt"
         )
         
         # Initialize with no filters
@@ -82,7 +94,7 @@ class ItermSessionLogger:
         
         # Add a header to the log file
         self.logger.info(
-            f"Session started - ID: {session_id} - Name: {session_name}"
+            f"Session started - ID: {session_id} - Name: {session_name} - Persistent ID: {persistent_id}"
         )
     
     def log_command(self, command: str) -> None:
@@ -131,26 +143,42 @@ class ItermSessionLogger:
         # Check if text matches any filter
         return any(pattern.search(text) for pattern in self.output_filters)
 
-    def log_output(self, output: str) -> None:
+    def log_output(self, output: str, max_lines: Optional[int] = None) -> None:
         """Log output received from the session.
         
         Args:
             output: The output text
+            max_lines: Optional limit for lines to include in snapshot
         """
         # Only log the output if it's not too large
         if len(output) > 2000:
             output = output[:1997] + "..."
         
-        # Store in latest output cache (up to 1000 lines)
+        # Store in latest output cache (up to max_snapshot_lines)
         lines = output.split('\n')
         self.latest_output.extend(lines)
-        if len(self.latest_output) > 1000:
-            self.latest_output = self.latest_output[-1000:]
+        
+        # If we have more lines than max_snapshot_lines, move extras to overflow
+        if len(self.latest_output) > self.max_snapshot_lines:
+            overflow_lines = self.latest_output[:-self.max_snapshot_lines]
+            self.latest_output = self.latest_output[-self.max_snapshot_lines:]
+            
+            # Write overflow to file
+            try:
+                with open(self.overflow_file, 'a') as f:
+                    f.write('\n'.join(overflow_lines) + '\n')
+            except Exception as e:
+                self.logger.error(f"OVERFLOW_ERROR: Failed to write overflow: {str(e)}")
+        
+        # Limit snapshot to max_lines if specified
+        snapshot_lines = self.latest_output
+        if max_lines is not None and max_lines < len(self.latest_output):
+            snapshot_lines = self.latest_output[-max_lines:]
         
         # Write to snapshot file
         try:
             with open(self.snapshot_file, 'w') as f:
-                f.write('\n'.join(self.latest_output))
+                f.write('\n'.join(snapshot_lines))
         except Exception as e:
             self.logger.error(f"SNAPSHOT_ERROR: Failed to write snapshot: {str(e)}")
         
@@ -201,7 +229,8 @@ class ItermLogManager:
         self,
         log_dir: Optional[str] = None,
         enable_app_log: bool = True,
-        max_snapshot_lines: int = 1000
+        max_snapshot_lines: int = 1000,
+        default_max_lines: int = 50
     ):
         """Initialize the log manager.
         
@@ -209,6 +238,7 @@ class ItermLogManager:
             log_dir: Optional override for the log directory
             enable_app_log: Whether to enable application-level logging
             max_snapshot_lines: Maximum number of lines to keep in memory for snapshots
+            default_max_lines: Default number of lines to show per session
         """
         self.log_dir = log_dir or os.path.expanduser("~/.iterm_mcp_logs")
         os.makedirs(self.log_dir, exist_ok=True)
@@ -216,12 +246,31 @@ class ItermLogManager:
         # Dictionary of session loggers
         self.session_loggers: Dict[str, ItermSessionLogger] = {}
         
+        # Persistent session mapping
+        self.persistent_sessions_file = os.path.join(self.log_dir, "persistent_sessions.json")
+        self.persistent_sessions: Dict[str, Dict[str, str]] = self._load_persistent_sessions()
+        
         # Settings
         self.max_snapshot_lines = max_snapshot_lines
+        self.default_max_lines = default_max_lines
         
         # Set up application logger if enabled
         if enable_app_log:
             self.setup_app_logger()
+            
+    def _load_persistent_sessions(self) -> Dict[str, Dict[str, str]]:
+        """Load persistent session mapping from file.
+        
+        Returns:
+            Dictionary mapping persistent IDs to session metadata
+        """
+        if os.path.exists(self.persistent_sessions_file):
+            try:
+                with open(self.persistent_sessions_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error loading persistent sessions: {str(e)}")
+        return {}
     
     def setup_app_logger(self) -> None:
         """Set up the application-level logger."""
@@ -259,25 +308,84 @@ class ItermLogManager:
         # Store app logger
         self.app_logger = app_logger
     
+    def save_persistent_sessions(self) -> None:
+        """Save persistent session mapping to file."""
+        try:
+            with open(self.persistent_sessions_file, 'w') as f:
+                json.dump(self.persistent_sessions, f)
+        except Exception as e:
+            print(f"Error saving persistent sessions: {str(e)}")
+            
+    def register_persistent_session(
+        self, 
+        session_id: str, 
+        persistent_id: str, 
+        session_name: str
+    ) -> None:
+        """Register a persistent session.
+        
+        Args:
+            session_id: iTerm2 session ID
+            persistent_id: Persistent session ID
+            session_name: Session name
+        """
+        self.persistent_sessions[persistent_id] = {
+            "session_id": session_id,
+            "name": session_name,
+            "last_seen": datetime.datetime.now().isoformat()
+        }
+        self.save_persistent_sessions()
+        
+    def get_persistent_session(self, persistent_id: str) -> Optional[Dict[str, Any]]:
+        """Get persistent session details.
+        
+        Args:
+            persistent_id: Persistent session ID
+            
+        Returns:
+            Session details or None if not found
+        """
+        return self.persistent_sessions.get(persistent_id)
+    
     def get_session_logger(
         self,
         session_id: str,
-        session_name: str
+        session_name: str,
+        persistent_id: Optional[str] = None
     ) -> ItermSessionLogger:
         """Get a logger for a session, creating it if it doesn't exist.
         
         Args:
             session_id: The unique ID of the session
             session_name: The name of the session
+            persistent_id: Optional persistent ID
             
         Returns:
             The session logger
         """
+        # Generate a persistent ID if not provided
+        if not persistent_id:
+            # Check if there's an existing mapping
+            for p_id, details in self.persistent_sessions.items():
+                if details.get("session_id") == session_id:
+                    persistent_id = p_id
+                    break
+            
+            # Create new if not found
+            if not persistent_id:
+                persistent_id = str(uuid.uuid4())
+                
+        # Register the persistent session
+        self.register_persistent_session(session_id, persistent_id, session_name)
+        
+        # Create or return existing logger
         if session_id not in self.session_loggers:
             self.session_loggers[session_id] = ItermSessionLogger(
                 session_id=session_id,
                 session_name=session_name,
-                log_dir=self.log_dir
+                log_dir=self.log_dir,
+                max_snapshot_lines=self.max_snapshot_lines,
+                persistent_id=persistent_id
             )
         
         return self.session_loggers[session_id]
@@ -302,15 +410,28 @@ class ItermLogManager:
         if hasattr(self, "app_logger"):
             self.app_logger.info(f"{event_type}: {message}")
     
-    def get_snapshot(self, session_id: str) -> Optional[str]:
+    def get_snapshot(
+        self, 
+        session_id: str, 
+        max_lines: Optional[int] = None,
+        persistent_id: Optional[str] = None
+    ) -> Optional[str]:
         """Get the latest output snapshot for a session.
         
         Args:
             session_id: The session ID
+            max_lines: Optional maximum number of lines to return
+            persistent_id: Optional persistent ID to use instead of session_id
             
         Returns:
             The snapshot contents or None if session not found
         """
+        # If persistent ID provided, try to find matching session
+        if persistent_id:
+            session_info = self.get_persistent_session(persistent_id)
+            if session_info:
+                session_id = session_info.get("session_id", session_id)
+        
         if session_id not in self.session_loggers:
             return None
             
@@ -318,7 +439,15 @@ class ItermLogManager:
         try:
             if os.path.exists(logger.snapshot_file):
                 with open(logger.snapshot_file, 'r') as f:
-                    return f.read()
+                    content = f.read()
+                    
+                # Limit lines if requested
+                if max_lines:
+                    lines = content.split('\n')
+                    if len(lines) > max_lines:
+                        return '\n'.join(lines[-max_lines:])
+                
+                return content
             return None
         except Exception as e:
             self.log_app_event("ERROR", f"Failed to read snapshot for session {session_id}: {str(e)}")
@@ -388,3 +517,27 @@ class ItermLogManager:
             result[session_id] = logger.snapshot_file
         
         return result
+        
+    def list_persistent_sessions(self) -> Dict[str, Dict[str, Any]]:
+        """List all persistent sessions.
+        
+        Returns:
+            Dictionary mapping persistent IDs to session details
+        """
+        return self.persistent_sessions.copy()
+        
+    def set_max_lines(self, session_id: str, max_lines: int) -> bool:
+        """Set maximum lines for a session's snapshots.
+        
+        Args:
+            session_id: The session ID
+            max_lines: The maximum number of lines
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if session_id in self.session_loggers:
+            logger = self.session_loggers[session_id]
+            logger.max_snapshot_lines = max_lines
+            return True
+        return False

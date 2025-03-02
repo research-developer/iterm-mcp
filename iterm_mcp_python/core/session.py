@@ -1,7 +1,9 @@
 """Session management for iTerm2 interaction."""
 
 import asyncio
+import os
 import time
+import uuid
 from typing import Dict, List, Optional, Tuple, Union, Callable
 
 import iterm2
@@ -15,7 +17,9 @@ class ItermSession:
         self,
         session: iterm2.Session,
         name: Optional[str] = None,
-        logger: Optional[ItermSessionLogger] = None
+        logger: Optional[ItermSessionLogger] = None,
+        persistent_id: Optional[str] = None,
+        max_lines: int = 50
     ):
         """Initialize a session wrapper.
         
@@ -23,10 +27,18 @@ class ItermSession:
             session: The iTerm2 session object
             name: Optional name for the session
             logger: Optional logger for the session
+            persistent_id: Optional persistent ID for reconnection
+            max_lines: Maximum number of lines to retrieve by default
         """
         self.session = session
         self._name = name or session.name
         self.logger = logger
+        
+        # Generate or use persistent ID
+        self._persistent_id = persistent_id or str(uuid.uuid4())
+        
+        # Default number of lines to retrieve
+        self._max_lines = max_lines
         
         # For screen monitoring
         self._monitoring = False
@@ -38,11 +50,29 @@ class ItermSession:
     def id(self) -> str:
         """Get the unique identifier for this session."""
         return self.session.session_id
+        
+    @property
+    def persistent_id(self) -> str:
+        """Get the persistent identifier for this session."""
+        return self._persistent_id
     
     @property
     def name(self) -> str:
         """Get the name of the session."""
         return self._name
+        
+    @property
+    def max_lines(self) -> int:
+        """Get the maximum number of lines to retrieve."""
+        return self._max_lines
+
+    def set_max_lines(self, max_lines: int) -> None:
+        """Set the maximum number of lines to retrieve.
+        
+        Args:
+            max_lines: Maximum number of lines
+        """
+        self._max_lines = max_lines
     
     @property
     def is_processing(self) -> bool:
@@ -85,17 +115,22 @@ class ItermSession:
             if text.endswith("\n") or text.endswith("\r"):
                 self.logger.log_command(text.rstrip("\r\n"))
     
-    async def get_screen_contents(self, max_lines: int = 50) -> str:
+    async def get_screen_contents(self, max_lines: Optional[int] = None) -> str:
         """Get the contents of the session's screen.
         
         Args:
-            max_lines: Maximum number of lines to retrieve
+            max_lines: Maximum number of lines to retrieve (defaults to session's max_lines)
             
         Returns:
             The text contents of the screen
         """
         contents = await self.session.async_get_screen_contents()
         lines = []
+        
+        # Use instance default if not specified
+        if max_lines is None:
+            max_lines = self._max_lines
+            
         max_lines = min(max_lines, contents.number_of_lines)
         
         for i in range(max_lines):

@@ -4,12 +4,13 @@ A Python implementation for controlling iTerm2 terminal sessions with support fo
 
 ## Features
 
-- Named terminal sessions with persistent identity
+- Named terminal sessions with persistent identity across restarts
+- Persistent session IDs for reconnection after interruptions
 - Multiple pane layouts (single, horizontal split, vertical split, quad, etc.)
-- Command execution and output capture
+- Command execution and output capture with configurable line limits
 - Real-time session monitoring with callback support
 - Log management with filterable output using regex patterns
-- Live output snapshots for LLM access
+- Live output snapshots for LLM access with overflow handling
 - Multiple session creation and parallel command execution
 - Background process execution and status tracking
 - Control character support (Ctrl+C, etc.)
@@ -109,21 +110,44 @@ async def my_advanced_script():
     # Connect to iTerm2
     connection = await iterm2.Connection.async_create()
     
-    # Initialize terminal
-    terminal = ItermTerminal(connection)
+    # Initialize terminal with custom line limits
+    terminal = ItermTerminal(
+        connection=connection,
+        default_max_lines=100,  # Default lines to retrieve per session
+        max_snapshot_lines=1000  # Maximum lines to keep in snapshot
+    )
     await terminal.initialize()
     
-    # Create multiple sessions with different commands
+    # Create multiple sessions with different commands and line limits
     session_configs = [
-        {"name": "Server", "command": "python -m http.server", "monitor": True},
-        {"name": "Logs", "command": "tail -f server.log", "layout": True, "vertical": True},
-        {"name": "Client", "command": "curl localhost:8000", "layout": True, "vertical": False}
+        {
+            "name": "Server", 
+            "command": "python -m http.server", 
+            "monitor": True,
+            "max_lines": 200  # Custom line limit for this session
+        },
+        {
+            "name": "Logs", 
+            "command": "tail -f server.log", 
+            "layout": True, 
+            "vertical": True
+        },
+        {
+            "name": "Client", 
+            "command": "curl localhost:8000", 
+            "layout": True, 
+            "vertical": False
+        }
     ]
     
     session_map = await terminal.create_multiple_sessions(session_configs)
     
     # Get the Server session for monitoring
     server_session = await terminal.get_session_by_id(session_map["Server"])
+    
+    # Store the persistent ID for future reconnection
+    server_persistent_id = server_session.persistent_id
+    print(f"Server session persistent ID: {server_persistent_id}")
     
     # Add real-time output handling
     async def handle_server_output(content):
@@ -142,10 +166,27 @@ async def my_advanced_script():
     # Wait for events
     while True:
         await asyncio.sleep(1)
-        # Check snapshot for particular content
-        if terminal.log_manager.get_snapshot(server_session.id):
-            if "Keyboard interrupt received" in terminal.log_manager.get_snapshot(server_session.id):
-                break
+        # Get snapshot with limited lines
+        snapshot = terminal.log_manager.get_snapshot(
+            server_session.id,
+            max_lines=50  # Only get last 50 lines
+        )
+        if snapshot and "Keyboard interrupt received" in snapshot:
+            break
+
+    # Example of reconnecting by persistent ID in a new session
+    async def reconnect_later():
+        # Create a new terminal instance (simulating a new connection)
+        new_connection = await iterm2.Connection.async_create()
+        new_terminal = ItermTerminal(new_connection)
+        await new_terminal.initialize()
+        
+        # Reconnect to server session using persistent ID
+        reconnected_session = await new_terminal.get_session_by_persistent_id(server_persistent_id)
+        if reconnected_session:
+            print(f"Successfully reconnected to session: {reconnected_session.name}")
+            # Continue working with the reconnected session
+            await reconnected_session.send_text("echo 'Reconnected!'\n")
 
 # Run the script
 asyncio.run(my_advanced_script())
@@ -161,7 +202,7 @@ python -m unittest discover tests
 
 ## Logging and Monitoring
 
-All session activity is logged to `~/.iterm_logs` by default. This includes:
+All session activity is logged to `~/.iterm_mcp_logs` by default. This includes:
 - Commands sent to sessions
 - Output received from sessions
 - Control characters sent
@@ -181,13 +222,28 @@ Log output can be filtered using regex patterns:
 - Reduce log noise for better analysis
 - Multiple filters can be combined
 
-### Snapshots
+### Snapshots and Line Management
 
 Real-time snapshots of terminal output are maintained in snapshot files:
 - Separate from main log files
 - Always contain the latest output
 - Available for LLM or other systems to access
 - Useful for state monitoring without interfering with user interaction
+
+Output line management:
+- Configure global default line limits for all sessions
+- Set per-session line limits via `set_max_lines()`
+- Request specific line counts for individual operations
+- Overflow files for tracking historic output beyond the line limit
+
+### Persistent Session Management
+
+Sessions maintain persistent identities across restarts and reconnection:
+- Each session has a unique UUID-based persistent ID
+- IDs are stored in `~/.iterm_mcp_logs/persistent_sessions.json`
+- `get_session_by_persistent_id()` allows reconnection to existing sessions
+- State is preserved even after chat or connection interruptions
+- Session output history is available across reconnections
 
 ## License
 

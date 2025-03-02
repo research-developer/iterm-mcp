@@ -16,7 +16,9 @@ class ItermTerminal:
         self,
         connection: iterm2.Connection,
         log_dir: Optional[str] = None,
-        enable_logging: bool = True
+        enable_logging: bool = True,
+        default_max_lines: int = 50,
+        max_snapshot_lines: int = 1000
     ):
         """Initialize the terminal manager.
         
@@ -24,15 +26,22 @@ class ItermTerminal:
             connection: The iTerm2 connection object
             log_dir: Optional directory for log files
             enable_logging: Whether to enable session logging
+            default_max_lines: Default number of lines to show per session
+            max_snapshot_lines: Maximum number of lines to keep in snapshots
         """
         self.connection = connection
         self.app = None
         self.sessions: Dict[str, ItermSession] = {}
+        self.default_max_lines = default_max_lines
         
         # Initialize logging if enabled
         self.enable_logging = enable_logging
         if enable_logging:
-            self.log_manager = ItermLogManager(log_dir=log_dir)
+            self.log_manager = ItermLogManager(
+                log_dir=log_dir,
+                default_max_lines=default_max_lines,
+                max_snapshot_lines=max_snapshot_lines
+            )
         
     async def initialize(self) -> None:
         """Initialize the connection to iTerm2."""
@@ -56,14 +65,28 @@ class ItermTerminal:
             for tab in tabs:
                 tab_sessions = tab.sessions
                 for session in tab_sessions:
+                    # Check if we have a persistent ID for this session
+                    persistent_id = None
+                    if self.enable_logging and hasattr(self, "log_manager"):
+                        # Search persistent sessions for this session ID
+                        for p_id, details in self.log_manager.persistent_sessions.items():
+                            if details.get("session_id") == session.session_id:
+                                persistent_id = p_id
+                                break
+                    
                     # Create a new ItermSession with logger and add to the dictionary
-                    iterm_session = ItermSession(session)
+                    iterm_session = ItermSession(
+                        session=session,
+                        persistent_id=persistent_id,
+                        max_lines=self.default_max_lines
+                    )
                     
                     # Add logger if logging is enabled
                     if self.enable_logging and hasattr(self, "log_manager"):
                         session_logger = self.log_manager.get_session_logger(
                             session_id=iterm_session.id,
-                            session_name=iterm_session.name
+                            session_name=iterm_session.name,
+                            persistent_id=iterm_session.persistent_id
                         )
                         iterm_session.set_logger(session_logger)
                     
@@ -104,6 +127,33 @@ class ItermTerminal:
             if session.name == name:
                 return session
         return None
+        
+    async def get_session_by_persistent_id(self, persistent_id: str) -> Optional[ItermSession]:
+        """Get a session by its persistent ID.
+        
+        Args:
+            persistent_id: The persistent ID of the session
+            
+        Returns:
+            The session with the given persistent ID if found, None otherwise
+        """
+        # Find the session ID from persistent ID
+        if self.enable_logging and hasattr(self, "log_manager"):
+            session_info = self.log_manager.get_persistent_session(persistent_id)
+            if session_info:
+                session_id = session_info.get("session_id")
+                if session_id:
+                    # Refresh to ensure we have the latest sessions
+                    await self._refresh_sessions()
+                    return self.sessions.get(session_id)
+        
+        # If not found in persistent mapping, try direct search
+        await self._refresh_sessions()
+        for session in self.sessions.values():
+            if session.persistent_id == persistent_id:
+                return session
+        
+        return None
     
     async def create_window(self) -> ItermSession:
         """Create a new iTerm2 window.
@@ -127,20 +177,24 @@ class ItermTerminal:
             raise RuntimeError("Failed to create window with sessions")
         
         # Create a new ItermSession with logger and add to the dictionary
-        session = ItermSession(sessions[0])
+        session = ItermSession(
+            session=sessions[0],
+            max_lines=self.default_max_lines
+        )
         
         # Add logger if logging is enabled
         if self.enable_logging and hasattr(self, "log_manager"):
             session_logger = self.log_manager.get_session_logger(
                 session_id=session.id,
-                session_name=session.name
+                session_name=session.name,
+                persistent_id=session.persistent_id
             )
             session.set_logger(session_logger)
             
             # Log window creation event
             self.log_manager.log_app_event(
                 "WINDOW_CREATED", 
-                f"Created new window with session: {session.name} ({session.id})"
+                f"Created new window with session: {session.name} ({session.id}) - Persistent ID: {session.persistent_id}"
             )
         
         self.sessions[session.id] = session
@@ -184,20 +238,24 @@ class ItermTerminal:
             raise RuntimeError("Failed to create tab with sessions")
         
         # Create a new ItermSession with logger and add to the dictionary
-        session = ItermSession(sessions[0])
+        session = ItermSession(
+            session=sessions[0],
+            max_lines=self.default_max_lines
+        )
         
         # Add logger if logging is enabled
         if self.enable_logging and hasattr(self, "log_manager"):
             session_logger = self.log_manager.get_session_logger(
                 session_id=session.id,
-                session_name=session.name
+                session_name=session.name,
+                persistent_id=session.persistent_id
             )
             session.set_logger(session_logger)
             
             # Log tab creation event
             self.log_manager.log_app_event(
                 "TAB_CREATED", 
-                f"Created new tab with session: {session.name} ({session.id})"
+                f"Created new tab with session: {session.name} ({session.id}) - Persistent ID: {session.persistent_id}"
             )
         
         self.sessions[session.id] = session
@@ -233,7 +291,11 @@ class ItermTerminal:
         )
         
         # Create a new ItermSession with logger and add to the dictionary
-        iterm_session = ItermSession(new_session, name=name)
+        iterm_session = ItermSession(
+            session=new_session, 
+            name=name,
+            max_lines=self.default_max_lines
+        )
         
         # Try to set the name multiple times in case there's a race condition
         if name:
@@ -256,7 +318,8 @@ class ItermTerminal:
         if self.enable_logging and hasattr(self, "log_manager"):
             session_logger = self.log_manager.get_session_logger(
                 session_id=iterm_session.id,
-                session_name=iterm_session.name
+                session_name=iterm_session.name,
+                persistent_id=iterm_session.persistent_id
             )
             iterm_session.set_logger(session_logger)
             
@@ -264,7 +327,7 @@ class ItermTerminal:
             split_type = "Vertical" if vertical else "Horizontal"
             self.log_manager.log_app_event(
                 "PANE_SPLIT", 
-                f"Created new {split_type.lower()} split pane: {iterm_session.name} ({iterm_session.id})"
+                f"Created new {split_type.lower()} split pane: {iterm_session.name} ({iterm_session.id}) - Persistent ID: {iterm_session.persistent_id}"
             )
             
         self.sessions[iterm_session.id] = iterm_session
@@ -357,6 +420,11 @@ class ItermTerminal:
                 
             # Set session name
             await session.set_name(session_name)
+            
+            # Configure max_lines if specified
+            max_lines = config.get("max_lines", self.default_max_lines)
+            if max_lines != self.default_max_lines:
+                session.set_max_lines(max_lines)
             
             # Start monitoring if requested
             if monitor and session.logger:
