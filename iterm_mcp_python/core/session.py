@@ -1,7 +1,8 @@
 """Session management for iTerm2 interaction."""
 
 import asyncio
-from typing import Dict, List, Optional, Tuple, Union
+import time
+from typing import Dict, List, Optional, Tuple, Union, Callable
 
 import iterm2
 
@@ -26,6 +27,12 @@ class ItermSession:
         self.session = session
         self._name = name or session.name
         self.logger = logger
+        
+        # For screen monitoring
+        self._monitoring = False
+        self._monitor_task = None
+        self._monitor_callbacks = []
+        self._last_screen_update = time.time()
     
     @property
     def id(self) -> str:
@@ -132,3 +139,84 @@ class ItermSession:
         # Log the clear action
         if self.logger:
             self.logger.log_custom_event("CLEAR_SCREEN", "Screen cleared")
+            
+    async def start_monitoring(self, update_interval: float = 0.5) -> None:
+        """Start monitoring the screen for changes.
+        
+        This allows real-time capture of terminal output without requiring explicit
+        calls to get_screen_contents().
+        
+        Args:
+            update_interval: How often to check for updates (in seconds)
+        """
+        if self._monitoring:
+            return
+            
+        self._monitoring = True
+        
+        async def monitor_screen():
+            try:
+                # Subscribe to screen updates
+                async with self.session.async_subscribe_to_screen_updates() as subscription:
+                    self.logger.log_custom_event("MONITORING_STARTED", "Screen monitoring started")
+                    
+                    while self._monitoring:
+                        update = await subscription.async_get()
+                        if update:
+                            content = await self.get_screen_contents()
+                            # Process the content through any registered callbacks
+                            for callback in self._monitor_callbacks:
+                                asyncio.create_task(callback(content))
+                            self._last_screen_update = time.time()
+                        
+                        # Throttle updates to avoid excessive CPU usage
+                        await asyncio.sleep(update_interval)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                if self.logger:
+                    self.logger.log_custom_event("MONITORING_ERROR", f"Error in screen monitoring: {str(e)}")
+            finally:
+                self._monitoring = False
+                if self.logger:
+                    self.logger.log_custom_event("MONITORING_STOPPED", "Screen monitoring stopped")
+        
+        self._monitor_task = asyncio.create_task(monitor_screen())
+        
+    def stop_monitoring(self) -> None:
+        """Stop monitoring the screen for changes."""
+        if not self._monitoring or not self._monitor_task:
+            return
+            
+        self._monitoring = False
+        if not self._monitor_task.done():
+            self._monitor_task.cancel()
+        self._monitor_task = None
+        
+    def add_monitor_callback(self, callback: Callable[[str], None]) -> None:
+        """Add a callback to be called when the screen changes.
+        
+        Args:
+            callback: A function that takes the screen content as a string
+        """
+        if callback not in self._monitor_callbacks:
+            self._monitor_callbacks.append(callback)
+            
+    def remove_monitor_callback(self, callback: Callable[[str], None]) -> None:
+        """Remove a previously registered callback.
+        
+        Args:
+            callback: The callback to remove
+        """
+        if callback in self._monitor_callbacks:
+            self._monitor_callbacks.remove(callback)
+            
+    @property
+    def is_monitoring(self) -> bool:
+        """Check if the session is being monitored."""
+        return self._monitoring
+        
+    @property
+    def last_update_time(self) -> float:
+        """Get the timestamp of the last screen update."""
+        return self._last_screen_update

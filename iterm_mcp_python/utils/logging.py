@@ -4,9 +4,10 @@ import datetime
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Pattern, Union
 
 
 class ItermSessionLogger:
@@ -18,6 +19,8 @@ class ItermSessionLogger:
     3. Control characters and other actions
     
     Logs are stored in the user's home directory under .iterm_mcp_logs/
+    
+    The logger can be configured with regex filters to only capture specific output patterns.
     """
     
     def __init__(
@@ -49,6 +52,16 @@ class ItermSessionLogger:
             self.log_dir,
             f"{timestamp}_{safe_name}_{session_id[:8]}.log"
         )
+        
+        # Create a separate file for the latest snapshot
+        self.snapshot_file = os.path.join(
+            self.log_dir,
+            f"latest_{safe_name}_{session_id[:8]}.txt"
+        )
+        
+        # Initialize with no filters
+        self.output_filters = []
+        self.latest_output = []  # Store recent output for snapshots
         
         # Set up file logger
         self.logger = logging.getLogger(f"session_{session_id}")
@@ -84,6 +97,40 @@ class ItermSessionLogger:
         
         self.logger.info(f"COMMAND: {command}")
     
+    def add_output_filter(self, pattern: str) -> None:
+        """Add a regex filter for output.
+        
+        Args:
+            pattern: The regex pattern to filter by
+        """
+        try:
+            compiled_pattern = re.compile(pattern)
+            self.output_filters.append(compiled_pattern)
+            self.logger.info(f"FILTER_ADDED: {pattern}")
+        except re.error as e:
+            self.logger.error(f"FILTER_ERROR: Invalid regex pattern '{pattern}': {str(e)}")
+    
+    def clear_output_filters(self) -> None:
+        """Clear all output filters."""
+        self.output_filters = []
+        self.logger.info("FILTERS_CLEARED: All output filters removed")
+    
+    def matches_filters(self, text: str) -> bool:
+        """Check if text matches any of the filters.
+        
+        Args:
+            text: The text to check
+            
+        Returns:
+            True if no filters are set or if the text matches at least one filter
+        """
+        # If no filters, everything matches
+        if not self.output_filters:
+            return True
+        
+        # Check if text matches any filter
+        return any(pattern.search(text) for pattern in self.output_filters)
+
     def log_output(self, output: str) -> None:
         """Log output received from the session.
         
@@ -94,7 +141,22 @@ class ItermSessionLogger:
         if len(output) > 2000:
             output = output[:1997] + "..."
         
-        self.logger.info(f"OUTPUT: {output}")
+        # Store in latest output cache (up to 1000 lines)
+        lines = output.split('\n')
+        self.latest_output.extend(lines)
+        if len(self.latest_output) > 1000:
+            self.latest_output = self.latest_output[-1000:]
+        
+        # Write to snapshot file
+        try:
+            with open(self.snapshot_file, 'w') as f:
+                f.write('\n'.join(self.latest_output))
+        except Exception as e:
+            self.logger.error(f"SNAPSHOT_ERROR: Failed to write snapshot: {str(e)}")
+        
+        # Only log if it matches filters
+        if self.matches_filters(output):
+            self.logger.info(f"OUTPUT: {output}")
     
     def log_control_character(self, character: str) -> None:
         """Log a control character sent to the session.
@@ -138,19 +200,24 @@ class ItermLogManager:
     def __init__(
         self,
         log_dir: Optional[str] = None,
-        enable_app_log: bool = True
+        enable_app_log: bool = True,
+        max_snapshot_lines: int = 1000
     ):
         """Initialize the log manager.
         
         Args:
             log_dir: Optional override for the log directory
             enable_app_log: Whether to enable application-level logging
+            max_snapshot_lines: Maximum number of lines to keep in memory for snapshots
         """
         self.log_dir = log_dir or os.path.expanduser("~/.iterm_mcp_logs")
         os.makedirs(self.log_dir, exist_ok=True)
         
         # Dictionary of session loggers
         self.session_loggers: Dict[str, ItermSessionLogger] = {}
+        
+        # Settings
+        self.max_snapshot_lines = max_snapshot_lines
         
         # Set up application logger if enabled
         if enable_app_log:
@@ -235,6 +302,69 @@ class ItermLogManager:
         if hasattr(self, "app_logger"):
             self.app_logger.info(f"{event_type}: {message}")
     
+    def get_snapshot(self, session_id: str) -> Optional[str]:
+        """Get the latest output snapshot for a session.
+        
+        Args:
+            session_id: The session ID
+            
+        Returns:
+            The snapshot contents or None if session not found
+        """
+        if session_id not in self.session_loggers:
+            return None
+            
+        logger = self.session_loggers[session_id]
+        try:
+            if os.path.exists(logger.snapshot_file):
+                with open(logger.snapshot_file, 'r') as f:
+                    return f.read()
+            return None
+        except Exception as e:
+            self.log_app_event("ERROR", f"Failed to read snapshot for session {session_id}: {str(e)}")
+            return None
+            
+    def set_output_filter(self, session_id: str, pattern: str) -> bool:
+        """Set an output filter for a session.
+        
+        Args:
+            session_id: The session ID
+            pattern: The regex pattern to filter by
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if session_id not in self.session_loggers:
+            return False
+            
+        logger = self.session_loggers[session_id]
+        try:
+            logger.add_output_filter(pattern)
+            return True
+        except Exception as e:
+            self.log_app_event("ERROR", f"Failed to set filter for session {session_id}: {str(e)}")
+            return False
+            
+    def clear_output_filters(self, session_id: str) -> bool:
+        """Clear output filters for a session.
+        
+        Args:
+            session_id: The session ID
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if session_id not in self.session_loggers:
+            return False
+            
+        logger = self.session_loggers[session_id]
+        try:
+            logger.clear_output_filters()
+            return True
+        except Exception as e:
+            self.log_app_event("ERROR", f"Failed to clear filters for session {session_id}: {str(e)}")
+            return False
+
     def list_session_logs(self) -> Dict[str, str]:
         """List all session log files.
         
@@ -244,5 +374,17 @@ class ItermLogManager:
         result = {}
         for session_id, logger in self.session_loggers.items():
             result[session_id] = logger.log_file
+        
+        return result
+        
+    def list_session_snapshots(self) -> Dict[str, str]:
+        """List all session snapshot files.
+        
+        Returns:
+            Dictionary mapping session IDs to snapshot file paths
+        """
+        result = {}
+        for session_id, logger in self.session_loggers.items():
+            result[session_id] = logger.snapshot_file
         
         return result
