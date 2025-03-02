@@ -7,9 +7,11 @@ A Python implementation for controlling iTerm2 terminal sessions with support fo
 - Named terminal sessions with persistent identity
 - Multiple pane layouts (single, horizontal split, vertical split, quad, etc.)
 - Command execution and output capture
-- Session status monitoring
-- Log management for sessions
-- Background process execution
+- Real-time session monitoring with callback support
+- Log management with filterable output using regex patterns
+- Live output snapshots for LLM access
+- Multiple session creation and parallel command execution
+- Background process execution and status tracking
 - Control character support (Ctrl+C, etc.)
 
 ## Requirements
@@ -61,6 +63,8 @@ This will:
 
 ### Using in Your Own Scripts
 
+#### Basic Usage
+
 ```python
 import asyncio
 import iterm2
@@ -94,6 +98,59 @@ async def my_script():
 asyncio.run(my_script())
 ```
 
+#### Advanced Features
+
+```python
+import asyncio
+import iterm2
+from iterm_mcp_python.core.terminal import ItermTerminal
+
+async def my_advanced_script():
+    # Connect to iTerm2
+    connection = await iterm2.Connection.async_create()
+    
+    # Initialize terminal
+    terminal = ItermTerminal(connection)
+    await terminal.initialize()
+    
+    # Create multiple sessions with different commands
+    session_configs = [
+        {"name": "Server", "command": "python -m http.server", "monitor": True},
+        {"name": "Logs", "command": "tail -f server.log", "layout": True, "vertical": True},
+        {"name": "Client", "command": "curl localhost:8000", "layout": True, "vertical": False}
+    ]
+    
+    session_map = await terminal.create_multiple_sessions(session_configs)
+    
+    # Get the Server session for monitoring
+    server_session = await terminal.get_session_by_id(session_map["Server"])
+    
+    # Add real-time output handling
+    async def handle_server_output(content):
+        if "GET /" in content:
+            # React to server events
+            client_session = await terminal.get_session_by_id(session_map["Client"])
+            await client_session.send_text("echo 'Detected a GET request!'\n")
+    
+    # Register the callback
+    server_session.add_monitor_callback(handle_server_output)
+    
+    # Add output filtering to Logs session
+    logs_session = await terminal.get_session_by_id(session_map["Logs"])
+    logs_session.logger.add_output_filter(r"ERROR|WARN")  # Only capture errors and warnings
+    
+    # Wait for events
+    while True:
+        await asyncio.sleep(1)
+        # Check snapshot for particular content
+        if terminal.log_manager.get_snapshot(server_session.id):
+            if "Keyboard interrupt received" in terminal.log_manager.get_snapshot(server_session.id):
+                break
+
+# Run the script
+asyncio.run(my_advanced_script())
+```
+
 ## Testing
 
 Run the tests with:
@@ -102,13 +159,35 @@ Run the tests with:
 python -m unittest discover tests
 ```
 
-## Logging
+## Logging and Monitoring
 
 All session activity is logged to `~/.iterm_logs` by default. This includes:
 - Commands sent to sessions
 - Output received from sessions
 - Control characters sent
 - Session lifecycle events (creation, renaming, closure)
+
+### Real-time Monitoring
+
+Sessions can be monitored in real-time using the `start_monitoring()` method. This allows:
+- Capturing output as it happens without polling
+- Setting up custom callbacks for output processing
+- Reacting to terminal events dynamically
+
+### Output Filtering
+
+Log output can be filtered using regex patterns:
+- Only capture specific patterns like errors or warnings
+- Reduce log noise for better analysis
+- Multiple filters can be combined
+
+### Snapshots
+
+Real-time snapshots of terminal output are maintained in snapshot files:
+- Separate from main log files
+- Always contain the latest output
+- Available for LLM or other systems to access
+- Useful for state monitoring without interfering with user interaction
 
 ## License
 
