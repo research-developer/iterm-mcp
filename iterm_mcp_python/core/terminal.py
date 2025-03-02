@@ -428,7 +428,18 @@ class ItermTerminal:
             
             # Start monitoring if requested
             if monitor and session.logger:
-                await session.start_monitoring()
+                try:
+                    await session.start_monitoring(update_interval=0.2)
+                    # Wait to ensure monitoring is fully started
+                    await asyncio.sleep(1)
+                    if not session.is_monitoring:
+                        import logging
+                        logger = logging.getLogger("iterm-terminal")
+                        logger.warning(f"Failed to start monitoring for {session_name}")
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger("iterm-terminal")
+                    logger.error(f"Error starting monitoring for {session_name}: {str(e)}")
                 
             # Execute command if provided
             if command:

@@ -23,20 +23,48 @@
    - Improved error messages with more context
    - Added operation tracking for async functions
 
-### Remaining Issues
-1. **Screen monitoring functionality**:
+### Fixed Issues (March 2025)
+1. ✅ **Screen monitoring functionality**:
    - Replaced subscription-based monitoring with polling-based approach
-   - Still fails in tests - need to investigate why monitoring flag is not being set properly
-   - Monitor task may not be starting correctly or test is ending before monitoring starts
+   - Added async initialization waiting with timeout for monitoring startup
+   - Implemented event-based signaling for monitor task readiness
+   - Updated tests to properly wait for monitoring to be established
+   - Added proper handling of SESSION_NOT_FOUND errors during monitoring
 
-2. **Output filtering**:
-   - Filter callbacks aren't correctly processing messages
-   - Need to investigate why filtered messages aren't being logged
+2. ✅ **Output filtering**:
+   - Fixed line-by-line filtering to correctly process individual output lines
+   - Added debug logging for filtered content
+   - Updated tests to use unique identifiers for more reliable assertions
+   - Added explicit monitoring in filter tests to capture all output
 
-3. **Additional Improvements Needed**:
-   - Implement better retry mechanisms for operations that frequently fail
-   - Create automated recovery for WebSocket disconnections
-   - Fix the test race conditions for monitoring and filtering tests
+3. ✅ **Async stop_monitoring**:
+   - Changed stop_monitoring to async method for proper cleanup
+   - Added graceful shutdown period before cancellation
+   - Implemented proper task completion checking and waiting
+   - Updated all tests to use the async version
+
+4. ✅ **Test race conditions**:
+   - Added retry mechanisms for session operations in tests
+   - Increased wait times for better async operation
+   - Added more detailed error messages in assertions
+   - Implemented proper cleanup in test teardowns
+
+### Remaining Improvements Needed
+
+1. **Automated Recovery for WebSocket Disconnections**:
+   - Implement automatic reconnection when connections are dropped
+   - Add detection of closed WebSocket connections
+   - Create session reacquisition after connection loss
+
+2. **Persistent Session Management**:
+   - Add ability to list available persistent sessions
+   - Implement cleanup of old/inactive persistent sessions
+   - Improve reconnection helpers for specific use cases
+
+3. **Code Organization**:
+   - Refactor common error handling patterns into utility functions
+   - Extract WebSocket management logic for better testability
+   - Standardize event notification patterns across modules
 
 ## Build & Test Commands
 - Build: `cd fetch-mcp && npm run build` (runs TypeScript compiler)

@@ -182,9 +182,15 @@ class ItermSessionLogger:
         except Exception as e:
             self.logger.error(f"SNAPSHOT_ERROR: Failed to write snapshot: {str(e)}")
         
-        # Only log if it matches filters
-        if self.matches_filters(output):
-            self.logger.info(f"OUTPUT: {output}")
+        # Process each line separately for filtering
+        for line in output.split('\n'):
+            if line.strip():  # Skip empty lines
+                # Only log if it matches filters
+                if self.matches_filters(line):
+                    self.logger.info(f"OUTPUT: {line}")
+                else:
+                    # Debug log showing filtered out content
+                    self.logger.debug(f"FILTERED: {line}")
     
     def log_control_character(self, character: str) -> None:
         """Log a control character sent to the session.

@@ -205,17 +205,21 @@ class ItermSession:
         if self._monitoring:
             return
             
-        self._monitoring = True
+        # Initialize monitoring state, but only set to True once we confirm task is running
+        import logging
+        logger = logging.getLogger("iterm-mcp-session")
+        logger.info(f"Setting up monitoring for session {self.id} ({self._name})")
         
         async def monitor_screen_polling():
             """Polling-based screen monitoring as a fallback approach."""
             try:
-                import logging
-                logger = logging.getLogger("iterm-mcp-session")
                 logger.info(f"Starting polling-based screen monitoring for session {self.id}")
                 
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_STARTED", "Polling-based screen monitoring started")
+                
+                # Use a ready event to signal when monitoring is fully initialized
+                monitoring_initialized.set()
                 
                 last_content = await self.get_screen_contents()
                 
@@ -227,13 +231,19 @@ class ItermSession:
                         # Check if content has changed
                         if current_content != last_content:
                             # Process the content through any registered callbacks
+                            callback_tasks = []
                             for callback in self._monitor_callbacks:
                                 # Run each callback in a separate task to prevent blocking
                                 try:
-                                    # Using ensure_future instead of create_task for better compatibility
-                                    asyncio.ensure_future(callback(current_content))
+                                    # Create and track all callback tasks
+                                    task = asyncio.create_task(callback(current_content))
+                                    callback_tasks.append(task)
                                 except Exception as callback_error:
                                     logger.error(f"Error in callback: {str(callback_error)}")
+                            
+                            # Wait for all callbacks to complete
+                            if callback_tasks:
+                                await asyncio.gather(*callback_tasks, return_exceptions=True)
                             
                             # Update last content and timestamp
                             last_content = current_content
@@ -242,7 +252,17 @@ class ItermSession:
                         # Sleep to prevent excessive CPU usage
                         await asyncio.sleep(update_interval)
                     except Exception as poll_error:
-                        logger.error(f"Error in polling loop: {str(poll_error)}")
+                        # Special handling for SESSION_NOT_FOUND - expected when session is closed
+                        if "SESSION_NOT_FOUND" in str(poll_error):
+                            if self._monitoring:
+                                # Only log at debug level since this is expected during cleanup
+                                logger.debug(f"Session no longer available during monitoring (likely closed): {self.id}")
+                                # Signal to exit the monitoring loop
+                                self._monitoring = False
+                                return
+                        else:
+                            # Log any other errors as actual errors
+                            logger.error(f"Error in polling loop: {str(poll_error)}")
                         await asyncio.sleep(update_interval)
             except asyncio.CancelledError:
                 logger.info(f"Polling monitor task cancelled for session {self.id}")
@@ -255,19 +275,62 @@ class ItermSession:
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_STOPPED", "Screen monitoring stopped")
         
+        # Create an event to signal when monitoring is fully initialized
+        monitoring_initialized = asyncio.Event()
+        
+        # Start monitoring flag
+        self._monitoring = True
+        
         # Use polling-based approach instead of subscription-based approach
         # to avoid WebSocket frame errors
         self._monitor_task = asyncio.create_task(monitor_screen_polling())
         
-    def stop_monitoring(self) -> None:
-        """Stop monitoring the screen for changes."""
+        # Wait for the monitoring to be properly initialized before returning
+        try:
+            await asyncio.wait_for(monitoring_initialized.wait(), timeout=3.0)
+            logger.info(f"Monitoring successfully started for session {self.id}")
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout waiting for monitoring to initialize for session {self.id}")
+            # If initialization times out, clean up
+            self._monitoring = False
+            if not self._monitor_task.done():
+                self._monitor_task.cancel()
+            self._monitor_task = None
+            raise RuntimeError("Timeout waiting for monitoring to initialize")
+        
+    async def stop_monitoring(self) -> None:
+        """Stop monitoring the screen for changes and ensure callbacks are completed."""
+        import logging
+        logger = logging.getLogger("iterm-mcp-session")
+        
         if not self._monitoring or not self._monitor_task:
+            logger.info(f"Monitoring already stopped for session {self.id}")
             return
-            
+        
+        logger.info(f"Stopping monitoring for session {self.id}")
+        # Set monitoring flag to False first to signal the loop to exit
         self._monitoring = False
+        
+        # Cancel the task if it's still running
         if not self._monitor_task.done():
-            self._monitor_task.cancel()
+            try:
+                # Wait a short time for graceful shutdown
+                await asyncio.sleep(0.2)
+                # Cancel if still running after grace period
+                if not self._monitor_task.done():
+                    logger.info(f"Cancelling monitor task for session {self.id}")
+                    self._monitor_task.cancel()
+                    # Wait for cancellation to complete
+                    try:
+                        await asyncio.wait_for(self._monitor_task, timeout=1.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+            except Exception as e:
+                logger.error(f"Error stopping monitoring for session {self.id}: {str(e)}")
+        
+        # Cleanup
         self._monitor_task = None
+        logger.info(f"Monitoring stopped for session {self.id}")
         
     def add_monitor_callback(self, callback: Callable[[str], None]) -> None:
         """Add a callback to be called when the screen changes.
@@ -289,8 +352,17 @@ class ItermSession:
             
     @property
     def is_monitoring(self) -> bool:
-        """Check if the session is being monitored."""
-        return self._monitoring
+        """Check if the session is being monitored.
+        
+        Returns True if monitoring is active (flag is set AND task is running)
+        """
+        # Check both the flag and that the task exists and is not done
+        monitoring_active = (
+            self._monitoring and 
+            self._monitor_task is not None and 
+            not self._monitor_task.done()
+        )
+        return monitoring_active
         
     @property
     def last_update_time(self) -> float:

@@ -1,0 +1,20 @@
+I need you to investigate and fix issues in our iTerm MCP server. The server has several problems:
+
+1. "No close frame received or sent" errors in async functions
+2. Parameter mismatch in create_layout (using session_names instead of pane_names)
+3. Missing attribute issue ('Session' object has no attribute 'is_processing')
+
+I've already started implementing fixes:
+- Parameter mismatch in create_layout has been fixed
+- Added error handling in focus_session and write_to_terminal functions
+- Added is_processing property with error handling to the ItermSession class
+
+However, we still need to fix issues related to WebSocket frame handling and screen monitoring functionality. 
+
+Please analyze the following issues and recommend solutions:
+
+1. How to properly handle WebSocket connections to prevent "No close frame received or sent" errors
+2. Why the screen monitoring functionality is failing in tests
+3. Best practices for async function error handling in this context
+
+Please include your analysis and recommendations inside <LLM-INGEST></LLM-INGEST> tags so I can easily extract your key findings.
