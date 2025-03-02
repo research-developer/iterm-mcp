@@ -15,7 +15,7 @@ dependencies = [
     "iterm2>=2.7",
     "pyzmq>=25.0.0",
     "pyyaml>=6.0",
-    "modelcontextprotocol>=0.6.0"
+    "mcp>=1.3.0"
 ]
 
 [project.optional-dependencies]
@@ -28,6 +28,7 @@ dev = [
 
 [project.scripts]
 iterm-mcp = "iterm_mcp_python.server.main:main"
+iterm-mcp-server = "iterm_mcp_python.server.mcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}
