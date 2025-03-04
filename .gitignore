@@ -3,3 +3,4 @@ build/
 *.log
 .env*
 tmp
+**/.DS_Store
