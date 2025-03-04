@@ -45,7 +45,7 @@ def start_server() -> Optional[subprocess.Popen]:
     try:
         # Start the server in the background
         process = subprocess.Popen(
-            [sys.executable, "-m", "iterm_mcp_python.server.main"],
+            [sys.executable, "-m", "server.main"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True  # Detach from parent process
@@ -123,7 +123,7 @@ def install_claude_desktop_config() -> Tuple[bool, str]:
             "command": python_path,
             "args": [
                 "-m",
-                "iterm_mcp_python.server.main"
+                "server.main"
             ]
         }
         
@@ -154,35 +154,15 @@ def main():
         print("✅ iTerm MCP Server is already running")
     else:
         print("❌ iTerm MCP Server is not running")
-        start_now = input("Would you like to start it now? (y/n): ").lower().strip() == 'y'
-        
-        if start_now:
-            print("Starting iTerm MCP Server...")
-            server_process = start_server()
-            
-            if server_process and is_server_running():
-                print("✅ iTerm MCP Server started successfully")
-                
-                # Register cleanup handler for when this script exits
-                def cleanup_on_exit():
-                    print("Leaving server running in background")
-                    print("To stop it later, run: pkill -f 'python -m iterm_mcp_python.server.main'")
-                
-                # Register the atexit handler
-                import atexit
-                atexit.register(cleanup_on_exit)
-            else:
-                print("❌ Failed to start iTerm MCP Server")
-                print("Please run it manually in a separate terminal window:")
-                print("  python -m iterm_mcp_python.server.main")
-        else:
-            print("\nIMPORTANT: Remember to start the server before using it with Claude Desktop:")
-            print("  python -m iterm_mcp_python.server.main")
+        print("IMPORTANT: Remember to start the server before using it with Claude Desktop:")
+        print("  python -m server.main")
+        print("")
+        print("To start it now, run the server in a separate terminal window.")
     
     print("\n✅ Configuration installed successfully in Claude Desktop")
     print("You can now use the 'iTerm Terminal Controller' in Claude Desktop")
     print("\nIf you encounter connection errors when using the controller, run:")
-    print("  python -m iterm_mcp_python.server.main")
+    print("  python -m server.main")
     print("\nMake sure to keep the server running while using the controller.")
     return 0
 
@@ -201,8 +181,8 @@ def handle_server_error(error_msg):
             print("However, the server port seems to be active.")
             print("This may indicate a different issue with the connection.")
             print("Try restarting the server:")
-            print("  1. Kill the existing server: pkill -f 'python -m iterm_mcp_python.server.main'")
-            print("  2. Start a new server: python -m iterm_mcp_python.server.main")
+            print("  1. Kill the existing server: pkill -f 'python -m server.main'")
+            print("  2. Start a new server: python -m server.main")
         else:
             print("Starting the server now...")
             server_process = start_server()
@@ -213,7 +193,7 @@ def handle_server_error(error_msg):
             else:
                 print("❌ Failed to automatically start the server")
                 print("Please run the server manually in a new terminal window:")
-                print("  python -m iterm_mcp_python.server.main")
+                print("  python -m server.main")
     else:
         print(f"Unknown error: {error_msg}")
         print("If this persists, check the server logs for more information")
