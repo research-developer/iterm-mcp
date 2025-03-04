@@ -17,16 +17,19 @@ A Python implementation for controlling iTerm2 terminal sessions with support fo
 
 ## Requirements
 
-- Python 3.7+
+- Python 3.8+
 - iTerm2 3.3+ with Python API enabled
+- MCP Python SDK (1.3.0+)
 
 ## Installation
 
 1. Clone this repository
 2. Install dependencies:
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
+
+This will install the package with all required dependencies, including the MCP Python SDK.
 
 ## Project Structure
 
@@ -40,9 +43,11 @@ iterm-mcp/
     │   ├── session.py            # iTerm session management
     │   ├── terminal.py           # Terminal window/tab management
     │   └── layouts.py            # Predefined layouts
-    ├── server/                   # Demo implementation
+    ├── server/                   # Server implementations
     │   ├── __init__.py
-    │   └── main.py               # Main demo entry point
+    │   ├── main.py               # Entry point with option selection
+    │   ├── mcp_server.py         # Legacy MCP server implementation
+    │   └── fastmcp_server.py     # New FastMCP implementation
     └── utils/                    # Utility functions
         ├── __init__.py
         └── logging.py            # Logging utilities
@@ -50,17 +55,61 @@ iterm-mcp/
 
 ## Usage
 
-### Running the Demo
+### MCP Integration with the Official Python SDK
+
+We provide two server implementations:
+1. **FastMCP Implementation** (recommended) - Uses the official MCP Python SDK
+2. **Legacy Implementation** - Custom MCP server implementation (for backward compatibility)
+
+### Running the MCP Server
 
 ```bash
+# Run the FastMCP server (recommended)
 python -m iterm_mcp_python.server.main
+
+# Run the legacy MCP server
+python -m iterm_mcp_python.server.main --legacy
+
+# Run the demo (not MCP server)
+python -m iterm_mcp_python.server.main --demo
+
+# Enable debug logging
+python -m iterm_mcp_python.server.main --debug
 ```
 
-This will:
-1. Create a new window with a horizontal split layout
-2. Send commands to both panes
-3. Show the output from each pane
-4. Demonstrate focus switching between panes
+### Installing the MCP Server for Claude Desktop
+
+You can install the server in Claude Desktop using the MCP CLI:
+
+```bash
+# Install FastMCP server for Claude Desktop
+mcp install -m iterm_mcp_python.server.fastmcp_server
+
+# Or install directly (after pip install)
+iterm-mcp-fastmcp
+```
+
+### Debugging with MCP Inspector
+
+For development and debugging, you can use the MCP Inspector:
+
+```bash
+mcp dev -m iterm_mcp_python.server.fastmcp_server
+```
+
+### Important Implementation Notes
+
+1. **Process Termination**:  
+   The server uses SIGKILL for termination to prevent hanging on exit. This ensures clean exit but bypasses Python's normal cleanup process. If you're developing and need proper cleanup, modify the signal handler in `main.py`.
+
+2. **New FastMCP API**:  
+   The FastMCP implementation uses the decorator-based API from the official MCP Python SDK. Tools are defined with `@mcp.tool()`, resources with `@mcp.resource()`, and prompts with `@mcp.prompt()`.
+
+3. **Lifespan Management**:  
+   The FastMCP implementation uses the lifespan API to properly initialize and clean up iTerm2 connections. The lifespan context provides access to the terminal, layout manager, and logger.
+
+4. **WebSocket Handling**:  
+   The FastMCP implementation uses the official SDK which properly handles WebSocket frames, fixing the "no close frame received or sent" error that previously occurred.
 
 ### Using in Your Own Scripts
 
@@ -191,6 +240,33 @@ async def my_advanced_script():
 # Run the script
 asyncio.run(my_advanced_script())
 ```
+
+## MCP Tools and Resources
+
+The FastMCP implementation provides the following:
+
+### Tools
+- `list_sessions` - List all available terminal sessions
+- `focus_session` - Focus on a specific terminal session
+- `create_layout` - Create a new terminal layout with named sessions
+- `write_to_terminal` - Write a command to a terminal session
+- `read_terminal_output` - Read output from a terminal session
+- `send_control_character` - Send a control character to a terminal session
+- `check_session_status` - Check if a session is currently processing a command
+- `get_session_by_persistent_id` - Get a session by its persistent ID
+- `set_session_max_lines` - Set the maximum number of lines to retrieve for a session
+- `start_monitoring_session` - Start real-time monitoring for a terminal session
+- `stop_monitoring_session` - Stop real-time monitoring for a terminal session
+- `list_persistent_sessions` - List all persistent sessions available for reconnection
+
+### Resources
+- `terminal://{session_id}/output` - Get the output from a terminal session
+- `terminal://{session_id}/info` - Get information about a terminal session
+- `terminal://sessions` - Get a list of all terminal sessions
+
+### Prompts
+- `monitor_terminal` - Prompt for monitoring a terminal session
+- `execute_command` - Prompt for executing a command and analyzing the output
 
 ## Testing
 

@@ -277,7 +277,22 @@ python -m modelcontextprotocol_inspector iterm_mcp_python.server.main
 - Improved logging with more detailed information about errors and operations
 - Added comprehensive try/except blocks to all critical functions
 
-### 3. Testing Status
+### 3. FastMCP Implementation
+- Created new implementation using the official MCP Python SDK
+- Converted all existing tools to use the FastMCP decorator-based syntax
+- Added resources for terminal output and info using URI patterns
+- Added prompts for monitoring and command execution
+- Implemented proper lifespan management for iTerm2 connections
+- Fixed WebSocket close frame issues by using the official SDK
+
+### 4. Process Termination
+- Fixed server hanging on Ctrl+C by using aggressive termination
+- Implemented custom signal handler that uses SIGKILL for immediate termination
+- Bypasses Python's threading shutdown to avoid hanging issues
+- Note: This approach prevents cleanup of resources but ensures reliable exit
+
+### 5. Testing Status
 - Basic functionality tests are passing
 - Advanced features tests still have 2 failures related to monitoring and filtering
-- Next focus should be on fixing the race conditions in these tests and ensuring monitoring starts/stops correctly
+- Need additional tests for the FastMCP implementation
+- Next focus should be on creating tests for the new implementation

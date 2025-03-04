@@ -1,9 +1,11 @@
 """Main entry point for the iTerm controller."""
 
+import sys
+import os
+import argparse
 import asyncio
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional, Union
 
 import iterm2
@@ -14,7 +16,7 @@ from ..core.terminal import ItermTerminal
 
 
 class ItermController:
-    """iTerm2 terminal controller implementation."""
+    """iTerm2 terminal controller implementation (legacy demo)."""
 
     def __init__(self):
         """Initialize the controller."""
@@ -143,7 +145,7 @@ class ItermController:
             
             # Stop monitoring on Command session
             if command_session.is_monitoring:
-                command_session.stop_monitoring()
+                await command_session.stop_monitoring()
                 self.logger.info("Stopped monitoring Command session")
             
             self.logger.info("Advanced demo completed successfully!")
@@ -152,19 +154,72 @@ class ItermController:
 
 
 async def async_main():
-    """Async entry point for the controller."""
+    """Async entry point for the controller (legacy demo)."""
     controller = ItermController()
     await controller.start()
 
 
 def main():
     """Main entry point."""
+    import sys
+    import os
+    import signal
+    
+    # Very aggressive signal handler that immediately terminates the process
+    def force_exit_handler(sig, frame):
+        # Print notice to stderr (will be flushed immediately)
+        sys.stderr.write("\niTerm MCP server stopped\n")
+        sys.stderr.flush()
+        
+        # Kill the process immediately with SIGKILL
+        # This is the most reliable way to exit and bypasses Python's shutdown
+        os.kill(os.getpid(), signal.SIGKILL)
+    
+    # Register for SIGINT (Ctrl+C)
+    signal.signal(signal.SIGINT, force_exit_handler)
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="iTerm MCP Server")
+    parser.add_argument(
+        "--demo", 
+        action="store_true", 
+        help="Run the demo controller instead of the MCP server"
+    )
+    parser.add_argument(
+        "--legacy", 
+        action="store_true", 
+        help="Use legacy MCP server implementation instead of FastMCP"
+    )
+    parser.add_argument(
+        "--debug", 
+        action="store_true", 
+        help="Enable debug logging"
+    )
+    args = parser.parse_args()
+    
+    if args.debug:
+        import logging
+        logging.basicConfig(level=logging.DEBUG)
+    
     try:
-        asyncio.run(async_main())
-    except KeyboardInterrupt:
-        print("Controller stopped by user")
+        if args.demo:
+            # Run the demo controller
+            asyncio.run(async_main())
+        elif args.legacy:
+            # Use the old implementation for backward compatibility
+            from .mcp_server import ItermMCPServer
+            server = ItermMCPServer()
+            server.run()
+        else:
+            # Use the new FastMCP implementation (default)
+            from .fastmcp_server import main as fastmcp_main
+            fastmcp_main()
     except Exception as e:
-        print(f"Error running controller: {e}")
+        # We shouldn't reach this for KeyboardInterrupt due to signal handler
+        if not isinstance(e, KeyboardInterrupt):
+            sys.stderr.write(f"Error running iTerm MCP server: {str(e)}\n")
+        # Force exit
+        os._exit(1)
 
 
 if __name__ == "__main__":
