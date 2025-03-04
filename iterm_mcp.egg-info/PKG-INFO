@@ -1,3 +1,13 @@
+Metadata-Version: 2.1
+Name: iterm-mcp
+Version: 0.1.0
+Summary: Model Context Protocol (MCP) server for iTerm2
+Author-email: Ferris Lucas <ferrislucas@github.com>
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+License-File: LICENSE.md
+
 # iTerm MCP
 
 A Python implementation for controlling iTerm2 terminal sessions with support for multiple panes and layouts. This implementation uses the iTerm2 Python API for improved reliability and functionality.
