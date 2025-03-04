@@ -79,14 +79,28 @@ python -m iterm_mcp_python.server.main --debug
 
 ### Installing the MCP Server for Claude Desktop
 
-You can install the server in Claude Desktop using the MCP CLI:
+We provide a script to install the server in Claude Desktop:
 
 ```bash
-# Install FastMCP server for Claude Desktop
-mcp install -m iterm_mcp_python.server.fastmcp_server
+# Run the installation script
+python install_claude_desktop.py
+```
 
-# Or install directly (after pip install)
-iterm-mcp-fastmcp
+This will:
+1. Register the server in Claude Desktop's configuration
+2. Check if the server is already running
+3. Offer to start the server if it's not running
+
+**IMPORTANT**: You must have the server running in a separate terminal window while using it with Claude Desktop. The server won't start automatically when Claude Desktop launches.
+
+To start the server manually:
+```bash
+python -m iterm_mcp_python.server.main
+```
+
+If you encounter connection errors in Claude Desktop, you can diagnose them with:
+```bash
+python install_claude_desktop.py --check-error "your error message"
 ```
 
 ### Debugging with MCP Inspector
@@ -110,6 +124,9 @@ mcp dev -m iterm_mcp_python.server.fastmcp_server
 
 4. **WebSocket Handling**:  
    The FastMCP implementation uses the official SDK which properly handles WebSocket frames, fixing the "no close frame received or sent" error that previously occurred.
+
+5. **Port Selection**:  
+   The server uses port range 12340-12349 to avoid conflicts with common services. It automatically tries the next port in the range if one is busy.
 
 ### Using in Your Own Scripts
 
@@ -141,8 +158,13 @@ async def my_script():
     terminal_session = await terminal.get_session_by_name("Terminal")
     
     # Send commands to sessions
-    await code_session.send_text("vim myfile.py\n")
-    await terminal_session.send_text("python -m http.server\n")
+    await code_session.send_text("vim myfile.py", execute=True)
+    await terminal_session.send_text("python -m http.server", execute=True)
+    
+    # Type text without executing (for CLIs with prompts)
+    await code_session.send_text("i", execute=False)  # Enter insert mode in vim
+    await code_session.send_text("print('Hello, world!')", execute=False)
+    await code_session.send_special_key("escape")  # Switch to command mode
 
 # Run the script
 asyncio.run(my_script())
@@ -249,9 +271,10 @@ The FastMCP implementation provides the following:
 - `list_sessions` - List all available terminal sessions
 - `focus_session` - Focus on a specific terminal session
 - `create_layout` - Create a new terminal layout with named sessions
-- `write_to_terminal` - Write a command to a terminal session
+- `write_to_terminal` - Write a command to a terminal session (with option to type without executing)
 - `read_terminal_output` - Read output from a terminal session
-- `send_control_character` - Send a control character to a terminal session
+- `send_control_character` - Send a control character to a terminal session (Ctrl+C, Ctrl+D, etc.)
+- `send_special_key` - Send a special key to a terminal session (Enter, Tab, Escape, Arrow keys, etc.)
 - `check_session_status` - Check if a session is currently processing a command
 - `get_session_by_persistent_id` - Get a session by its persistent ID
 - `set_session_max_lines` - Set the maximum number of lines to retrieve for a session

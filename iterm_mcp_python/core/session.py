@@ -118,19 +118,28 @@ class ItermSession:
         if self.logger:
             self.logger.log_session_renamed(name)
     
-    async def send_text(self, text: str) -> None:
+    async def send_text(self, text: str, execute: bool = True) -> None:
         """Send text to the session.
         
         Args:
             text: The text to send
+            execute: Whether to execute the text as a command by sending Enter
         """
-        await self.session.async_send_text(text)
+        # Strip any trailing newlines/carriage returns to avoid double execution
+        clean_text = text.rstrip("\r\n")
+        
+        # Send the text first
+        await self.session.async_send_text(clean_text)
+        
+        # Send Enter/Return key to execute if requested
+        if execute:
+            # Wait a tiny bit to ensure text is processed before Enter
+            await asyncio.sleep(0.05)
+            await self.session.async_send_text("\r")
         
         # Log the command
         if self.logger:
-            # If text ends with newline, it's likely a command
-            if text.endswith("\n") or text.endswith("\r"):
-                self.logger.log_command(text.rstrip("\r\n"))
+            self.logger.log_command(clean_text)
     
     async def get_screen_contents(self, max_lines: Optional[int] = None) -> str:
         """Get the contents of the session's screen.
@@ -183,6 +192,42 @@ class ItermSession:
         # Log the control character
         if self.logger:
             self.logger.log_control_character(character)
+    
+    async def send_special_key(self, key: str) -> None:
+        """Send a special key to the session.
+        
+        Args:
+            key: The special key name ('enter', 'return', 'tab', 'escape', etc.)
+        """
+        key = key.lower()
+        
+        # Map special key names to their character sequences
+        key_map = {
+            'enter': '\r',
+            'return': '\r',
+            'tab': '\t',
+            'escape': '\x1b',
+            'esc': '\x1b',
+            'space': ' ',
+            'backspace': '\x7f',
+            'delete': '\x1b[3~',
+            'up': '\x1b[A',
+            'down': '\x1b[B',
+            'right': '\x1b[C',
+            'left': '\x1b[D',
+            'home': '\x1b[H',
+            'end': '\x1b[F'
+        }
+        
+        if key not in key_map:
+            raise ValueError(f"Unknown special key: {key}. Supported keys: {', '.join(key_map.keys())}")
+        
+        sequence = key_map[key]
+        await self.session.async_send_text(sequence)
+        
+        # Log the special key
+        if self.logger:
+            self.logger.log_custom_event("SPECIAL_KEY", f"Sent special key: {key}")
     
     async def clear_screen(self) -> None:
         """Clear the screen."""

@@ -98,7 +98,10 @@ mcp = FastMCP(
     name="iTerm2 Controller",
     description="Control iTerm2 terminal sessions, execute commands, and capture outputs",
     lifespan=iterm_lifespan,
-    dependencies=["iterm2", "asyncio"]
+    dependencies=["iterm2", "asyncio"],
+    host="localhost",
+    port=12340,  # Starting with less common port 12340
+    port_range=10  # Try ports 12340-12349 if the first one is busy
 )
 
 
@@ -236,7 +239,8 @@ async def write_to_terminal(
     session_identifier: str, 
     command: str,
     ctx: Context,
-    wait_for_prompt: bool = False
+    wait_for_prompt: bool = False,
+    execute: bool = True
 ) -> str:
     """Write a command to a terminal session.
     
@@ -244,12 +248,13 @@ async def write_to_terminal(
         session_identifier: Session name, ID, or persistent ID
         command: The command to write
         wait_for_prompt: Whether to wait for the command prompt to appear
+        execute: Whether to execute the command by sending Enter after it (set to False to just type without executing)
     """
     terminal = ctx.request_context.lifespan_context["terminal"]
     logger = ctx.request_context.lifespan_context["logger"]
     
     try:
-        logger.info(f"Writing to session: {session_identifier}, command: {command[:20]}...")
+        logger.info(f"Writing to session: {session_identifier}, command: {command[:20]}..., execute: {execute}")
         
         # Find the session
         session = None
@@ -276,28 +281,25 @@ async def write_to_terminal(
             await ctx.error(error_msg)
             return error_msg
         
-        # Add a newline if not present
-        if not command.endswith("\n"):
-            command += "\n"
-        
         # Check if session has is_processing attribute
         if not hasattr(session, 'is_processing'):
             logger.warning(f"Session {session.name} does not have is_processing attribute")
             # Add a default attribute
             session.is_processing = False
         
-        # Send the command
+        # Send the command with execute option
         try:
-            await session.send_text(command)
-            logger.info(f"Command sent to session: {session.name}")
+            await session.send_text(command, execute=execute)
+            action = "executed" if execute else "typed"
+            logger.info(f"Command {action} in session: {session.name}")
         except Exception as send_error:
             error_msg = f"Error sending command: {str(send_error)}"
             logger.error(error_msg)
             await ctx.error(error_msg)
             return error_msg
         
-        # Wait for prompt if requested
-        if wait_for_prompt:
+        # Wait for prompt if requested and if we're executing the command
+        if wait_for_prompt and execute:
             await ctx.info("Waiting for command to complete...")
             try:
                 # Simple prompt detection by waiting and checking if processing is done
@@ -318,7 +320,8 @@ async def write_to_terminal(
                 logger.error(f"Error waiting for prompt: {str(wait_error)}")
                 await ctx.error(f"Error waiting for prompt: {str(wait_error)}")
         
-        return f"Command sent to session: {session.name}"
+        action = "executed" if execute else "typed"
+        return f"Command {action} in session: {session.name}"
     except Exception as e:
         error_msg = f"Error in write_to_terminal: {str(e)}"
         logger.error(error_msg)
@@ -405,6 +408,48 @@ async def send_control_character(
         return f"Control character Ctrl+{control_char.upper()} sent to session: {session.name}"
     except Exception as e:
         error_msg = f"Error sending control character: {str(e)}"
+        logger.error(error_msg)
+        await ctx.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def send_special_key(
+    session_identifier: str,
+    key: str,
+    ctx: Context
+) -> str:
+    """Send a special key to a terminal session.
+    
+    Args:
+        session_identifier: Session name, ID, or persistent ID
+        key: Special key to send ('enter', 'return', 'tab', 'escape', 'up', 'down', etc.)
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    logger = ctx.request_context.lifespan_context["logger"]
+    
+    try:
+        logger.info(f"Sending special key '{key}' to session: {session_identifier}")
+        
+        # Find the session
+        session = await terminal.get_session_by_id(session_identifier)
+        if not session:
+            session = await terminal.get_session_by_name(session_identifier)
+        if not session:
+            session = await terminal.get_session_by_persistent_id(session_identifier)
+            
+        if not session:
+            error_msg = f"No session found with identifier: {session_identifier}"
+            logger.warning(error_msg)
+            await ctx.error(error_msg)
+            return error_msg
+            
+        # Send the special key
+        await session.send_special_key(key)
+        logger.info(f"Special key '{key}' sent to session: {session.name}")
+        return f"Special key '{key}' sent to session: {session.name}"
+    except Exception as e:
+        error_msg = f"Error sending special key: {str(e)}"
         logger.error(error_msg)
         await ctx.error(error_msg)
         return error_msg
