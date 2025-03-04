@@ -7,9 +7,9 @@ import time
 
 import iterm2
 
-from iterm_mcp_python.core.terminal import ItermTerminal
-from iterm_mcp_python.core.layouts import LayoutManager, LayoutType
-from iterm_mcp_python.core.session import ItermSession
+from core.terminal import ItermTerminal
+from core.layouts import LayoutManager, LayoutType
+from core.session import ItermSession
 
 
 class TestBasicFunctionality(unittest.TestCase):

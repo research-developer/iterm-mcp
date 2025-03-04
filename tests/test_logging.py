@@ -9,10 +9,10 @@ import time
 
 import iterm2
 
-from iterm_mcp_python.core.terminal import ItermTerminal
-from iterm_mcp_python.core.layouts import LayoutManager, LayoutType
-from iterm_mcp_python.core.session import ItermSession
-from iterm_mcp_python.utils.logging import ItermLogManager, ItermSessionLogger
+from core.terminal import ItermTerminal
+from core.layouts import LayoutManager, LayoutType
+from core.session import ItermSession
+from utils.logging import ItermLogManager, ItermSessionLogger
 
 
 class TestLogging(unittest.TestCase):

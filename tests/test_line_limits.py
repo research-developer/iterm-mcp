@@ -9,9 +9,9 @@ import time
 
 import iterm2
 
-from iterm_mcp_python.core.terminal import ItermTerminal
-from iterm_mcp_python.core.session import ItermSession
-from iterm_mcp_python.utils.logging import ItermLogManager
+from core.terminal import ItermTerminal
+from core.session import ItermSession
+from utils.logging import ItermLogManager
 
 
 class TestLineLimits(unittest.TestCase):
