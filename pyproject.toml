@@ -27,13 +27,13 @@ dev = [
 ]
 
 [project.scripts]
-iterm-mcp = "iterm_mcp_python.server.main:main"
-iterm-mcp-server = "iterm_mcp_python.server.mcp_server:main"
-iterm-mcp-fastmcp = "iterm_mcp_python.server.fastmcp_server:main"
+iterm-mcp = "server.main:main"
+iterm-mcp-server = "server.mcp_server:main"
+iterm-mcp-fastmcp = "server.fastmcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}
-packages = ["iterm_mcp_python"]
+packages = ["core", "server", "utils"]
 
 [tool.black]
 line-length = 88
