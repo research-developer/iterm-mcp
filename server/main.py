@@ -213,7 +213,16 @@ def main():
         else:
             # Use the new FastMCP implementation (default)
             from .fastmcp_server import main as fastmcp_main
+            # Add a signal handler to keep the server running until interrupted
+            print("Starting iTerm MCP server. Press Ctrl+C to stop.")
             fastmcp_main()
+            # Keep the server running by sleeping indefinitely
+            try:
+                while True:
+                    import time
+                    time.sleep(10)
+            except KeyboardInterrupt:
+                print("\nServer stopped by user.")
     except Exception as e:
         # We shouldn't reach this for KeyboardInterrupt due to signal handler
         if not isinstance(e, KeyboardInterrupt):
