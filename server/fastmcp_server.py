@@ -96,12 +96,9 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 # Create an MCP server
 mcp = FastMCP(
     name="iTerm2 Controller",
-    description="Control iTerm2 terminal sessions, execute commands, and capture outputs",
+    instructions="Control iTerm2 terminal sessions, execute commands, and capture outputs",
     lifespan=iterm_lifespan,
-    dependencies=["iterm2", "asyncio"],
-    host="localhost",
-    port=12340,  # Starting with less common port 12340
-    port_range=10  # Try ports 12340-12349 if the first one is busy
+    dependencies=["iterm2", "asyncio"]
 )
 
 

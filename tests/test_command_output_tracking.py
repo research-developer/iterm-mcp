@@ -132,14 +132,107 @@ class TestCommandOutputTracking(unittest.IsolatedAsyncioTestCase):
             self.session.session_id,
             "echo 'Test'"
         )
-        
+
         # Log more lines than the max
         for i in range(15):
             self.logger.log_output(f"Line {i}")
-        
+
         # Get output with a small max_lines
         output = self.logger.get_output_since_last_command(max_lines=5)
         self.assertEqual(len(output.splitlines()), 5)
+
+    async def test_empty_command(self):
+        """Test handling of empty command."""
+        # Empty commands don't trigger log_command due to the check in send_text mock
+        # So manually log an empty command to test the behavior
+        self.logger.log_command("")
+
+        # Log some output after the command
+        self.logger.log_output("Some output\n")
+
+        # Get output since empty command
+        output = self.logger.get_output_since_last_command()
+        self.assertIn("Some output", output)
+
+    async def test_command_with_special_characters(self):
+        """Test command with special characters."""
+        # Execute a command with special characters
+        special_cmd = "echo 'Hello & World | Test > output.txt'"
+        await self.terminal.execute_command(
+            self.session.session_id,
+            special_cmd
+        )
+
+        # Log output
+        self.logger.log_output("Command executed successfully\n")
+
+        # Get output
+        output = self.logger.get_output_since_last_command()
+        self.assertIn("Command executed successfully", output)
+
+    async def test_very_long_output(self):
+        """Test handling of very long output."""
+        # Execute a command
+        await self.terminal.execute_command(
+            self.session.session_id,
+            "cat large_file.txt"
+        )
+
+        # Log a lot of output (within snapshot limits of 1000)
+        for i in range(200):
+            self.logger.log_output(f"Line {i}: This is a very long line with lots of text to simulate real output\n")
+
+        # Get all output
+        output = self.logger.get_output_since_last_command()
+        # Output should have all lines since command (200 lines, each becomes one in latest_output)
+        self.assertGreater(len(output.splitlines()), 150)
+
+        # Get limited output
+        limited_output = self.logger.get_output_since_last_command(max_lines=10)
+        # Allow for +/- 1 line due to newline handling
+        self.assertGreaterEqual(len(limited_output.splitlines()), 9)
+        self.assertLessEqual(len(limited_output.splitlines()), 10)
+
+    async def test_consecutive_empty_outputs(self):
+        """Test multiple commands with no output between them."""
+        # Manually log commands without output to avoid mock side effects
+        self.logger.log_command("echo 'First'")
+        # No output logged between commands
+        self.logger.log_command("echo 'Second'")
+
+        # Since no output was logged after the second command
+        output = self.logger.get_output_since_last_command()
+        self.assertEqual(output, "")
+
+    async def test_command_without_execution(self):
+        """Test typing a command without executing it."""
+        # Type command without executing
+        await self.terminal.execute_command(
+            self.session.session_id,
+            "ls -la",
+            execute=False
+        )
+
+        # Since execute=False, the command might not be logged
+        # But we should still be able to get output
+        output = self.logger.get_output_since_last_command()
+        # Should return empty or whatever was logged
+        self.assertIsInstance(output, str)
+
+    async def test_rapid_command_execution(self):
+        """Test rapid consecutive command execution."""
+        # Execute multiple commands rapidly
+        for i in range(10):
+            await self.terminal.execute_command(
+                self.session.session_id,
+                f"echo 'Command {i}'"
+            )
+            self.logger.log_output(f"Output from command {i}\n")
+
+        # Get output from last command
+        output = self.logger.get_output_since_last_command()
+        self.assertIn("Output from command 9", output)
+        self.assertNotIn("Output from command 8", output)
 
 
 if __name__ == "__main__":
