@@ -1,4 +1,0 @@
-[console_scripts]
-iterm-mcp = server.main:main
-iterm-mcp-fastmcp = server.fastmcp_server:main
-iterm-mcp-server = server.mcp_server:main

@@ -376,11 +376,30 @@ class ItermTerminal:
         
         # Close the session
         await session.session.async_close()
-        
+
         # Remove from our sessions dictionary
         if session_id in self.sessions:
             del self.sessions[session_id]
-            
+
+    async def execute_command(self, session_id: str, command: str, execute: bool = True) -> None:
+        """Execute a command in a session.
+
+        Args:
+            session_id: The ID of the session to execute the command in
+            command: The command to execute
+            execute: Whether to execute the command by sending Enter (default: True)
+
+        Raises:
+            ValueError: If the session is not found
+        """
+        # Get the session
+        session = await self.get_session_by_id(session_id)
+        if not session:
+            raise ValueError(f"Session with ID {session_id} not found")
+
+        # Send the command to the session
+        await session.send_text(command, execute=execute)
+
     async def create_multiple_sessions(self, configs: List[Dict[str, Any]]) -> Dict[str, str]:
         """Create multiple sessions with different initial commands.
         
