@@ -140,7 +140,46 @@ class ItermSession:
         # Log the command
         if self.logger:
             self.logger.log_command(clean_text)
-    
+
+    async def execute_command(self, command: str, use_encoding: bool = True) -> None:
+        """Execute a command in the session using smart encoding.
+
+        This method handles complex commands with quotes and special characters
+        by encoding them to avoid shell parsing issues.
+
+        Args:
+            command: The command to execute (raw, unencoded)
+            use_encoding: Whether to use base64 encoding (default: True)
+                         Set to False only if you need literal character typing
+        """
+        import base64
+
+        # Strip any trailing newlines/carriage returns from input
+        clean_command = command.rstrip("\r\n")
+
+        if use_encoding:
+            # Encode the command to avoid quote/special character issues
+            # The command goes in as plain text, gets encoded, sent, decoded, and executed
+            encoded = base64.b64encode(clean_command.encode('utf-8')).decode('ascii')
+
+            # Wrap in a one-liner that decodes and executes
+            # Using 'eval "$(echo ... | base64 -d)"' ensures proper shell parsing
+            wrapper = f'eval "$(echo {encoded} | base64 -d)"'
+
+            # Send the wrapper command
+            await self.session.async_send_text(wrapper)
+        else:
+            # Fallback to direct sending (legacy behavior)
+            await self.session.async_send_text(clean_command)
+
+        # Always send Enter to execute
+        await asyncio.sleep(0.05)
+        await self.session.async_send_text("\r")
+
+        # Log the original command (not the encoded wrapper)
+        if self.logger:
+            self.logger.log_command(clean_command)
+
     async def get_screen_contents(self, max_lines: Optional[int] = None) -> str:
         """Get the contents of the session's screen.
         

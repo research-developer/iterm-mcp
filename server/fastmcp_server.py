@@ -286,9 +286,14 @@ async def write_to_terminal(
         
         # Send the command with execute option
         try:
-            await session.send_text(command, execute=execute)
-            action = "executed" if execute else "typed"
-            logger.info(f"Command {action} in session: {session.name}")
+            if execute:
+                # Use smart encoding for command execution
+                await session.execute_command(command, use_encoding=True)
+                logger.info(f"Command executed (with encoding) in session: {session.name}")
+            else:
+                # Just type the text without executing
+                await session.send_text(command, execute=False)
+                logger.info(f"Command typed in session: {session.name}")
         except Exception as send_error:
             error_msg = f"Error sending command: {str(send_error)}"
             logger.error(error_msg)

@@ -381,13 +381,13 @@ class ItermTerminal:
         if session_id in self.sessions:
             del self.sessions[session_id]
 
-    async def execute_command(self, session_id: str, command: str, execute: bool = True) -> None:
-        """Execute a command in a session.
+    async def execute_command(self, session_id: str, command: str, use_encoding: bool = True) -> None:
+        """Execute a command in a session using smart encoding.
 
         Args:
             session_id: The ID of the session to execute the command in
-            command: The command to execute
-            execute: Whether to execute the command by sending Enter (default: True)
+            command: The command to execute (raw, unencoded)
+            use_encoding: Whether to use base64 encoding to avoid quote/special char issues (default: True)
 
         Raises:
             ValueError: If the session is not found
@@ -397,8 +397,8 @@ class ItermTerminal:
         if not session:
             raise ValueError(f"Session with ID {session_id} not found")
 
-        # Send the command to the session
-        await session.send_text(command, execute=execute)
+        # Execute the command using the session's smart execute method
+        await session.execute_command(command, use_encoding=use_encoding)
 
     async def create_multiple_sessions(self, configs: List[Dict[str, Any]]) -> Dict[str, str]:
         """Create multiple sessions with different initial commands.
