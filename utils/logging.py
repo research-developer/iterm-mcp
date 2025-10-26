@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Pattern, Union, Any
 
@@ -74,6 +75,9 @@ class ItermSessionLogger:
         # Initialize with no filters
         self.output_filters = []
         self.latest_output = []  # Store recent output for snapshots
+
+        # Track the index of the last command for output retrieval
+        self._last_command_index = None  # Index in latest_output where last command was logged
         
         # Set up file logger
         self.logger = logging.getLogger(f"session_{session_id}")
@@ -99,14 +103,17 @@ class ItermSessionLogger:
     
     def log_command(self, command: str) -> None:
         """Log a command sent to the session.
-        
+
         Args:
             command: The command text
         """
         # Truncate long commands to avoid overwhelming the log
         if len(command) > 500:
             command = command[:497] + "..."
-        
+
+        # Mark the current position in latest_output as the last command
+        self._last_command_index = len(self.latest_output)
+
         self.logger.info(f"COMMAND: {command}")
     
     def add_output_filter(self, pattern: str) -> None:
@@ -215,7 +222,7 @@ class ItermSessionLogger:
     
     def log_custom_event(self, event_type: str, data: Union[str, Dict]) -> None:
         """Log a custom event.
-        
+
         Args:
             event_type: The type of event
             data: The event data
@@ -224,8 +231,30 @@ class ItermSessionLogger:
             data_str = json.dumps(data)
         else:
             data_str = str(data)
-        
+
         self.logger.info(f"EVENT[{event_type}]: {data_str}")
+
+    def get_output_since_last_command(self, max_lines: Optional[int] = None) -> str:
+        """Get output that has been logged since the last command was executed.
+
+        Args:
+            max_lines: Optional maximum number of lines to return
+
+        Returns:
+            The output since the last command, or empty string if no command has been executed
+        """
+        # If no command has been executed yet, return empty string
+        if self._last_command_index is None:
+            return ""
+
+        # Get output from the last command index to the end
+        output_lines = self.latest_output[self._last_command_index:]
+
+        # Apply max_lines limit if specified
+        if max_lines is not None and len(output_lines) > max_lines:
+            output_lines = output_lines[-max_lines:]
+
+        return '\n'.join(output_lines)
 
 
 class ItermLogManager:
