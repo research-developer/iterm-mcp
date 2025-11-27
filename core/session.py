@@ -1,6 +1,7 @@
 """Session management for iTerm2 interaction."""
 
 import asyncio
+import base64
 import os
 import time
 import uuid
@@ -152,8 +153,6 @@ class ItermSession:
             use_encoding: Whether to use base64 encoding (default: True)
                          Set to False only if you need literal character typing
         """
-        import base64
-
         # Strip any trailing newlines/carriage returns from input
         clean_command = command.rstrip("\r\n")
 
