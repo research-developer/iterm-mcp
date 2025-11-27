@@ -1,6 +1,7 @@
 """Session management for iTerm2 interaction."""
 
 import asyncio
+import base64
 import os
 import time
 import uuid
@@ -152,8 +153,6 @@ class ItermSession:
             use_encoding: Whether to use base64 encoding (default: True)
                          Set to False only if you need literal character typing
         """
-        import base64
-
         # Strip any trailing newlines/carriage returns from input
         clean_command = command.rstrip("\r\n")
 
@@ -164,6 +163,8 @@ class ItermSession:
 
             # Wrap in a one-liner that decodes and executes
             # Using 'eval "$(echo ... | base64 -d)"' ensures proper shell parsing
+            # Note: base64 output is safe (only contains A-Z, a-z, 0-9, +, /, =)
+            # so no shell escaping of the encoded string is needed
             wrapper = f'eval "$(echo {encoded} | base64 -d)"'
 
             # Send the wrapper command
@@ -172,7 +173,9 @@ class ItermSession:
             # Fallback to direct sending (legacy behavior)
             await self.session.async_send_text(clean_command)
 
-        # Always send Enter to execute
+        # Small delay to ensure the command text is fully processed by the terminal
+        # before sending the Enter key. Without this delay, rapid typing followed by
+        # Enter can cause race conditions where Enter is processed before the text.
         await asyncio.sleep(0.05)
         await self.session.async_send_text("\r")
 
