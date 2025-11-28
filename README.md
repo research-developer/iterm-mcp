@@ -53,7 +53,24 @@ iterm-mcp/
         └── logging.py            # Logging utilities
 ```
 
+## Development Setup
+
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   pip install -e ".[dev]"
+   ```
+3. Run tests:
+   ```bash
+   ./scripts/watch_tests.sh
+   ```
+4. Generate gRPC code (if modifying protos):
+   ```bash
+   python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. protos/iterm_mcp.proto
+   ```
+
 ## Usage
+
 
 ### MCP Integration with the Official Python SDK
 
