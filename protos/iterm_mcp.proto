@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package iterm_mcp;
+
+service ITermService {
+  rpc ListSessions (Empty) returns (SessionList);
+  rpc FocusSession (SessionIdentifier) returns (StatusResponse);
+  rpc CreateLayout (CreateLayoutRequest) returns (SessionList);
+  rpc WriteToTerminal (WriteRequest) returns (StatusResponse);
+  rpc ReadTerminalOutput (ReadOutputRequest) returns (TerminalOutput);
+  rpc SendControlCharacter (ControlCharRequest) returns (StatusResponse);
+  rpc CheckSessionStatus (SessionIdentifier) returns (SessionStatus);
+}
+
+message Empty {}
+
+message Session {
+  string id = 1;
+  string name = 2;
+  string persistent_id = 3;
+  bool is_processing = 4;
+}
+
+message SessionList {
+  repeated Session sessions = 1;
+}
+
+message SessionIdentifier {
+  string identifier = 1;
+}
+
+message StatusResponse {
+  string message = 1;
+  bool success = 2;
+}
+
+message CreateLayoutRequest {
+  string layout_type = 1;
+  repeated string session_names = 2;
+}
+
+message WriteRequest {
+  string session_identifier = 1;
+  string command = 2;
+  bool wait_for_prompt = 3;
+}
+
+message ReadOutputRequest {
+  string session_identifier = 1;
+  int32 max_lines = 2;
+}
+
+message TerminalOutput {
+  string output = 1;
+}
+
+message ControlCharRequest {
+  string session_identifier = 1;
+  string control_char = 2;
+}
+
+message SessionStatus {
+  string name = 1;
+  string id = 2;
+  string persistent_id = 3;
+  bool is_processing = 4;
+}
