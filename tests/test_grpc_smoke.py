@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import sys
 import os
 
@@ -29,7 +29,7 @@ class TestGRPCSmoke(unittest.IsolatedAsyncioTestCase):
         """Test ListSessions with mocked dependencies."""
         service = ITermService()
         # Mock initialize to return True
-        service.initialize = MagicMock(return_value=True)
+        service.initialize = AsyncMock(return_value=True)
         # Mock terminal sessions
         service.terminal = MagicMock()
         service.terminal.sessions = {}
