@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-import sys
 from concurrent import futures
 from typing import Optional
 
