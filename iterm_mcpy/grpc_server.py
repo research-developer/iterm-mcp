@@ -79,17 +79,17 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
 
         identifier = request.identifier
         session = await self._find_session(identifier)
-        
+
         if not session:
             return iterm_mcp_pb2.StatusResponse(
-                success=False, 
+                success=False,
                 message=f"Session not found: {identifier}"
             )
 
         try:
             await self.terminal.focus_session(session.id)
             return iterm_mcp_pb2.StatusResponse(
-                success=True, 
+                success=True,
                 message=f"Focused session: {session.name}"
             )
         except Exception as e:
@@ -118,7 +118,7 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
                 layout_type=layout_enum,
                 pane_names=list(request.session_names)
             )
-            
+
             pb_sessions = []
             for _, session_id in sessions.items():
                 s = await self.terminal.get_session_by_id(session_id)
@@ -142,7 +142,7 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
         session = await self._find_session(request.session_identifier)
         if not session:
             return iterm_mcp_pb2.StatusResponse(
-                success=False, 
+                success=False,
                 message=f"Session not found: {request.session_identifier}"
             )
 
@@ -174,8 +174,14 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
             context.set_code(grpc.StatusCode.NOT_FOUND)
             return iterm_mcp_pb2.TerminalOutput()
 
+        # Validate max_lines: must be None or a positive integer
+        if request.max_lines is not None and request.max_lines <= 0:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("max_lines must be a positive integer or None")
+            return iterm_mcp_pb2.TerminalOutput()
+
         output = await session.get_screen_contents(
-            max_lines=request.max_lines if request.max_lines > 0 else None
+            max_lines=request.max_lines if request.max_lines is not None else None
         )
         return iterm_mcp_pb2.TerminalOutput(output=output)
 
