@@ -34,7 +34,7 @@ class TestGRPCSmoke(unittest.IsolatedAsyncioTestCase):
         service.terminal = MagicMock()
         service.terminal.sessions = {}
         
-        response = await service.ListSessions(None, None)
+        response = await service.ListSessions(iterm_mcp_pb2.Empty(), MagicMock())
         self.assertIsInstance(response, iterm_mcp_pb2.SessionList)
         self.assertEqual(len(response.sessions), 0)
 
