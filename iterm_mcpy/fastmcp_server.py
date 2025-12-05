@@ -16,6 +16,10 @@ from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
 
+# Global references for resources (set during lifespan)
+_terminal: Optional[ItermTerminal] = None
+_logger: Optional[logging.Logger] = None
+
 
 @asynccontextmanager
 async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
@@ -74,7 +78,12 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         logger.info("Initializing layout manager...")
         layout_manager = LayoutManager(terminal)
         logger.info("Layout manager initialized successfully")
-        
+
+        # Set global references for resources
+        global _terminal, _logger
+        _terminal = terminal
+        _logger = logger
+
         # Yield the initialized components
         yield {
             "connection": connection,
@@ -739,10 +748,8 @@ async def list_persistent_sessions(ctx: Context) -> str:
 @mcp.resource("terminal://{session_id}/output")
 async def get_terminal_output(session_id: str) -> str:
     """Get the output from a terminal session."""
-    # Access context through the global mcp object
-    ctx = mcp.current_request_context
-    terminal = ctx.lifespan_context["terminal"]
-    logger = ctx.lifespan_context["logger"]
+    terminal = _terminal
+    logger = _logger
     
     try:
         logger.info(f"Getting output for session: {session_id}")
@@ -767,10 +774,8 @@ async def get_terminal_output(session_id: str) -> str:
 @mcp.resource("terminal://{session_id}/info")
 async def get_terminal_info(session_id: str) -> str:
     """Get information about a terminal session."""
-    # Access context through the global mcp object
-    ctx = mcp.current_request_context
-    terminal = ctx.lifespan_context["terminal"]
-    logger = ctx.lifespan_context["logger"]
+    terminal = _terminal
+    logger = _logger
     
     try:
         logger.info(f"Getting info for session: {session_id}")
@@ -803,10 +808,8 @@ async def get_terminal_info(session_id: str) -> str:
 @mcp.resource("terminal://sessions")
 async def list_all_sessions() -> str:
     """Get a list of all terminal sessions."""
-    # Access context through the global mcp object
-    ctx = mcp.current_request_context
-    terminal = ctx.lifespan_context["terminal"]
-    logger = ctx.lifespan_context["logger"]
+    terminal = _terminal
+    logger = _logger
     
     try:
         logger.info("Listing all sessions as resource")
