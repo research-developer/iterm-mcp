@@ -830,7 +830,7 @@ def test_team_hierarchy():
 ## Implementation Priority
 
 ### Phase 1: Foundation (Week 1-2)
-- [x] ✅ Create `tests/helpers.py` with utilities
+- [ ] ⬜ Create `tests/helpers.py` with utilities
 - [ ] ⬜ Fix async event loop issues
 - [ ] ⬜ Update pytest configuration
 
