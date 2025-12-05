@@ -13,7 +13,7 @@ import asyncio
 import iterm2
 from core.terminal import ItermTerminal
 from core.layouts import LayoutManager, LayoutType
-from core.agents import AgentRegistry
+from core.agents import AgentRegistry, CascadingMessage
 
 
 async def main():
@@ -98,7 +98,6 @@ async def main():
     print("-" * 50)
     
     # Resolve cascade targets
-    from core.agents import CascadingMessage
     cascade = CascadingMessage(
         broadcast="All agents: sync your code",
         teams={
