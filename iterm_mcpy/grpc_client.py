@@ -140,12 +140,19 @@ class ITermClient:
                 )
                 targets.append(target)
 
+            # Normalize use_encoding to string format
+            use_encoding_value = msg.get('use_encoding', 'auto')
+            if isinstance(use_encoding_value, bool):
+                use_encoding_str = 'true' if use_encoding_value else 'false'
+            else:
+                use_encoding_str = str(use_encoding_value)
+
             session_msg = iterm_mcp_pb2.SessionMessage(
                 content=msg.get('content', ''),
                 targets=targets,
                 condition=msg.get('condition', ''),
                 execute=msg.get('execute', True),
-                use_encoding=msg.get('use_encoding', 'auto')
+                use_encoding=use_encoding_str
             )
             session_messages.append(session_msg)
 

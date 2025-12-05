@@ -2,7 +2,7 @@
 
 import re
 from typing import Dict, List, Optional, Union
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SessionTarget(BaseModel):
@@ -19,6 +19,13 @@ class SessionTarget(BaseModel):
     def at_least_one_identifier(cls, v, info):
         """Ensure at least one identifier is provided (validated at model level)."""
         return v
+
+    @model_validator(mode='after')
+    def check_at_least_one(self):
+        """Validate that at least one identifier is provided."""
+        if not any([self.session_id, self.name, self.agent, self.team]):
+            raise ValueError("At least one identifier (session_id, name, agent, or team) must be provided")
+        return self
 
 
 class SessionMessage(BaseModel):

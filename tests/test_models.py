@@ -10,14 +10,10 @@ from core.models import (
     ReadTarget,
     ReadSessionsRequest,
     SessionOutput,
-    ReadSessionsResponse,
     SessionConfig,
     CreateSessionsRequest,
-    CreatedSession,
-    CreateSessionsResponse,
     CascadeMessageRequest,
     CascadeResult,
-    CascadeMessageResponse,
     RegisterAgentRequest,
     CreateTeamRequest,
     SetActiveSessionRequest,
@@ -27,13 +23,11 @@ from core.models import (
 class TestSessionTarget(unittest.TestCase):
     """Test SessionTarget model."""
 
-    def test_empty_target(self):
-        """Test creating empty target (uses active session)."""
-        target = SessionTarget()
-        self.assertIsNone(target.session_id)
-        self.assertIsNone(target.name)
-        self.assertIsNone(target.agent)
-        self.assertIsNone(target.team)
+    def test_empty_target_raises_error(self):
+        """Test that empty target raises validation error."""
+        with self.assertRaises(ValidationError) as context:
+            SessionTarget()
+        self.assertIn("At least one identifier", str(context.exception))
 
     def test_target_by_session_id(self):
         """Test targeting by session ID."""

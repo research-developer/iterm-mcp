@@ -544,8 +544,8 @@ async def read_sessions(
                 lines = output.split("\n")
                 filtered_lines = [l for l in lines if pattern.search(l)]
                 output = "\n".join(filtered_lines)
-            except re.error:
-                pass
+            except re.error as regex_err:
+                logger.error(f"Invalid filter_pattern '{filter_pattern}': {regex_err}")
 
         agent = agent_registry.get_agent_by_session(session.id)
 
@@ -648,6 +648,7 @@ async def send_cascade_message(
             if skip_duplicates:
                 agent_names = agent_registry.filter_unsent_recipients(message, agent_names)
 
+            actually_delivered = []
             # Get session IDs
             for agent_name in agent_names:
                 agent = agent_registry.get_agent(agent_name)
@@ -664,11 +665,11 @@ async def send_cascade_message(
                     skipped += 1
                     continue
 
-                # Determine message type
+                # Determine message type based on where this specific message came from
                 message_type = "broadcast"
-                if agent_name in (agents or {}):
+                if agent_name in (agents or {}) and (agents or {}).get(agent_name) == message:
                     message_type = "agent"
-                elif any(agent.is_member_of(t) for t in (teams or {}).keys()):
+                elif any(agent.is_member_of(t) and (teams or {}).get(t) == message for t in (teams or {}).keys()):
                     message_type = "team"
 
                 # Send message
@@ -684,10 +685,11 @@ async def send_cascade_message(
                     "delivered": True
                 })
                 delivered += 1
+                actually_delivered.append(agent_name)
 
             # Record messages sent
-            if agent_names:
-                agent_registry.record_message_sent(message, agent_names)
+            if actually_delivered:
+                agent_registry.record_message_sent(message, actually_delivered)
 
         logger.info(f"Cascade: delivered={delivered}, skipped={skipped}")
 

@@ -3,10 +3,9 @@
 import hashlib
 import json
 import os
-import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Union
+from typing import Dict, List, Optional, Set
 from collections import deque
 
 from pydantic import BaseModel, Field
@@ -18,7 +17,7 @@ class Agent(BaseModel):
     name: str = Field(..., description="Unique name for the agent")
     session_id: str = Field(..., description="iTerm session ID this agent controls")
     teams: List[str] = Field(default_factory=list, description="Teams this agent belongs to")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, str] = Field(default_factory=dict, description="Optional metadata")
 
     def is_member_of(self, team: str) -> bool:
@@ -32,7 +31,7 @@ class Team(BaseModel):
     name: str = Field(..., description="Unique team name")
     description: str = Field(default="", description="Team description")
     parent_team: Optional[str] = Field(default=None, description="Parent team for cascading")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class MessageRecord(BaseModel):
@@ -40,7 +39,7 @@ class MessageRecord(BaseModel):
 
     content_hash: str = Field(..., description="SHA256 hash of message content")
     recipients: List[str] = Field(..., description="Agent names that received this message")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class SendTarget(BaseModel):
@@ -301,7 +300,7 @@ class AgentRegistry:
     @staticmethod
     def _hash_message(content: str) -> str:
         """Create a hash of message content."""
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        return hashlib.sha256(content.encode()).hexdigest()
 
     def was_message_sent(self, content: str, recipient: str) -> bool:
         """Check if this exact message was already sent to this recipient.
