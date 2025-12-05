@@ -307,6 +307,136 @@ The FastMCP implementation provides the following:
 - `monitor_terminal` - Prompt for monitoring a terminal session
 - `execute_command` - Prompt for executing a command and analyzing the output
 
+## Parallel Multi-Agent Orchestration
+
+The iTerm MCP server supports coordinating multiple Claude Code instances through named agents, teams, and parallel session operations.
+
+### Agent & Team Management
+
+Agents bind a name to an iTerm session, enabling targeted communication. Teams group agents for broadcast operations.
+
+```python
+# Register agents
+register_agent(name="alice", session_id="session-123", teams=["frontend"])
+register_agent(name="bob", session_id="session-456", teams=["frontend", "backend"])
+
+# Create teams
+create_team(name="frontend", description="Frontend developers")
+create_team(name="backend", description="Backend developers")
+
+# List agents by team
+list_agents(team="frontend")  # Returns alice and bob
+```
+
+### New MCP Tools for Parallel Operations
+
+- `register_agent` - Register a named agent bound to a session
+- `list_agents` - List all registered agents (optionally filtered by team)
+- `remove_agent` - Remove an agent registration
+- `create_team` - Create a new team for grouping agents
+- `list_teams` - List all teams
+- `remove_team` - Remove a team
+- `assign_agent_to_team` - Add an agent to a team
+- `remove_agent_from_team` - Remove an agent from a team
+- `set_active_session` - Set active session by ID, name, or agent
+- `write_to_sessions` - Write to multiple sessions in parallel
+- `read_sessions` - Read from multiple sessions in parallel
+- `create_sessions` - Create multiple sessions with layout in one call
+- `send_cascade_message` - Send priority-based cascading messages
+
+### Parallel Session Operations
+
+Write to or read from multiple sessions simultaneously:
+
+```python
+# Write to multiple sessions by different targets
+write_to_sessions(
+    messages=[
+        {"content": "npm test", "targets": [{"team": "frontend"}]},
+        {"content": "cargo test", "targets": [{"agent": "rust-agent"}]},
+        {"content": "echo hello", "targets": [{"name": "Session1"}, {"name": "Session2"}]}
+    ],
+    parallel=True,
+    skip_duplicates=True
+)
+
+# Read from multiple sessions
+read_sessions(
+    targets=[
+        {"agent": "alice", "max_lines": 50},
+        {"team": "backend", "max_lines": 100}
+    ],
+    parallel=True,
+    filter_pattern="ERROR|WARN"
+)
+```
+
+### Cascading Messages
+
+Send priority-based messages where the most specific wins:
+
+```python
+# Cascading priority: agent > team > broadcast
+send_cascade_message(
+    broadcast="All agents: sync your status",
+    teams={
+        "frontend": "Frontend team: run lint check",
+        "backend": "Backend team: run database migrations"
+    },
+    agents={
+        "alice": "Alice, please handle the API review specifically"
+    },
+    skip_duplicates=True
+)
+```
+
+Resolution order:
+1. If agent has a specific message → use it
+2. Else if agent's team has a message → use team message
+3. Else if broadcast exists → use broadcast
+4. Messages are deduplicated to prevent sending the same content twice
+
+### gRPC Client
+
+For programmatic access outside MCP, use the gRPC client:
+
+```python
+from iterm_mcpy.grpc_client import ITermClient
+
+# Using context manager
+with ITermClient(host='localhost', port=50051) as client:
+    # List sessions
+    sessions = client.list_sessions()
+
+    # Create sessions with layout
+    response = client.create_sessions(
+        sessions=[
+            {"name": "Agent1", "agent": "alice", "team": "frontend"},
+            {"name": "Agent2", "agent": "bob", "team": "backend"}
+        ],
+        layout="HORIZONTAL_SPLIT"
+    )
+
+    # Write to multiple sessions
+    client.write_to_sessions(
+        messages=[{"content": "echo hello", "targets": [{"team": "frontend"}]}],
+        parallel=True
+    )
+
+    # Send cascade message
+    client.send_cascade_message(
+        broadcast="Status check",
+        teams={"frontend": "Run tests"},
+        agents={"alice": "Review PR #42"}
+    )
+```
+
+### Data Persistence
+
+Agents and teams are persisted to JSONL files in `~/.iterm_mcp_logs/`:
+- `agents.jsonl` - Registered agents with session bindings
+- `teams.jsonl` - Team definitions and hierarchies
+
 ## Testing
 
 Run the tests with:
