@@ -93,7 +93,7 @@ Users can **combine both tools**:
 ```python
 # Create sessions for different agents
 create_sessions(
-    layout_type="QUAD",
+    layout_type="quad",
     session_configs=[
         {"name": "Frontend", "agent": "frontend-dev", "team": "dev"},
         {"name": "Backend", "agent": "backend-dev", "team": "dev"}

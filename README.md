@@ -519,7 +519,7 @@ You can combine both tools:
 ```python
 # Create sessions for different agents
 create_sessions(
-    layout_type="HORIZONTAL_SPLIT",
+    layout_type="horizontal",
     session_configs=[
         {"name": "Frontend", "agent": "frontend-dev", "team": "dev"},
         {"name": "Backend", "agent": "backend-dev", "team": "dev"}
