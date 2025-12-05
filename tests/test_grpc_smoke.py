@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 try:
     from iterm_mcpy.grpc_server import ITermService
-    from protos import iterm_mcp_pb2
+    from iterm_mcpy import iterm_mcp_pb2
     GRPC_AVAILABLE = True
 except ImportError:
     GRPC_AVAILABLE = False
