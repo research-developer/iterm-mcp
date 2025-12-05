@@ -67,8 +67,13 @@ class TestLogging(unittest.TestCase):
             finally:
                 await self.async_teardown()
         
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(test_wrapper())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(test_wrapper())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
     
     def test_session_logger_creation(self):
         """Test that session loggers are created correctly."""
