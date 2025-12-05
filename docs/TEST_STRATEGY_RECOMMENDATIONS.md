@@ -104,16 +104,17 @@ async def wait_for_value(
     
     while time.time() - start < timeout:
         try:
-            value = await getter()
-            if comparator(value, expected):
-                return value
+            current_value = await getter()
+            last_value = current_value
+            if comparator(current_value, expected):
+                return current_value
         except Exception:
             pass
         await asyncio.sleep(interval)
     
     raise TimeoutError(
         f"Timeout waiting for value: expected {expected}, "
-        f"last value was {value if 'value' in locals() else 'unavailable'}"
+        f"last value was {last_value if last_value is not None else 'unavailable'}"
     )
 
 
@@ -152,8 +153,11 @@ async def wait_for_output(
 
 def skip_if_no_iterm():
     """Skip test if iTerm2 is not available."""
+    import os
     is_macos = platform.system() == 'Darwin'
-    has_iterm = shutil.which('iterm2') is not None
+    # Check for iTerm2 app bundle
+    iterm_app_path = '/Applications/iTerm.app'
+    has_iterm = os.path.exists(iterm_app_path)
     
     return pytest.mark.skipif(
         not (is_macos and has_iterm),
