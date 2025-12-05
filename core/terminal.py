@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Dict, List, Optional, Tuple, Union, Any, Literal
 
 import iterm2
 
@@ -381,13 +381,21 @@ class ItermTerminal:
         if session_id in self.sessions:
             del self.sessions[session_id]
 
-    async def execute_command(self, session_id: str, command: str, use_encoding: bool = True) -> None:
-        """Execute a command in a session using smart encoding.
+    async def execute_command(
+        self,
+        session_id: str,
+        command: str,
+        use_encoding: Union[bool, Literal["auto"]] = "auto"
+    ) -> None:
+        """Execute a command in a session with smart encoding.
 
         Args:
             session_id: The ID of the session to execute the command in
             command: The command to execute (raw, unencoded)
-            use_encoding: Whether to use base64 encoding to avoid quote/special char issues (default: True)
+            use_encoding: Encoding mode:
+                - "auto" (default): Only encode if command contains unsafe characters
+                - True: Always use base64 encoding
+                - False: Never encode (direct typing)
 
         Raises:
             ValueError: If the session is not found
