@@ -10,8 +10,8 @@ import iterm2
 
 from core.layouts import LayoutManager, LayoutType
 from core.terminal import ItermTerminal
-from protos import iterm_mcp_pb2
-from protos import iterm_mcp_pb2_grpc
+from iterm_mcpy import iterm_mcp_pb2
+from iterm_mcpy import iterm_mcp_pb2_grpc
 
 # Configure logging
 logging.basicConfig(

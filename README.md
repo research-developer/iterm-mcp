@@ -1,6 +1,19 @@
 # iTerm MCP
 
+[![CI](https://github.com/research-developer/iterm-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/research-developer/iterm-mcp/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/research-developer/iterm-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/research-developer/iterm-mcp)
+
 A Python implementation for controlling iTerm2 terminal sessions with support for multiple panes and layouts. This implementation uses the iTerm2 Python API for improved reliability and functionality.
+
+## Status
+
+✅ **gRPC Migration Complete** - Full gRPC server/client implementation with 17 RPC methods  
+✅ **Multi-Pane Orchestration** - Parallel session operations with agent/team targeting  
+✅ **Agent Registry** - Complete agent and team management with cascading messages  
+✅ **Test Coverage** - 88 passing tests with 23.86% code coverage  
+✅ **CI/CD** - Automated testing with coverage reporting
+
+See [EPIC_STATUS.md](EPIC_STATUS.md) for detailed implementation status.
 
 ## Features
 
