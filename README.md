@@ -5,6 +5,8 @@
 
 A Python implementation for controlling iTerm2 terminal sessions with support for multiple panes and layouts. This implementation uses the iTerm2 Python API for improved reliability and functionality.
 
+**Note:** This project provides multi-agent orchestration infrastructure, complementary to tools like [@steipete/claude-code-mcp](https://github.com/steipete/claude-code-mcp). See [docs/claude-code-mcp-analysis.md](docs/claude-code-mcp-analysis.md) for a detailed comparison.
+
 ## Status
 
 ✅ **gRPC Migration Complete** - Full gRPC server/client implementation with 17 RPC methods  
@@ -501,6 +503,52 @@ Sessions maintain persistent identities across restarts and reconnection:
 - `get_session_by_persistent_id()` allows reconnection to existing sessions
 - State is preserved even after chat or connection interruptions
 - Session output history is available across reconnections
+
+## Relationship to Claude Code MCP
+
+This project provides **multi-agent orchestration infrastructure** that complements tools like [@steipete/claude-code-mcp](https://github.com/steipete/claude-code-mcp):
+
+### Use Case Comparison
+
+**@steipete/claude-code-mcp** - Direct code automation
+- Wraps a single Claude Code CLI instance
+- One-shot code execution with permission bypass
+- Stateless operation
+- Best for: Direct file/code manipulation by a single agent
+
+**iterm-mcp** - Multi-agent coordination
+- Orchestrates multiple Claude Code instances in iTerm sessions
+- Agent registry with teams and hierarchies
+- Persistent state management
+- Best for: Coordinating parallel agents, complex workflows, team-based operations
+
+### Integration Example
+
+You can combine both tools:
+1. Use iterm-mcp to create and manage multiple iTerm sessions
+2. Run `@steipete/claude-code-mcp` in each session for code automation
+3. Use iterm-mcp's agent/team tools to coordinate across sessions
+
+```python
+# Create sessions for different agents
+create_sessions(
+    layout_type="horizontal",
+    session_configs=[
+        {"name": "Frontend", "agent": "frontend-dev", "team": "dev"},
+        {"name": "Backend", "agent": "backend-dev", "team": "dev"}
+    ]
+)
+
+# Each session can run claude-code-mcp
+write_to_terminal(session_id="...", content="npx -y @steipete/claude-code-mcp@latest")
+
+# Coordinate across sessions
+send_cascade_message(
+    teams={"dev": "Run tests before deployment"}
+)
+```
+
+For a detailed architectural comparison, see [docs/claude-code-mcp-analysis.md](docs/claude-code-mcp-analysis.md).
 
 ## License
 
