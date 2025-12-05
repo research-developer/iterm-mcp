@@ -3,13 +3,49 @@
 import asyncio
 import base64
 import os
+import re
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple, Union, Callable
+from typing import Dict, List, Optional, Tuple, Union, Callable, Literal
 
 import iterm2
 
 from utils.logging import ItermSessionLogger
+
+# Characters that can cause shell parsing issues when typed directly
+# These require base64 encoding to safely execute
+SHELL_UNSAFE_CHARS = set("\"'`$!\\|&;<>(){}[]")
+
+# Simpler pattern for common safe commands (alphanumeric, spaces, basic punctuation)
+SIMPLE_COMMAND_PATTERN = re.compile(r'^[a-zA-Z0-9_\-./: =,@#%^*+~]+$')
+
+
+def needs_base64_encoding(command: str) -> bool:
+    """Check if a command contains characters that need base64 encoding.
+
+    Args:
+        command: The command string to check
+
+    Returns:
+        True if the command should be base64 encoded for safe execution
+    """
+    # Fast path: simple commands with only safe characters
+    if SIMPLE_COMMAND_PATTERN.match(command):
+        return False
+
+    # Check for shell-unsafe characters
+    if any(c in SHELL_UNSAFE_CHARS for c in command):
+        return True
+
+    # Check for control characters or non-ASCII
+    for c in command:
+        code = ord(c)
+        if code < 0x20 and c not in '\t\n\r':  # Control chars except whitespace
+            return True
+        if code > 0x7e:  # Non-ASCII
+            return True
+
+    return False
 
 class ItermSession:
     """Manages an iTerm2 session (terminal pane)."""
@@ -142,21 +178,33 @@ class ItermSession:
         if self.logger:
             self.logger.log_command(clean_text)
 
-    async def execute_command(self, command: str, use_encoding: bool = True) -> None:
-        """Execute a command in the session using smart encoding.
+    async def execute_command(
+        self,
+        command: str,
+        use_encoding: Union[bool, Literal["auto"]] = "auto"
+    ) -> None:
+        """Execute a command in the session with smart encoding.
 
         This method handles complex commands with quotes and special characters
         by encoding them to avoid shell parsing issues.
 
         Args:
             command: The command to execute (raw, unencoded)
-            use_encoding: Whether to use base64 encoding (default: True)
-                         Set to False only if you need literal character typing
+            use_encoding: Encoding mode:
+                - "auto" (default): Only encode if command contains unsafe characters
+                - True: Always use base64 encoding
+                - False: Never encode (direct typing)
         """
         # Strip any trailing newlines/carriage returns from input
         clean_command = command.rstrip("\r\n")
 
-        if use_encoding:
+        # Determine if we should encode
+        should_encode = (
+            use_encoding is True or
+            (use_encoding == "auto" and needs_base64_encoding(clean_command))
+        )
+
+        if should_encode:
             # Encode the command to avoid quote/special character issues
             # The command goes in as plain text, gets encoded, sent, decoded, and executed
             encoded = base64.b64encode(clean_command.encode('utf-8')).decode('ascii')
@@ -170,7 +218,7 @@ class ItermSession:
             # Send the wrapper command
             await self.session.async_send_text(wrapper)
         else:
-            # Fallback to direct sending (legacy behavior)
+            # Direct sending - command is simple enough
             await self.session.async_send_text(clean_command)
 
         # Small delay to ensure the command text is fully processed by the terminal
