@@ -37,7 +37,7 @@ async def main():
     agent_registry.create_team("backend", "Backend developers", parent_team="development")
     
     # 4. Create sessions with layout
-    session_map = await layout_manager.create_layout(
+    await layout_manager.create_layout(
         layout_type=LayoutType.QUAD,
         pane_names=["Frontend", "Backend", "Testing", "Monitor"]
     )
