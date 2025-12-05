@@ -70,7 +70,6 @@ iterm-mcp/
    ```
 
 ## Usage
-
 ### MCP Integration with the Official Python SDK
 
 We provide two server implementations:

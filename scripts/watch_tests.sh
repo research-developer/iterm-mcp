@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# Simple script to run tests in a loop
+# Simple polling-based test runner (runs every 5 seconds)
+# For file-change detection, consider using fswatch or inotifywait
 # Usage: ./scripts/watch_tests.sh
 
 GREEN='\033[0;32m'
