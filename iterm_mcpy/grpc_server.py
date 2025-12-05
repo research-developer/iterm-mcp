@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import os
-from concurrent import futures
 from typing import Optional
 
 import grpc
@@ -30,31 +29,46 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
         self.layout_manager: Optional[LayoutManager] = None
         self.connection: Optional[iterm2.Connection] = None
         self.log_dir = os.path.expanduser("~/.iterm_mcp_logs")
+        self._init_lock = asyncio.Lock()
 
     async def initialize(self):
-        """Initialize the iTerm2 connection and services."""
+        """Initialize the iTerm2 connection and services.
+
+        Uses double-check locking pattern to prevent race conditions when
+        multiple concurrent gRPC requests arrive before initialization completes.
+        """
+        # First check without lock (fast path)
         if self.terminal:
             return True
 
-        try:
-            logger.info("Initializing iTerm2 connection...")
-            self.connection = await iterm2.Connection.async_create()
-            
-            self.terminal = ItermTerminal(
-                connection=self.connection,
-                log_dir=self.log_dir,
-                enable_logging=True,
-                default_max_lines=100,
-                max_snapshot_lines=1000
-            )
-            await self.terminal.initialize()
-            
-            self.layout_manager = LayoutManager(self.terminal)
-            logger.info("iTerm2 controller initialized successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to initialize: {e}")
-            return False
+        # Acquire lock for initialization
+        async with self._init_lock:
+            # Double-check after acquiring lock
+            if self.terminal:
+                return True
+
+            try:
+                logger.info("Initializing iTerm2 connection...")
+                self.connection = await iterm2.Connection.async_create()
+
+                self.terminal = ItermTerminal(
+                    connection=self.connection,
+                    log_dir=self.log_dir,
+                    enable_logging=True,
+                    default_max_lines=100,
+                    max_snapshot_lines=1000
+                )
+                await self.terminal.initialize()
+
+                self.layout_manager = LayoutManager(self.terminal)
+                logger.info("iTerm2 controller initialized successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to initialize: {e}")
+                # Reset state on initialization failure to allow retry
+                self.terminal = None
+                self.connection = None
+                return False
 
     async def ListSessions(self, request, context):
         if not await self.initialize():
@@ -152,14 +166,14 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
 
         try:
             await session.send_text(command)
-            
+
             if request.wait_for_prompt:
                 # Simple wait logic
                 for _ in range(20):
                     await asyncio.sleep(0.5)
                     if hasattr(session, 'is_processing') and not session.is_processing:
                         break
-            
+
             return iterm_mcp_pb2.StatusResponse(success=True, message="Command sent")
         except Exception as e:
             return iterm_mcp_pb2.StatusResponse(success=False, message=str(e))
@@ -174,15 +188,15 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
             context.set_code(grpc.StatusCode.NOT_FOUND)
             return iterm_mcp_pb2.TerminalOutput()
 
-        # Validate max_lines: must be None or a positive integer
-        if request.max_lines is not None and request.max_lines <= 0:
+        # Validate max_lines: 0 means use default, negative is invalid, positive is explicit
+        if request.max_lines < 0:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("max_lines must be a positive integer or None")
+            context.set_details("max_lines must be a non-negative integer (0 for default)")
             return iterm_mcp_pb2.TerminalOutput()
 
-        output = await session.get_screen_contents(
-            max_lines=request.max_lines if request.max_lines is not None else None
-        )
+        # In proto3, int32 defaults to 0 when unset, so treat 0 as None (use default)
+        max_lines = None if request.max_lines == 0 else request.max_lines
+        output = await session.get_screen_contents(max_lines=max_lines)
         return iterm_mcp_pb2.TerminalOutput(output=output)
 
     async def SendControlCharacter(self, request, context):
@@ -192,7 +206,7 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
         session = await self._find_session(request.session_identifier)
         if not session:
             return iterm_mcp_pb2.StatusResponse(
-                success=False, 
+                success=False,
                 message=f"Session not found: {request.session_identifier}"
             )
 
@@ -222,7 +236,7 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
     async def _find_session(self, identifier):
         if not self.terminal:
             return None
-        
+
         session = await self.terminal.get_session_by_id(identifier)
         if not session:
             session = await self.terminal.get_session_by_name(identifier)
@@ -232,7 +246,7 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
 
 
 async def serve():
-    server = grpc.aio.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.aio.server()
     iterm_mcp_pb2_grpc.add_ITermServiceServicer_to_server(ITermService(), server)
     server.add_insecure_port('[::]:50051')
     logger.info("Starting gRPC server on port 50051...")

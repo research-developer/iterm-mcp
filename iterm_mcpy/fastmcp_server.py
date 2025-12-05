@@ -1108,6 +1108,9 @@ async def stop_monitoring_session(
 @mcp.resource("terminal://{session_id}/output")
 async def get_terminal_output(session_id: str) -> str:
     """Get output from a terminal session."""
+    if _terminal is None or _logger is None:
+        raise RuntimeError("Server not initialized. Please wait for initialization to complete.")
+
     terminal = _terminal
     logger = _logger
 
@@ -1126,6 +1129,9 @@ async def get_terminal_output(session_id: str) -> str:
 @mcp.resource("terminal://{session_id}/info")
 async def get_terminal_info(session_id: str) -> str:
     """Get information about a terminal session."""
+    if _terminal is None or _logger is None:
+        raise RuntimeError("Server not initialized. Please wait for initialization to complete.")
+
     terminal = _terminal
     agent_registry = _agent_registry
     logger = _logger
@@ -1157,6 +1163,9 @@ async def get_terminal_info(session_id: str) -> str:
 @mcp.resource("terminal://sessions")
 async def list_all_sessions_resource() -> str:
     """Get a list of all terminal sessions."""
+    if _terminal is None or _logger is None:
+        raise RuntimeError("Server not initialized. Please wait for initialization to complete.")
+
     terminal = _terminal
     agent_registry = _agent_registry
     logger = _logger

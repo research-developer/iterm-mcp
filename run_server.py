@@ -1,4 +1,4 @@
-#!/Users/preston/miniconda3/envs/mcp/bin/python
+#!/usr/bin/env python3
 """Direct entry point for iTerm MCP server - use this for Claude Desktop/Code."""
 
 import sys
