@@ -37,7 +37,7 @@ iterm-mcp-fastmcp = "iterm_mcpy.fastmcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "."}
-packages = ["core", "iterm_mcpy", "utils", "protos"]
+packages = ["core", "iterm_mcpy", "utils"]
 
 [tool.black]
 line-length = 88
@@ -70,7 +70,7 @@ source = ["core", "iterm_mcpy", "utils"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",
-    "*/iterm_mcp_pb2*.py",
+    "iterm_mcpy/iterm_mcp_pb2*.py",
 ]
 
 [tool.coverage.report]

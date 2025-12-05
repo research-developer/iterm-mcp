@@ -28,8 +28,16 @@ jobs:
         
     - name: Run tests with coverage
       run: |
-        # Run unit tests (don't require macOS/iTerm2)
-        pytest tests/test_agent_registry.py tests/test_models.py tests/test_grpc_smoke.py tests/test_grpc_client.py \
+        # Run unit tests that don't require macOS/iTerm2
+        # Integration tests (test_basic_functionality.py, test_advanced_features.py, etc.) 
+        # require macOS and are skipped in Linux CI
+        pytest tests/ \
+          --ignore=tests/test_basic_functionality.py \
+          --ignore=tests/test_advanced_features.py \
+          --ignore=tests/test_line_limits.py \
+          --ignore=tests/test_logging.py \
+          --ignore=tests/test_persistent_session.py \
+          --ignore=tests/test_command_output_tracking.py \
           --cov=core --cov=iterm_mcpy --cov=utils \
           --cov-report=xml --cov-report=term-missing
     
