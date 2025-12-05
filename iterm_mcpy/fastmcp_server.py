@@ -908,6 +908,30 @@ async def list_agents(ctx: Context, team: Optional[str] = None) -> str:
 
 
 @mcp.tool()
+async def remove_agent(
+    agent_name: str,
+    ctx: Context
+) -> str:
+    """Remove an agent registration.
+
+    Args:
+        agent_name: Name of the agent to remove
+    """
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        if agent_registry.remove_agent(agent_name):
+            logger.info(f"Removed agent '{agent_name}'")
+            return f"Agent '{agent_name}' removed successfully"
+        else:
+            return f"Agent '{agent_name}' not found"
+    except Exception as e:
+        logger.error(f"Error removing agent: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
 async def create_team(
     team_name: str,
     ctx: Context,
@@ -965,6 +989,30 @@ async def list_teams(ctx: Context) -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error listing teams: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def remove_team(
+    team_name: str,
+    ctx: Context
+) -> str:
+    """Remove a team.
+
+    Args:
+        team_name: Name of the team to remove
+    """
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        if agent_registry.remove_team(team_name):
+            logger.info(f"Removed team '{team_name}'")
+            return f"Team '{team_name}' removed successfully"
+        else:
+            return f"Team '{team_name}' not found"
+    except Exception as e:
+        logger.error(f"Error removing team: {e}")
         return f"Error: {e}"
 
 
