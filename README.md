@@ -12,7 +12,7 @@ A Python implementation for controlling iTerm2 terminal sessions with support fo
 ✅ **gRPC Migration Complete** - Full gRPC server/client implementation with 17 RPC methods  
 ✅ **Multi-Pane Orchestration** - Parallel session operations with agent/team targeting  
 ✅ **Agent Registry** - Complete agent and team management with cascading messages  
-✅ **Test Coverage** - 88 passing tests with 23.86% code coverage  
+✅ **Test Coverage** - 98 passing tests with 27.77% code coverage  
 ✅ **CI/CD** - Automated testing with coverage reporting
 
 See [EPIC_STATUS.md](EPIC_STATUS.md) for detailed implementation status.
@@ -453,11 +453,56 @@ Agents and teams are persisted to JSONL files in `~/.iterm_mcp_logs/`:
 
 ## Testing
 
-Run the tests with:
+The project includes a comprehensive test suite with 98+ passing tests covering:
+- Core session and terminal management
+- Agent and team orchestration
+- gRPC server and client functionality
+- Command output tracking
+- Model validation
+- Logging infrastructure
 
+### Running Tests
+
+Run all tests (Linux/macOS):
 ```bash
-python -m unittest discover tests
+python -m pytest tests/ -v
 ```
+
+Run tests with coverage:
+```bash
+python -m pytest tests/ --cov=core --cov=iterm_mcpy --cov=utils --cov-report=term-missing
+```
+
+Run specific test files:
+```bash
+python -m pytest tests/test_models.py -v
+python -m pytest tests/test_agent_registry.py -v
+```
+
+### Test Categories
+
+**Unit Tests** (run on all platforms):
+- `test_models.py` - Pydantic model validation
+- `test_agent_registry.py` - Agent/team management
+- `test_command_output_tracking.py` - Command tracking logic
+- `test_grpc_smoke.py` - gRPC service smoke tests
+- `test_grpc_client.py` - gRPC client tests
+
+**Integration Tests** (require macOS + iTerm2):
+- `test_basic_functionality.py` - Core session operations
+- `test_advanced_features.py` - Monitoring, layouts, etc.
+- `test_line_limits.py` - Output truncation
+- `test_logging.py` - Logging infrastructure
+- `test_persistent_session.py` - Session persistence
+
+### Development
+
+Install development dependencies:
+```bash
+pip install -e ".[dev]"
+```
+
+This includes pytest, pytest-cov, black, mypy, and isort for testing and code quality.
 
 ## Logging and Monitoring
 
