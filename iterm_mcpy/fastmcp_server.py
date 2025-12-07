@@ -19,11 +19,14 @@ from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage
+from utils.telemetry import TelemetryEmitter
 
 # Global references for resources (set during lifespan)
 _terminal: Optional[ItermTerminal] = None
 _logger: Optional[logging.Logger] = None
 _agent_registry: Optional[AgentRegistry] = None
+_telemetry: Optional[TelemetryEmitter] = None
+_telemetry_server_task: Optional[asyncio.Task] = None
 
 
 @asynccontextmanager
@@ -90,11 +93,17 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         agent_registry = AgentRegistry()
         logger.info("Agent registry initialized successfully")
 
+        telemetry = TelemetryEmitter(
+            log_manager=getattr(terminal, "log_manager", None),
+            agent_registry=agent_registry,
+        )
+
         # Set global references for resources
-        global _terminal, _logger, _agent_registry
+        global _terminal, _logger, _agent_registry, _telemetry
         _terminal = terminal
         _logger = logger
         _agent_registry = agent_registry
+        _telemetry = telemetry
 
         # Yield the initialized components
         yield {
@@ -103,7 +112,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "layout_manager": layout_manager,
             "agent_registry": agent_registry,
             "logger": logger,
-            "log_dir": log_dir
+            "log_dir": log_dir,
+            "telemetry": telemetry
         }
 
     finally:
@@ -190,6 +200,51 @@ def check_condition(content: str, condition: Optional[str]) -> bool:
         return bool(re.search(condition, content))
     except re.error:
         return False
+
+
+async def _start_telemetry_server(port: int, duration: int = 300) -> str:
+    """Start a lightweight HTTP server that streams telemetry JSON."""
+
+    if _telemetry is None or _terminal is None:
+        raise RuntimeError("Telemetry not initialized")
+
+    global _telemetry_server_task
+
+    if _telemetry_server_task:
+        _telemetry_server_task.cancel()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await _terminal.get_sessions()
+            payload = _telemetry.dashboard_state(_terminal)
+            body = json.dumps(payload, indent=2)
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body.encode())}\r\n"
+                "Connection: close\r\n\r\n"
+                f"{body}"
+            )
+            writer.write(response.encode())
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def serve() -> None:
+        server = await asyncio.start_server(handle, "0.0.0.0", port)
+        try:
+            async with server:
+                await asyncio.wait_for(server.serve_forever(), timeout=duration)
+        except asyncio.TimeoutError:
+            # Normal shutdown after duration
+            pass
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    _telemetry_server_task = asyncio.create_task(serve())
+    return f"Telemetry web dashboard running at http://localhost:{port} for {duration}s"
 
 
 # ============================================================================
@@ -1149,9 +1204,60 @@ async def stop_monitoring_session(
         return f"Error: {e}"
 
 
+@mcp.tool()
+async def show_dashboard(
+    ctx: Context,
+    mode: str = "tui",
+    port: int = 7002,
+    duration_seconds: int = 180,
+) -> str:
+    """Display or host the telemetry dashboard.
+
+    Args:
+        mode: "tui" to return a text dashboard, "web" to start a local HTTP server
+        port: Port for the HTTP dashboard
+        duration_seconds: How long to keep the HTTP dashboard alive
+    """
+
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    telemetry: TelemetryEmitter = ctx.request_context.lifespan_context["telemetry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    await terminal.get_sessions()
+    state = telemetry.dashboard_state(terminal)
+
+    if mode.lower() == "web":
+        try:
+            message = await _start_telemetry_server(port=port, duration=duration_seconds)
+            return (
+                f"{message}. Use telemetry://dashboard for JSON or open the port in a browser."
+            )
+        except Exception as e:
+            logger.error(f"Failed to start telemetry dashboard: {e}")
+            return f"Error starting dashboard: {e}"
+
+    return telemetry.format_tui(state)
+
+
 # ============================================================================
 # RESOURCES
 # ============================================================================
+
+@mcp.resource("telemetry://dashboard")
+async def telemetry_dashboard() -> str:
+    """Return aggregated telemetry useful for dashboards."""
+
+    if _terminal is None or _logger is None or _telemetry is None:
+        raise RuntimeError("Server not initialized. Please wait for initialization to complete.")
+
+    try:
+        await _terminal.get_sessions()
+        state = _telemetry.dashboard_state(_terminal)
+        return json.dumps(state, indent=2)
+    except Exception as e:
+        _logger.error(f"Error generating telemetry dashboard: {e}")
+        return f"Error: {e}"
+
 
 @mcp.resource("terminal://{session_id}/output")
 async def get_terminal_output(session_id: str) -> str:
