@@ -33,6 +33,9 @@ service ITermService {
 
   // Cascading messages
   rpc SendCascadeMessage (CascadeMessageRequest) returns (CascadeMessageResponse);
+
+  // High-level orchestration
+  rpc OrchestratePlaybook (OrchestrateRequest) returns (OrchestrateResponse);
 }
 
 // ==================== Basic Messages ====================
@@ -265,4 +268,36 @@ message CascadeMessageResponse {
   repeated CascadeResult results = 1;
   int32 delivered_count = 2;
   int32 skipped_count = 3;
+}
+
+// ==================== Orchestration ====================
+
+message PlaybookCommand {
+  string name = 1;  // Optional label for the command block
+  repeated SessionMessage messages = 2;  // Messages to send
+  bool parallel = 3;  // Whether to send messages in parallel
+  bool skip_duplicates = 4;  // Whether to skip duplicate agent deliveries
+}
+
+message Playbook {
+  CreateSessionsRequest layout = 1;  // Optional layout/session creation
+  repeated PlaybookCommand commands = 2;  // Ordered command blocks
+  CascadeMessageRequest cascade = 3;  // Optional cascade after commands
+  ReadSessionsRequest reads = 4;  // Optional final reads/monitoring
+}
+
+message PlaybookCommandResult {
+  string name = 1;
+  WriteToSessionsResponse write_result = 2;
+}
+
+message OrchestrateRequest {
+  Playbook playbook = 1;
+}
+
+message OrchestrateResponse {
+  CreateSessionsResponse layout = 1;
+  repeated PlaybookCommandResult commands = 2;
+  CascadeMessageResponse cascade = 3;
+  ReadSessionsResponse reads = 4;
 }

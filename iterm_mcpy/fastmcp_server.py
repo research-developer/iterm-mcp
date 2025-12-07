@@ -10,7 +10,7 @@ import os
 import re
 import sys
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, List, Optional, Union, Any
+from typing import AsyncIterator, Dict, List, Optional, Any
 
 import iterm2
 from mcp.server.fastmcp import FastMCP, Context
@@ -19,6 +19,32 @@ from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage
+from core.models import (
+    SessionTarget,
+    SessionMessage,
+    WriteToSessionsRequest,
+    WriteResult,
+    WriteToSessionsResponse,
+    ReadTarget,
+    ReadSessionsRequest,
+    ReadSessionsResponse,
+    SessionOutput,
+    SessionConfig,
+    CreateSessionsRequest,
+    CreatedSession,
+    CreateSessionsResponse,
+    CascadeMessageRequest,
+    CascadeResult,
+    CascadeMessageResponse,
+    RegisterAgentRequest,
+    CreateTeamRequest,
+    SetActiveSessionRequest,
+    PlaybookCommand,
+    Playbook,
+    PlaybookCommandResult,
+    OrchestrateRequest,
+    OrchestrateResponse,
+)
 
 # Global references for resources (set during lifespan)
 _terminal: Optional[ItermTerminal] = None
@@ -192,6 +218,323 @@ def check_condition(content: str, condition: Optional[str]) -> bool:
         return False
 
 
+def ensure_model(model_cls, payload):
+    """Validate or coerce an incoming payload into a Pydantic model."""
+
+    if isinstance(payload, model_cls):
+        return payload
+    return model_cls.model_validate(payload)
+
+
+async def resolve_target_sessions(
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    targets: Optional[List[SessionTarget]] = None,
+) -> List[ItermSession]:
+    """Resolve a list of session targets to unique sessions."""
+
+    if not targets:
+        return await resolve_session(terminal, agent_registry)
+
+    sessions: List[ItermSession] = []
+    seen = set()
+
+    for target in targets:
+        resolved = await resolve_session(
+            terminal,
+            agent_registry,
+            session_id=target.session_id,
+            name=target.name,
+            agent=target.agent,
+            team=target.team,
+        )
+        for session in resolved:
+            if session.id not in seen:
+                sessions.append(session)
+                seen.add(session.id)
+
+    return sessions
+
+
+async def execute_create_sessions(
+    create_request: CreateSessionsRequest,
+    terminal: ItermTerminal,
+    layout_manager: LayoutManager,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> CreateSessionsResponse:
+    """Create sessions based on a CreateSessionsRequest."""
+
+    try:
+        layout_type = LayoutType[create_request.layout.upper()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Invalid layout type: {create_request.layout}. Use one of: {[lt.name for lt in LayoutType]}"
+        ) from exc
+
+    pane_names = [cfg.name or f"Session-{idx}" for idx, cfg in enumerate(create_request.sessions)]
+    logger.info(f"Creating layout {layout_type.name} with panes: {pane_names}")
+
+    sessions_map = await layout_manager.create_layout(layout_type=layout_type, pane_names=pane_names)
+    created: List[CreatedSession] = []
+
+    for pane_name, session_id in sessions_map.items():
+        session = await terminal.get_session_by_id(session_id)
+        if not session:
+            continue
+
+        config = next((cfg for cfg in create_request.sessions if cfg.name == pane_name), None)
+
+        agent_name = None
+        if config and config.agent:
+            teams = [config.team] if config.team else []
+            agent_registry.register_agent(
+                name=config.agent,
+                session_id=session.id,
+                teams=teams,
+            )
+            agent_name = config.agent
+
+        if config and config.command:
+            await session.execute_command(config.command)
+
+        if config and config.monitor:
+            await session.start_monitoring(update_interval=0.2)
+
+        created.append(
+            CreatedSession(
+                session_id=session.id,
+                name=session.name,
+                agent=agent_name,
+                persistent_id=session.persistent_id,
+            )
+        )
+
+    if created and not agent_registry.active_session:
+        agent_registry.active_session = created[0].session_id
+
+    return CreateSessionsResponse(sessions=created, window_id=create_request.window_id or "")
+
+
+async def execute_write_request(
+    write_request: WriteToSessionsRequest,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> WriteToSessionsResponse:
+    """Send messages according to WriteToSessionsRequest and return structured results."""
+
+    results: List[WriteResult] = []
+
+    async def send_to_session(session: ItermSession, message: SessionMessage) -> WriteResult:
+        result = WriteResult(session_id=session.id, session_name=session.name)
+
+        if message.condition:
+            output = await session.get_screen_contents()
+            if not check_condition(output, message.condition):
+                result.skipped = True
+                result.skipped_reason = "condition_not_met"
+                return result
+
+        agent = agent_registry.get_agent_by_session(session.id)
+        if write_request.skip_duplicates and agent:
+            if agent_registry.was_message_sent(message.content, agent.name):
+                result.skipped = True
+                result.skipped_reason = "duplicate"
+                return result
+
+        try:
+            if message.execute:
+                await session.execute_command(message.content)
+            else:
+                await session.send_text(message.content, execute=False)
+
+            if agent:
+                agent_registry.record_message_sent(message.content, [agent.name])
+            result.success = True
+        except Exception as exc:
+            result.error = str(exc)
+
+        return result
+
+    tasks: List[Any] = []
+
+    for message in write_request.messages:
+        sessions = await resolve_target_sessions(terminal, agent_registry, message.targets)
+        if not sessions:
+            results.append(
+                WriteResult(
+                    session_id="",
+                    session_name=None,
+                    success=False,
+                    error="No matching sessions found",
+                    skipped=True,
+                    skipped_reason="no_match",
+                )
+            )
+            continue
+
+        for session in sessions:
+            if write_request.parallel:
+                tasks.append(send_to_session(session, message))
+            else:
+                results.append(await send_to_session(session, message))
+
+    if write_request.parallel and tasks:
+        for response in await asyncio.gather(*tasks):
+            results.append(response)
+
+    sent_count = sum(1 for r in results if r.success)
+    skipped_count = sum(1 for r in results if r.skipped)
+    error_count = sum(1 for r in results if not r.success and not r.skipped)
+
+    logger.info(f"Delivered {sent_count}/{len(results)} messages (skipped={skipped_count}, errors={error_count})")
+
+    return WriteToSessionsResponse(
+        results=results,
+        sent_count=sent_count,
+        skipped_count=skipped_count,
+        error_count=error_count,
+    )
+
+
+async def execute_read_request(
+    read_request: ReadSessionsRequest,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> ReadSessionsResponse:
+    """Read outputs according to ReadSessionsRequest."""
+
+    outputs: List[SessionOutput] = []
+
+    async def read_from_session(session: ItermSession, max_lines: Optional[int]) -> SessionOutput:
+        content = await session.get_screen_contents(max_lines=max_lines)
+
+        if read_request.filter_pattern:
+            try:
+                pattern = re.compile(read_request.filter_pattern)
+                lines = content.split("\n")
+                filtered = [line for line in lines if pattern.search(line)]
+                content = "\n".join(filtered)
+            except re.error as regex_err:
+                logger.error(f"Invalid filter_pattern '{read_request.filter_pattern}': {regex_err}")
+
+        agent = agent_registry.get_agent_by_session(session.id)
+        line_count = len(content.split("\n")) if content else 0
+        truncated = bool(max_lines and line_count >= max_lines)
+
+        return SessionOutput(
+            session_id=session.id,
+            name=session.name,
+            agent=agent.name if agent else None,
+            content=content,
+            line_count=line_count,
+            truncated=truncated,
+        )
+
+    tasks: List[Any] = []
+
+    targets = read_request.targets or [ReadTarget()]
+    for target in targets:
+        sessions = await resolve_target_sessions(
+            terminal,
+            agent_registry,
+            [
+                SessionTarget(
+                    session_id=target.session_id,
+                    name=target.name,
+                    agent=target.agent,
+                    team=target.team,
+                )
+            ] if any([target.session_id, target.name, target.agent, target.team]) else None,
+        )
+
+        for session in sessions:
+            if read_request.parallel:
+                tasks.append(read_from_session(session, target.max_lines))
+            else:
+                outputs.append(await read_from_session(session, target.max_lines))
+
+    if read_request.parallel and tasks:
+        outputs.extend(await asyncio.gather(*tasks))
+
+    logger.info(f"Read output from {len(outputs)} sessions")
+    return ReadSessionsResponse(outputs=outputs, total_sessions=len(outputs))
+
+
+async def execute_cascade_request(
+    cascade_request: CascadeMessageRequest,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> CascadeMessageResponse:
+    """Execute a cascade delivery and return structured results."""
+
+    cascade = CascadingMessage(
+        broadcast=cascade_request.broadcast,
+        teams=cascade_request.teams,
+        agents=cascade_request.agents,
+    )
+
+    message_targets = agent_registry.resolve_cascade_targets(cascade)
+    results: List[CascadeResult] = []
+    delivered = 0
+    skipped = 0
+
+    for message, agent_names in message_targets.items():
+        if cascade_request.skip_duplicates:
+            agent_names = agent_registry.filter_unsent_recipients(message, agent_names)
+
+        delivered_agents = []
+        for agent_name in agent_names:
+            agent = agent_registry.get_agent(agent_name)
+            if not agent:
+                continue
+
+            session = await terminal.get_session_by_id(agent.session_id)
+            if not session:
+                results.append(
+                    CascadeResult(
+                        agent=agent_name,
+                        session_id="",
+                        message_type="unknown",
+                        delivered=False,
+                        skipped_reason="session_not_found",
+                    )
+                )
+                skipped += 1
+                continue
+
+            message_type = "broadcast"
+            if cascade_request.agents.get(agent_name, None) == message:
+                message_type = "agent"
+            elif any(agent.is_member_of(team) and cascade_request.teams.get(team) == message for team in cascade_request.teams):
+                message_type = "team"
+
+            if cascade_request.execute:
+                await session.execute_command(message)
+            else:
+                await session.send_text(message, execute=False)
+
+            results.append(
+                CascadeResult(
+                    agent=agent_name,
+                    session_id=session.id,
+                    message_type=message_type,
+                    delivered=True,
+                )
+            )
+            delivered_agents.append(agent_name)
+            delivered += 1
+
+        if delivered_agents:
+            agent_registry.record_message_sent(message, delivered_agents)
+
+    logger.info(f"Cascade: delivered={delivered}, skipped={skipped}")
+    return CascadeMessageResponse(results=results, delivered_count=delivered, skipped_count=skipped)
+
+
 # ============================================================================
 # SESSION MANAGEMENT TOOLS
 # ============================================================================
@@ -222,25 +565,22 @@ async def list_sessions(ctx: Context) -> str:
 
 
 @mcp.tool()
-async def set_active_session(
-    ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None
-) -> str:
-    """Set the active session for subsequent operations.
+async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> str:
+    """Set the active session for subsequent operations."""
 
-    Args:
-        session_id: Direct session ID
-        agent: Agent name
-        name: Session name
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent)
+        req = ensure_model(SetActiveSessionRequest, request)
+        sessions = await resolve_session(
+            terminal,
+            agent_registry,
+            session_id=req.session_id,
+            name=req.name,
+            agent=req.agent,
+        )
         if not sessions:
             return "No matching session found"
 
@@ -254,25 +594,22 @@ async def set_active_session(
 
 
 @mcp.tool()
-async def focus_session(
-    ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None
-) -> str:
-    """Focus on a specific terminal session.
+async def focus_session(request: SetActiveSessionRequest, ctx: Context) -> str:
+    """Focus on a specific terminal session."""
 
-    Args:
-        session_id: Direct session ID
-        agent: Agent name
-        name: Session name
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent)
+        req = ensure_model(SetActiveSessionRequest, request)
+        sessions = await resolve_session(
+            terminal,
+            agent_registry,
+            session_id=req.session_id,
+            name=req.name,
+            agent=req.agent,
+        )
         if not sessions:
             return "No matching session found"
 
@@ -286,99 +623,19 @@ async def focus_session(
 
 
 @mcp.tool()
-async def create_sessions(
-    layout_type: str,
-    ctx: Context,
-    session_configs: Optional[List[Dict[str, Any]]] = None
-) -> str:
-    """Create new terminal sessions with optional agent registration.
+async def create_sessions(request: CreateSessionsRequest, ctx: Context) -> str:
+    """Create new terminal sessions with optional agent registration."""
 
-    Args:
-        layout_type: Layout type (single, horizontal, vertical, quad)
-        session_configs: Optional list of session configurations:
-            - name: Session name (required)
-            - agent: Agent name to register (optional)
-            - team: Team to assign agent to (optional)
-            - command: Initial command to run (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     layout_manager = ctx.request_context.lifespan_context["layout_manager"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Convert layout type
-        layout_map = {
-            "single": LayoutType.SINGLE,
-            "horizontal": LayoutType.HORIZONTAL_SPLIT,
-            "vertical": LayoutType.VERTICAL_SPLIT,
-            "quad": LayoutType.QUAD
-        }
-        layout_type_enum = layout_map.get(layout_type.lower())
-        if not layout_type_enum:
-            return f"Invalid layout type: {layout_type}. Use: single, horizontal, vertical, quad"
-
-        # Extract session names from configs
-        session_names = None
-        if session_configs:
-            session_names = [c.get("name", f"Session-{i}") for i, c in enumerate(session_configs)]
-
-        # Create the layout
-        logger.info(f"Creating {layout_type} layout with sessions: {session_names}")
-        sessions_map = await layout_manager.create_layout(
-            layout_type=layout_type_enum,
-            pane_names=session_names
-        )
-
-        result = []
-
-        # Process each created session
-        for session_name, session_id in sessions_map.items():
-            session = await terminal.get_session_by_id(session_id)
-            if not session:
-                continue
-
-            session_info = {
-                "session_id": session.id,
-                "name": session.name,
-                "persistent_id": session.persistent_id,
-                "agent": None,
-                "team": None
-            }
-
-            # Find matching config
-            if session_configs:
-                for config in session_configs:
-                    if config.get("name") == session_name:
-                        # Register agent if specified
-                        agent_name = config.get("agent")
-                        team_name = config.get("team")
-
-                        if agent_name:
-                            teams = [team_name] if team_name else []
-                            agent_registry.register_agent(
-                                name=agent_name,
-                                session_id=session.id,
-                                teams=teams
-                            )
-                            session_info["agent"] = agent_name
-                            session_info["team"] = team_name
-
-                        # Execute initial command
-                        command = config.get("command")
-                        if command:
-                            await session.execute_command(command)
-
-                        break
-
-            result.append(session_info)
-
-        # Set first session as active if none set
-        if result and not agent_registry.active_session:
-            agent_registry.active_session = result[0]["session_id"]
-
-        logger.info(f"Created {len(result)} sessions")
-        return json.dumps(result, indent=2)
+        create_request = ensure_model(CreateSessionsRequest, request)
+        result = await execute_create_sessions(create_request, terminal, layout_manager, agent_registry, logger)
+        logger.info(f"Created {len(result.sessions)} sessions")
+        return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error creating sessions: {e}")
         return f"Error: {e}"
@@ -389,317 +646,107 @@ async def create_sessions(
 # ============================================================================
 
 @mcp.tool()
-async def write_to_sessions(
-    messages: List[Dict[str, Any]],
-    ctx: Context,
-    parallel: bool = True,
-    skip_duplicates: bool = True
-) -> str:
-    """Write messages to one or more sessions.
+async def write_to_sessions(request: WriteToSessionsRequest, ctx: Context) -> str:
+    """Write messages to one or more sessions using the gRPC-aligned schema."""
 
-    Args:
-        messages: List of message objects:
-            - content: Text to send (required)
-            - session_id: Target session ID (optional)
-            - name: Target session name (optional)
-            - agent: Target agent name (optional)
-            - team: Target team (sends to all members) (optional)
-            - condition: Regex pattern - only send if session output matches (optional)
-            - execute: Whether to press Enter (default: true)
-        parallel: Execute sends in parallel (default: true)
-        skip_duplicates: Skip if message already sent to target (default: true)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
-    results = []
-
-    async def send_to_session(session: ItermSession, content: str, execute: bool, condition: Optional[str]) -> Dict:
-        """Send message to a single session."""
-        result = {
-            "session_id": session.id,
-            "name": session.name,
-            "delivered": False,
-            "skipped_reason": None
-        }
-
-        # Check condition if specified
-        if condition:
-            output = await session.get_screen_contents()
-            if not check_condition(output, condition):
-                result["skipped_reason"] = "condition_not_met"
-                return result
-
-        # Check for duplicates
-        agent = agent_registry.get_agent_by_session(session.id)
-        if skip_duplicates and agent:
-            if agent_registry.was_message_sent(content, agent.name):
-                result["skipped_reason"] = "duplicate"
-                return result
-
-        # Send the message
-        if execute:
-            await session.execute_command(content)
-        else:
-            await session.send_text(content, execute=False)
-
-        # Record message sent
-        if agent:
-            agent_registry.record_message_sent(content, [agent.name])
-
-        result["delivered"] = True
-        return result
-
     try:
-        tasks = []
-
-        for msg in messages:
-            content = msg.get("content", "")
-            if not content:
-                continue
-
-            execute = msg.get("execute", True)
-            condition = msg.get("condition")
-
-            # Resolve target sessions
-            sessions = await resolve_session(
-                terminal, agent_registry,
-                session_id=msg.get("session_id"),
-                name=msg.get("name"),
-                agent=msg.get("agent"),
-                team=msg.get("team")
-            )
-
-            if not sessions:
-                results.append({
-                    "content": content[:50],
-                    "error": "No matching sessions found"
-                })
-                continue
-
-            # Create tasks for each session
-            for session in sessions:
-                if parallel:
-                    tasks.append(send_to_session(session, content, execute, condition))
-                else:
-                    result = await send_to_session(session, content, execute, condition)
-                    results.append(result)
-
-        # Execute parallel tasks
-        if parallel and tasks:
-            parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in parallel_results:
-                if isinstance(r, Exception):
-                    results.append({"error": str(r)})
-                else:
-                    results.append(r)
-
-        delivered = sum(1 for r in results if r.get("delivered"))
-        logger.info(f"Delivered {delivered}/{len(results)} messages")
-
-        return json.dumps({
-            "results": results,
-            "delivered_count": delivered,
-            "total_count": len(results)
-        }, indent=2)
+        write_request = ensure_model(WriteToSessionsRequest, request)
+        result = await execute_write_request(write_request, terminal, agent_registry, logger)
+        return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error in write_to_sessions: {e}")
         return f"Error: {e}"
 
 
 @mcp.tool()
-async def read_sessions(
-    ctx: Context,
-    targets: Optional[List[Dict[str, Any]]] = None,
-    parallel: bool = True,
-    filter_pattern: Optional[str] = None
-) -> str:
-    """Read output from one or more sessions.
+async def read_sessions(request: ReadSessionsRequest, ctx: Context) -> str:
+    """Read output from one or more sessions."""
 
-    Args:
-        targets: List of target specifications (optional, uses active session if empty):
-            - session_id: Direct session ID (optional)
-            - name: Session name (optional)
-            - agent: Agent name (optional)
-            - team: Team name (reads all members) (optional)
-            - max_lines: Override default max lines (optional)
-        parallel: Read sessions in parallel (default: true)
-        filter_pattern: Regex pattern to filter output lines (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
-    results = []
-
-    async def read_from_session(session: ItermSession, max_lines: Optional[int]) -> Dict:
-        """Read output from a single session."""
-        output = await session.get_screen_contents(max_lines=max_lines)
-
-        # Apply filter if specified
-        if filter_pattern:
-            try:
-                pattern = re.compile(filter_pattern)
-                lines = output.split("\n")
-                filtered_lines = [l for l in lines if pattern.search(l)]
-                output = "\n".join(filtered_lines)
-            except re.error as regex_err:
-                logger.error(f"Invalid filter_pattern '{filter_pattern}': {regex_err}")
-
-        agent = agent_registry.get_agent_by_session(session.id)
-
-        return {
-            "session_id": session.id,
-            "name": session.name,
-            "agent": agent.name if agent else None,
-            "content": output,
-            "line_count": len(output.split("\n"))
-        }
-
     try:
-        # If no targets, use active session
-        if not targets:
-            targets = [{}]
-
-        tasks = []
-
-        for target in targets:
-            sessions = await resolve_session(
-                terminal, agent_registry,
-                session_id=target.get("session_id"),
-                name=target.get("name"),
-                agent=target.get("agent"),
-                team=target.get("team")
-            )
-
-            max_lines = target.get("max_lines")
-
-            for session in sessions:
-                if parallel:
-                    tasks.append(read_from_session(session, max_lines))
-                else:
-                    result = await read_from_session(session, max_lines)
-                    results.append(result)
-
-        # Execute parallel tasks
-        if parallel and tasks:
-            parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in parallel_results:
-                if isinstance(r, Exception):
-                    results.append({"error": str(r)})
-                else:
-                    results.append(r)
-
-        logger.info(f"Read output from {len(results)} sessions")
-
-        return json.dumps({
-            "outputs": results,
-            "total_sessions": len(results)
-        }, indent=2)
+        read_request = ensure_model(ReadSessionsRequest, request)
+        result = await execute_read_request(read_request, terminal, agent_registry, logger)
+        return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error in read_sessions: {e}")
         return f"Error: {e}"
 
 
 @mcp.tool()
-async def send_cascade_message(
-    ctx: Context,
-    broadcast: Optional[str] = None,
-    teams: Optional[Dict[str, str]] = None,
-    agents: Optional[Dict[str, str]] = None,
-    skip_duplicates: bool = True,
-    execute: bool = True
-) -> str:
-    """Send cascading messages to agents/teams.
+async def send_cascade_message(request: CascadeMessageRequest, ctx: Context) -> str:
+    """Send cascading messages to agents/teams."""
 
-    Messages cascade with increasing specificity:
-    1. Broadcast goes to ALL agents
-    2. Team messages override broadcast for team members
-    3. Agent messages override both for specific agents
-
-    Args:
-        broadcast: Message sent to ALL agents (optional)
-        teams: Team-specific messages {team_name: message} (optional)
-        agents: Agent-specific messages {agent_name: message} (optional)
-        skip_duplicates: Skip if message already sent (default: true)
-        execute: Press Enter after sending (default: true)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        cascade = CascadingMessage(
-            broadcast=broadcast,
-            teams=teams or {},
-            agents=agents or {}
-        )
-
-        # Resolve cascade to message -> [agent_names]
-        message_targets = agent_registry.resolve_cascade_targets(cascade)
-
-        results = []
-        delivered = 0
-        skipped = 0
-
-        for message, agent_names in message_targets.items():
-            # Filter duplicates
-            if skip_duplicates:
-                agent_names = agent_registry.filter_unsent_recipients(message, agent_names)
-
-            actually_delivered = []
-            # Get session IDs
-            for agent_name in agent_names:
-                agent = agent_registry.get_agent(agent_name)
-                if not agent:
-                    continue
-
-                session = await terminal.get_session_by_id(agent.session_id)
-                if not session:
-                    results.append({
-                        "agent": agent_name,
-                        "delivered": False,
-                        "skipped_reason": "session_not_found"
-                    })
-                    skipped += 1
-                    continue
-
-                # Determine message type based on where this specific message came from
-                message_type = "broadcast"
-                if agent_name in (agents or {}) and (agents or {}).get(agent_name) == message:
-                    message_type = "agent"
-                elif any(agent.is_member_of(t) and (teams or {}).get(t) == message for t in (teams or {}).keys()):
-                    message_type = "team"
-
-                # Send message
-                if execute:
-                    await session.execute_command(message)
-                else:
-                    await session.send_text(message, execute=False)
-
-                results.append({
-                    "agent": agent_name,
-                    "session_id": session.id,
-                    "message_type": message_type,
-                    "delivered": True
-                })
-                delivered += 1
-                actually_delivered.append(agent_name)
-
-            # Record messages sent
-            if actually_delivered:
-                agent_registry.record_message_sent(message, actually_delivered)
-
-        logger.info(f"Cascade: delivered={delivered}, skipped={skipped}")
-
-        return json.dumps({
-            "results": results,
-            "delivered_count": delivered,
-            "skipped_count": skipped
-        }, indent=2)
+        cascade_request = ensure_model(CascadeMessageRequest, request)
+        result = await execute_cascade_request(cascade_request, terminal, agent_registry, logger)
+        return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error in send_cascade_message: {e}")
+        return f"Error: {e}"
+
+
+# ============================================================================
+# ORCHESTRATION TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def orchestrate_playbook(request: OrchestrateRequest, ctx: Context) -> str:
+    """Execute a high-level playbook (layout + commands + cascade + reads)."""
+
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    layout_manager = ctx.request_context.lifespan_context["layout_manager"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        orchestration_request = ensure_model(OrchestrateRequest, request)
+        playbook = orchestration_request.playbook
+
+        response = OrchestrateResponse()
+
+        if playbook.layout:
+            response.layout = await execute_create_sessions(playbook.layout, terminal, layout_manager, agent_registry, logger)
+
+        command_results: List[PlaybookCommandResult] = []
+        for command in playbook.commands:
+            write_request = WriteToSessionsRequest(
+                messages=command.messages,
+                parallel=command.parallel,
+                skip_duplicates=command.skip_duplicates,
+            )
+            write_result = await execute_write_request(write_request, terminal, agent_registry, logger)
+            command_results.append(PlaybookCommandResult(name=command.name, write_result=write_result))
+
+        response.commands = command_results
+
+        if playbook.cascade:
+            response.cascade = await execute_cascade_request(playbook.cascade, terminal, agent_registry, logger)
+
+        if playbook.reads:
+            response.reads = await execute_read_request(playbook.reads, terminal, agent_registry, logger)
+
+        logger.info(
+            "Playbook completed: layout=%s, commands=%s, cascade=%s, reads=%s",
+            bool(response.layout),
+            len(response.commands),
+            bool(response.cascade),
+            bool(response.reads),
+        )
+
+        return response.model_dump_json(indent=2, exclude_none=True)
+    except Exception as e:
+        logger.error(f"Error orchestrating playbook: {e}")
         return f"Error: {e}"
 
 
@@ -708,29 +755,16 @@ async def send_cascade_message(
 # ============================================================================
 
 @mcp.tool()
-async def send_control_character(
-    control_char: str,
-    ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None,
-    team: Optional[str] = None
-) -> str:
-    """Send a control character to session(s).
+async def send_control_character(control_char: str, target: SessionTarget, ctx: Context) -> str:
+    """Send a control character to session(s)."""
 
-    Args:
-        control_char: Control character ('c' for Ctrl+C, 'd' for Ctrl+D, etc.)
-        session_id: Target session ID (optional)
-        agent: Target agent name (optional)
-        name: Target session name (optional)
-        team: Target team (sends to all members) (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent, team)
+        target_model = ensure_model(SessionTarget, target)
+        sessions = await resolve_target_sessions(terminal, agent_registry, [target_model])
         if not sessions:
             return "No matching sessions found"
 
@@ -781,25 +815,22 @@ async def send_special_key(
 
 
 @mcp.tool()
-async def check_session_status(
-    ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None
-) -> str:
-    """Check status of a session.
+async def check_session_status(request: SetActiveSessionRequest, ctx: Context) -> str:
+    """Check status of a session."""
 
-    Args:
-        session_id: Target session ID (optional)
-        agent: Target agent name (optional)
-        name: Target session name (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent)
+        req = ensure_model(SetActiveSessionRequest, request)
+        sessions = await resolve_session(
+            terminal,
+            agent_registry,
+            session_id=req.session_id,
+            name=req.name,
+            agent=req.agent,
+        )
         if not sessions:
             return "No matching session found"
 
@@ -829,50 +860,34 @@ async def check_session_status(
 # ============================================================================
 
 @mcp.tool()
-async def register_agent(
-    agent_name: str,
-    ctx: Context,
-    session_id: Optional[str] = None,
-    session_name: Optional[str] = None,
-    teams: Optional[List[str]] = None
-) -> str:
-    """Register an agent for a session.
+async def register_agent(request: RegisterAgentRequest, ctx: Context) -> str:
+    """Register an agent for a session."""
 
-    Args:
-        agent_name: Unique name for the agent
-        session_id: Session ID to associate (optional)
-        session_name: Session name to associate (optional)
-        teams: List of teams to join (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Resolve session
-        session = None
-        if session_id:
-            session = await terminal.get_session_by_id(session_id)
-        elif session_name:
-            session = await terminal.get_session_by_name(session_name)
-
+        req = ensure_model(RegisterAgentRequest, request)
+        session = await terminal.get_session_by_id(req.session_id)
         if not session:
-            return "No matching session found. Provide session_id or session_name."
+            return "No matching session found. Provide a valid session_id."
 
-        # Register agent
         agent = agent_registry.register_agent(
-            name=agent_name,
+            name=req.name,
             session_id=session.id,
-            teams=teams or []
+            teams=req.teams,
+            metadata=req.metadata,
         )
 
-        logger.info(f"Registered agent '{agent_name}' for session {session.name}")
+        logger.info(f"Registered agent '{agent.name}' for session {session.name}")
 
         return json.dumps({
             "agent": agent.name,
             "session_id": agent.session_id,
             "session_name": session.name,
-            "teams": agent.teams
+            "teams": agent.teams,
+            "metadata": agent.metadata,
         }, indent=2)
     except Exception as e:
         logger.error(f"Error registering agent: {e}")
@@ -932,30 +947,21 @@ async def remove_agent(
 
 
 @mcp.tool()
-async def create_team(
-    team_name: str,
-    ctx: Context,
-    description: str = "",
-    parent_team: Optional[str] = None
-) -> str:
-    """Create a new team.
+async def create_team(request: CreateTeamRequest, ctx: Context) -> str:
+    """Create a new team."""
 
-    Args:
-        team_name: Unique team name
-        description: Team description (optional)
-        parent_team: Parent team for hierarchy (optional)
-    """
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
+        req = ensure_model(CreateTeamRequest, request)
         team = agent_registry.create_team(
-            name=team_name,
-            description=description,
-            parent_team=parent_team
+            name=req.name,
+            description=req.description,
+            parent_team=req.parent_team,
         )
 
-        logger.info(f"Created team '{team_name}'")
+        logger.info(f"Created team '{team.name}'")
 
         return json.dumps({
             "name": team.name,

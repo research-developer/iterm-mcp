@@ -31,6 +31,110 @@ class ITermClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    # ==================== Helpers ====================
+
+    def _build_session_target(self, target: Dict) -> iterm_mcp_pb2.SessionTarget:
+        return iterm_mcp_pb2.SessionTarget(
+            session_id=target.get('session_id', ''),
+            name=target.get('name', ''),
+            agent=target.get('agent', ''),
+            team=target.get('team', '')
+        )
+
+    def _build_session_message(self, msg: Dict) -> iterm_mcp_pb2.SessionMessage:
+        targets = [self._build_session_target(t) for t in msg.get('targets', [])]
+
+        use_encoding_value = msg.get('use_encoding', 'auto')
+        if isinstance(use_encoding_value, bool):
+            use_encoding_str = 'true' if use_encoding_value else 'false'
+        else:
+            use_encoding_str = str(use_encoding_value)
+
+        return iterm_mcp_pb2.SessionMessage(
+            content=msg.get('content', ''),
+            targets=targets,
+            condition=msg.get('condition', ''),
+            execute=msg.get('execute', True),
+            use_encoding=use_encoding_str
+        )
+
+    def _build_write_request(
+        self,
+        messages: List[Dict],
+        parallel: bool = True,
+        skip_duplicates: bool = True
+    ) -> iterm_mcp_pb2.WriteToSessionsRequest:
+        session_messages = [self._build_session_message(msg) for msg in messages]
+        return iterm_mcp_pb2.WriteToSessionsRequest(
+            messages=session_messages,
+            parallel=parallel,
+            skip_duplicates=skip_duplicates
+        )
+
+    def _build_read_request(
+        self,
+        targets: Optional[List[Dict]] = None,
+        parallel: bool = True,
+        filter_pattern: Optional[str] = None
+    ) -> iterm_mcp_pb2.ReadSessionsRequest:
+        read_targets = []
+        for t in (targets or []):
+            read_targets.append(
+                iterm_mcp_pb2.ReadTarget(
+                    session_id=t.get('session_id', ''),
+                    name=t.get('name', ''),
+                    agent=t.get('agent', ''),
+                    team=t.get('team', ''),
+                    max_lines=t.get('max_lines', 0)
+                )
+            )
+
+        return iterm_mcp_pb2.ReadSessionsRequest(
+            targets=read_targets,
+            parallel=parallel,
+            filter_pattern=filter_pattern or ''
+        )
+
+    def _build_create_sessions_request(
+        self,
+        sessions: List[Dict],
+        layout: str = "SINGLE",
+        window_id: Optional[str] = None
+    ) -> iterm_mcp_pb2.CreateSessionsRequest:
+        session_configs = []
+        for s in sessions:
+            config = iterm_mcp_pb2.SessionConfig(
+                name=s.get('name', ''),
+                agent=s.get('agent', ''),
+                team=s.get('team', ''),
+                command=s.get('command', ''),
+                max_lines=s.get('max_lines', 0),
+                monitor=s.get('monitor', False)
+            )
+            session_configs.append(config)
+
+        return iterm_mcp_pb2.CreateSessionsRequest(
+            sessions=session_configs,
+            layout=layout,
+            window_id=window_id or ''
+        )
+
+    def _build_cascade_request(
+        self,
+        broadcast: Optional[str] = None,
+        teams: Optional[Dict[str, str]] = None,
+        agents: Optional[Dict[str, str]] = None,
+        skip_duplicates: bool = True,
+        execute: bool = True,
+    ) -> iterm_mcp_pb2.CascadeMessageRequest:
+        return iterm_mcp_pb2.CascadeMessageRequest(
+            broadcast=broadcast or '',
+            teams=teams or {},
+            agents=agents or {},
+            skip_duplicates=skip_duplicates,
+            execute=execute,
+        )
+
     # ==================== Session Operations ====================
 
     def list_sessions(self) -> List[iterm_mcp_pb2.Session]:
@@ -94,23 +198,7 @@ class ITermClient:
             layout: Layout type (SINGLE, HORIZONTAL_SPLIT, VERTICAL_SPLIT, QUAD)
             window_id: Optional window ID to create in
         """
-        session_configs = []
-        for s in sessions:
-            config = iterm_mcp_pb2.SessionConfig(
-                name=s.get('name', ''),
-                agent=s.get('agent', ''),
-                team=s.get('team', ''),
-                command=s.get('command', ''),
-                max_lines=s.get('max_lines', 0),
-                monitor=s.get('monitor', False)
-            )
-            session_configs.append(config)
-
-        request = iterm_mcp_pb2.CreateSessionsRequest(
-            sessions=session_configs,
-            layout=layout,
-            window_id=window_id or ''
-        )
+        request = self._build_create_sessions_request(sessions, layout, window_id)
         return self.stub.CreateSessions(request)
 
     # ==================== Write/Read Operations ====================
@@ -128,39 +216,7 @@ class ITermClient:
             parallel: Execute sends in parallel
             skip_duplicates: Skip duplicate messages
         """
-        session_messages = []
-        for msg in messages:
-            targets = []
-            for t in msg.get('targets', []):
-                target = iterm_mcp_pb2.SessionTarget(
-                    session_id=t.get('session_id', ''),
-                    name=t.get('name', ''),
-                    agent=t.get('agent', ''),
-                    team=t.get('team', '')
-                )
-                targets.append(target)
-
-            # Normalize use_encoding to string format
-            use_encoding_value = msg.get('use_encoding', 'auto')
-            if isinstance(use_encoding_value, bool):
-                use_encoding_str = 'true' if use_encoding_value else 'false'
-            else:
-                use_encoding_str = str(use_encoding_value)
-
-            session_msg = iterm_mcp_pb2.SessionMessage(
-                content=msg.get('content', ''),
-                targets=targets,
-                condition=msg.get('condition', ''),
-                execute=msg.get('execute', True),
-                use_encoding=use_encoding_str
-            )
-            session_messages.append(session_msg)
-
-        request = iterm_mcp_pb2.WriteToSessionsRequest(
-            messages=session_messages,
-            parallel=parallel,
-            skip_duplicates=skip_duplicates
-        )
+        request = self._build_write_request(messages, parallel, skip_duplicates)
         return self.stub.WriteToSessions(request)
 
     def read_sessions(
@@ -176,22 +232,7 @@ class ITermClient:
             parallel: Read in parallel
             filter_pattern: Regex pattern to filter output
         """
-        read_targets = []
-        for t in (targets or []):
-            target = iterm_mcp_pb2.ReadTarget(
-                session_id=t.get('session_id', ''),
-                name=t.get('name', ''),
-                agent=t.get('agent', ''),
-                team=t.get('team', ''),
-                max_lines=t.get('max_lines', 0)
-            )
-            read_targets.append(target)
-
-        request = iterm_mcp_pb2.ReadSessionsRequest(
-            targets=read_targets,
-            parallel=parallel,
-            filter_pattern=filter_pattern or ''
-        )
+        request = self._build_read_request(targets, parallel, filter_pattern)
         return self.stub.ReadSessions(request)
 
     def send_control_character(
@@ -335,14 +376,63 @@ class ITermClient:
             skip_duplicates: Skip duplicate messages
             execute: Press Enter after sending
         """
-        request = iterm_mcp_pb2.CascadeMessageRequest(
-            broadcast=broadcast or '',
-            teams=teams or {},
-            agents=agents or {},
-            skip_duplicates=skip_duplicates,
-            execute=execute
-        )
+        request = self._build_cascade_request(broadcast, teams, agents, skip_duplicates, execute)
         return self.stub.SendCascadeMessage(request)
+
+    def orchestrate_playbook(self, playbook: Dict) -> iterm_mcp_pb2.OrchestrateResponse:
+        """Execute a playbook (layout + commands + cascade + reads)."""
+
+        playbook_msg = iterm_mcp_pb2.Playbook()
+
+        layout = playbook.get('layout')
+        if layout:
+            playbook_msg.layout.CopyFrom(
+                self._build_create_sessions_request(
+                    layout.get('sessions', []),
+                    layout.get('layout', 'SINGLE'),
+                    layout.get('window_id')
+                )
+            )
+
+        for command in playbook.get('commands', []):
+            write_request = self._build_write_request(
+                command.get('messages', []),
+                command.get('parallel', True),
+                command.get('skip_duplicates', True)
+            )
+            playbook_msg.commands.append(
+                iterm_mcp_pb2.PlaybookCommand(
+                    name=command.get('name', 'commands'),
+                    messages=write_request.messages,
+                    parallel=write_request.parallel,
+                    skip_duplicates=write_request.skip_duplicates,
+                )
+            )
+
+        cascade = playbook.get('cascade')
+        if cascade:
+            playbook_msg.cascade.CopyFrom(
+                self._build_cascade_request(
+                    cascade.get('broadcast'),
+                    cascade.get('teams'),
+                    cascade.get('agents'),
+                    cascade.get('skip_duplicates', True),
+                    cascade.get('execute', True)
+                )
+            )
+
+        reads = playbook.get('reads')
+        if reads:
+            playbook_msg.reads.CopyFrom(
+                self._build_read_request(
+                    reads.get('targets'),
+                    reads.get('parallel', True),
+                    reads.get('filter_pattern')
+                )
+            )
+
+        request = iterm_mcp_pb2.OrchestrateRequest(playbook=playbook_msg)
+        return self.stub.OrchestratePlaybook(request)
 
     # ==================== Backward Compatibility ====================
 

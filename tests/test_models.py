@@ -7,6 +7,8 @@ from core.models import (
     SessionTarget,
     SessionMessage,
     WriteToSessionsRequest,
+    WriteResult,
+    WriteToSessionsResponse,
     ReadTarget,
     ReadSessionsRequest,
     SessionOutput,
@@ -17,6 +19,9 @@ from core.models import (
     RegisterAgentRequest,
     CreateTeamRequest,
     SetActiveSessionRequest,
+    Playbook,
+    PlaybookCommand,
+    OrchestrateRequest,
 )
 
 
@@ -364,6 +369,57 @@ class TestSetActiveSessionRequest(unittest.TestCase):
         """Test setting active by session name."""
         request = SetActiveSessionRequest(name="MainSession")
         self.assertEqual(request.name, "MainSession")
+
+
+class TestWriteResponses(unittest.TestCase):
+    """Test write result and response models."""
+
+    def test_write_result_defaults(self):
+        """Default write result flags are false/None."""
+        result = WriteResult(session_id="abc", session_name="main")
+        self.assertFalse(result.success)
+        self.assertFalse(result.skipped)
+        self.assertIsNone(result.error)
+
+    def test_write_response_counts(self):
+        """WriteToSessionsResponse computes counts."""
+        response = WriteToSessionsResponse(
+            results=[
+                WriteResult(session_id="1", session_name="a", success=True),
+                WriteResult(session_id="2", session_name="b", skipped=True, skipped_reason="duplicate"),
+                WriteResult(session_id="3", session_name="c", success=False, error="boom"),
+            ],
+            sent_count=1,
+            skipped_count=1,
+            error_count=1,
+        )
+        self.assertEqual(response.sent_count, 1)
+        self.assertEqual(response.skipped_count, 1)
+        self.assertEqual(response.error_count, 1)
+
+
+class TestPlaybookModels(unittest.TestCase):
+    """Test playbook orchestration models."""
+
+    def test_playbook_structure(self):
+        """Playbook nests layout, commands, cascade, and reads."""
+        playbook = Playbook(
+            layout=CreateSessionsRequest(sessions=[SessionConfig(name="one")], layout="SINGLE"),
+            commands=[
+                PlaybookCommand(
+                    name="setup",
+                    messages=[SessionMessage(content="echo hi", targets=[SessionTarget(name="one")])],
+                    parallel=False,
+                )
+            ],
+            cascade=CascadeMessageRequest(broadcast="hello"),
+            reads=ReadSessionsRequest(targets=[ReadTarget(name="one")]),
+        )
+
+        request = OrchestrateRequest(playbook=playbook)
+        self.assertEqual(request.playbook.commands[0].name, "setup")
+        self.assertEqual(request.playbook.commands[0].parallel, False)
+        self.assertIsNotNone(request.playbook.cascade.broadcast)
 
 
 if __name__ == "__main__":

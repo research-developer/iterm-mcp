@@ -358,6 +358,30 @@ list_agents(team="frontend")  # Returns alice and bob
 - `create_sessions` - Create multiple sessions with layout in one call
 - `send_cascade_message` - Send priority-based cascading messages
 
+### Playbook Orchestration
+
+FastMCP now exposes an `orchestrate_playbook` tool (and matching `OrchestratePlaybook` gRPC method) so you can define multi-team workflows once and execute them with a single request:
+
+1. **Create a layout** with `CreateSessionsRequest` (pane names, optional agent/team assignment, initial commands).
+2. **Run command blocks** defined as `PlaybookCommand` entries (parallel flags + `SessionMessage` targets).
+3. **Fan out cascades** via `CascadeMessageRequest` to broadcast, team, or agent recipients with deduplication.
+4. **Monitor results** using a `ReadSessionsRequest` to collect outputs across teams.
+
+Example payload:
+
+```json
+{
+  "playbook": {
+    "layout": {"sessions": [{"name": "Ops"}, {"name": "QA"}], "layout": "VERTICAL_SPLIT"},
+    "commands": [
+      {"name": "bootstrap", "messages": [{"content": "echo ready", "targets": [{"name": "Ops"}]}]}
+    ],
+    "cascade": {"broadcast": "Deploying new build"},
+    "reads": {"targets": [{"team": "qa"}], "parallel": true}
+  }
+}
+```
+
 ### Parallel Session Operations
 
 Write to or read from multiple sessions simultaneously:
