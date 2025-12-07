@@ -293,6 +293,43 @@ async def my_advanced_script():
 asyncio.run(my_advanced_script())
 ```
 
+#### Hierarchical team orchestration (CEO -> Team Leads -> ICs)
+
+The layout manager and MCP tools now understand hierarchical pane specs that include
+team/agent metadata. Pane titles are derived automatically (e.g., `Team Leads :: TL-Backend`),
+and the MCP servers will register the agents and teams for you.
+
+```python
+# Create a 2x2 grid with explicit team/agent hierarchy
+session_map = await layout_manager.create_layout(
+    layout_type=LayoutType.QUAD,
+    pane_hierarchy=[
+        {"team": "Executive", "agent": "CEO"},
+        {"team": "Team Leads", "agent": "TL-Frontend"},
+        {"team": "Team Leads", "agent": "TL-Backend"},
+        {"team": "ICs", "agent": "IC-Oncall"},
+    ],
+)
+
+# When using the FastMCP or gRPC CreateSessions APIs the same hierarchy is
+# auto-registered in AgentRegistry:
+# create_sessions(layout="quad", session_configs=[...])
+
+# Target panes by hierarchy and send cascading messages
+await select_panes_by_hierarchy([
+    {"team": "Team Leads", "agent": "TL-Frontend"}
+])
+
+await send_hierarchical_message(
+    targets=[
+        {"team": "Team Leads", "message": "Share updates for the CEO."},
+        {"team": "Team Leads", "agent": "TL-Backend", "message": "Ship the API fixes."},
+        {"team": "ICs", "agent": "IC-Oncall", "message": "Monitor logs for regressions."},
+    ],
+    broadcast="CEO broadcast: align on launch goals.",
+)
+```
+
 ## MCP Tools and Resources
 
 The FastMCP implementation provides the following:
