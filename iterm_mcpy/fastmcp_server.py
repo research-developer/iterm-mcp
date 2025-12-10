@@ -737,7 +737,7 @@ async def send_cascade_message(
 @mcp.tool()
 async def select_panes_by_hierarchy(
     ctx: Context,
-    targets: List[Dict[str, str]],
+    targets: List[Dict[str, Optional[str]]],
     set_active: bool = True,
 ) -> str:
     """Resolve panes by team/agent hierarchy and optionally focus the first.
