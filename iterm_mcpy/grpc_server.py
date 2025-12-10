@@ -199,8 +199,16 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
 
                 if cfg:
                     team_name = cfg.team
-                    if team_name and not self.agent_registry.get_team(team_name):
-                        self.agent_registry.create_team(team_name)
+                    # Materialize team hierarchy if team_name is a path (e.g., "parent/child")
+                    if team_name:
+                        team_path = team_name.split("/")
+                        parent = None
+                        current_path = ""
+                        for part in team_path:
+                            current_path = part if not current_path else f"{current_path}/{part}"
+                            if not self.agent_registry.get_team(current_path):
+                                self.agent_registry.create_team(current_path, parent=parent)
+                            parent = current_path
 
                     if cfg.agent:
                         teams = [team_name] if team_name else []
