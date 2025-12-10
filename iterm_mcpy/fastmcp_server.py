@@ -834,6 +834,10 @@ async def send_hierarchical_message(
 
     for target in send_targets:
         if target.team and target.agent:
+            agent_obj = agent_registry.get_agent(target.agent)
+            if not agent_obj or not agent_obj.is_member_of(target.team):
+                logger.error(f"Agent '{target.agent}' is not a member of team '{target.team}'. Skipping.")
+                continue
             cascade.agents[target.agent] = target.message or broadcast or ""
         elif target.agent:
             cascade.agents[target.agent] = target.message or broadcast or ""
