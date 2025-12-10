@@ -43,3 +43,45 @@ More examples will be added to demonstrate:
 - Custom layouts
 - gRPC client usage
 - Integration with CI/CD workflows
+
+## Playbook Orchestration (FastMCP)
+
+You can now drive end-to-end flows with a single request using the `orchestrate_playbook` FastMCP tool. The payload mirrors the gRPC models so you can reuse the same shapes for tool calls or direct gRPC invocations:
+
+```json
+{
+  "playbook": {
+    "layout": {
+      "sessions": [
+        {"name": "Frontend", "agent": "fe", "team": "frontend"},
+        {"name": "Backend", "agent": "be", "team": "backend"},
+        {"name": "QA", "agent": "qa", "team": "testing"}
+      ],
+      "layout": "QUAD"
+    },
+    "commands": [
+      {
+        "name": "bootstrap",
+        "parallel": true,
+        "messages": [
+          {"content": "npm install", "targets": [{"team": "frontend"}]},
+          {"content": "pip install -r requirements.txt", "targets": [{"team": "backend"}]}
+        ]
+      }
+    ],
+    "cascade": {
+      "broadcast": "Sync latest code",
+      "teams": {"testing": "Run smoke tests"}
+    },
+    "reads": {
+      "targets": [
+        {"team": "frontend", "max_lines": 40},
+        {"team": "backend", "max_lines": 40}
+      ],
+      "parallel": true
+    }
+  }
+}
+```
+
+This single call will create the layout, register agents, run team-specific commands in parallel, fan out cascade messages, and collect a snapshot of session output for monitoring.

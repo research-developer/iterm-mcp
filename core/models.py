@@ -45,8 +45,8 @@ class SessionMessage(BaseModel):
         description="Whether to press Enter after sending"
     )
     use_encoding: Union[bool, str] = Field(
-        default="auto",
-        description="Base64 encoding: 'auto', True (always), False (never)"
+        default=False,
+        description="Base64 encoding: False (default, direct send), 'auto' (smart), True (always)"
     )
 
     @field_validator('condition', mode='before')
@@ -175,7 +175,27 @@ class CreateSessionsResponse(BaseModel):
     """Response from creating sessions."""
 
     sessions: List[CreatedSession] = Field(..., description="Created sessions")
-    window_id: str = Field(..., description="Window ID containing sessions")
+    window_id: str = Field(default="", description="Window ID containing sessions")
+
+
+class WriteResult(BaseModel):
+    """Result of writing to a single session."""
+
+    session_id: str = Field(..., description="The session ID")
+    session_name: Optional[str] = Field(default=None, description="The session name")
+    success: bool = Field(default=False, description="Whether the write succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    skipped: bool = Field(default=False, description="Whether the write was skipped")
+    skipped_reason: Optional[str] = Field(default=None, description="Reason for skipping")
+
+
+class WriteToSessionsResponse(BaseModel):
+    """Response from writing to sessions."""
+
+    results: List[WriteResult] = Field(..., description="Results for each target session")
+    sent_count: int = Field(..., description="Number of successful sends")
+    skipped_count: int = Field(..., description="Number of skipped sends")
+    error_count: int = Field(..., description="Number of errors")
 
 
 class CascadeMessageRequest(BaseModel):
@@ -247,3 +267,43 @@ class SetActiveSessionRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, description="Session ID")
     agent: Optional[str] = Field(default=None, description="Agent name")
     name: Optional[str] = Field(default=None, description="Session name")
+
+
+class PlaybookCommand(BaseModel):
+    """A named block of commands in a playbook."""
+
+    name: str = Field(default="commands", description="Label for the command block")
+    messages: List[SessionMessage] = Field(..., description="Messages to send")
+    parallel: bool = Field(default=True, description="Send messages in parallel")
+    skip_duplicates: bool = Field(default=True, description="Skip duplicate agent deliveries")
+
+
+class Playbook(BaseModel):
+    """High-level orchestration plan."""
+
+    layout: Optional[CreateSessionsRequest] = Field(default=None, description="Optional layout/session creation")
+    commands: List[PlaybookCommand] = Field(default_factory=list, description="Ordered command blocks")
+    cascade: Optional[CascadeMessageRequest] = Field(default=None, description="Optional cascade after commands")
+    reads: Optional[ReadSessionsRequest] = Field(default=None, description="Optional final read operations")
+
+
+class PlaybookCommandResult(BaseModel):
+    """Result of running a playbook command block."""
+
+    name: str = Field(..., description="Command block label")
+    write_result: WriteToSessionsResponse = Field(..., description="Write results for the block")
+
+
+class OrchestrateRequest(BaseModel):
+    """Request to orchestrate a playbook."""
+
+    playbook: Playbook = Field(..., description="Playbook to execute")
+
+
+class OrchestrateResponse(BaseModel):
+    """Response from orchestrating a playbook."""
+
+    layout: Optional[CreateSessionsResponse] = Field(default=None, description="Layout creation result")
+    commands: List[PlaybookCommandResult] = Field(default_factory=list, description="Command block results")
+    cascade: Optional[CascadeMessageResponse] = Field(default=None, description="Cascade delivery result")
+    reads: Optional[ReadSessionsResponse] = Field(default=None, description="Readback results")

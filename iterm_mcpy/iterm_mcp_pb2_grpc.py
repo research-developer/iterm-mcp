@@ -118,6 +118,11 @@ class ITermServiceStub(object):
                 request_serializer=iterm__mcp__pb2.CascadeMessageRequest.SerializeToString,
                 response_deserializer=iterm__mcp__pb2.CascadeMessageResponse.FromString,
                 _registered_method=True)
+        self.OrchestratePlaybook = channel.unary_unary(
+                '/iterm_mcp.ITermService/OrchestratePlaybook',
+                request_serializer=iterm__mcp__pb2.OrchestrateRequest.SerializeToString,
+                response_deserializer=iterm__mcp__pb2.OrchestrateResponse.FromString,
+                _registered_method=True)
 
 
 class ITermServiceServicer(object):
@@ -232,6 +237,13 @@ class ITermServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def OrchestratePlaybook(self, request, context):
+        """High-level orchestration
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ITermServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -319,6 +331,11 @@ def add_ITermServiceServicer_to_server(servicer, server):
                     servicer.SendCascadeMessage,
                     request_deserializer=iterm__mcp__pb2.CascadeMessageRequest.FromString,
                     response_serializer=iterm__mcp__pb2.CascadeMessageResponse.SerializeToString,
+            ),
+            'OrchestratePlaybook': grpc.unary_unary_rpc_method_handler(
+                    servicer.OrchestratePlaybook,
+                    request_deserializer=iterm__mcp__pb2.OrchestrateRequest.FromString,
+                    response_serializer=iterm__mcp__pb2.OrchestrateResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -780,6 +797,33 @@ class ITermService(object):
             '/iterm_mcp.ITermService/SendCascadeMessage',
             iterm__mcp__pb2.CascadeMessageRequest.SerializeToString,
             iterm__mcp__pb2.CascadeMessageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def OrchestratePlaybook(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/iterm_mcp.ITermService/OrchestratePlaybook',
+            iterm__mcp__pb2.OrchestrateRequest.SerializeToString,
+            iterm__mcp__pb2.OrchestrateResponse.FromString,
             options,
             channel_credentials,
             insecure,

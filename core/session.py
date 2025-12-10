@@ -181,19 +181,26 @@ class ItermSession:
     async def execute_command(
         self,
         command: str,
-        use_encoding: Union[bool, Literal["auto"]] = "auto"
+        use_encoding: Union[bool, Literal["auto"]] = False
     ) -> None:
-        """Execute a command in the session with smart encoding.
+        """Execute a command in the session.
 
-        This method handles complex commands with quotes and special characters
-        by encoding them to avoid shell parsing issues.
+        By default, sends the command directly without any encoding. The base64
+        encoding option exists for edge cases where direct typing fails, but
+        should rarely be needed since most shells handle quoted/escaped input.
 
         Args:
             command: The command to execute (raw, unencoded)
             use_encoding: Encoding mode:
-                - "auto" (default): Only encode if command contains unsafe characters
-                - True: Always use base64 encoding
-                - False: Never encode (direct typing)
+                - False (default): Send command directly (recommended)
+                - "auto": Only encode if command contains unusual characters
+                - True: Always use base64 encoding (rarely needed)
+
+        Note:
+            The base64 encoding wraps commands in 'eval "$(echo ... | base64 -d)"'
+            which can trigger security policy violations in some environments.
+            Only use encoding when absolutely necessary (e.g., binary data or
+            control characters in the command).
         """
         # Strip any trailing newlines/carriage returns from input
         clean_command = command.rstrip("\r\n")
@@ -218,7 +225,7 @@ class ItermSession:
             # Send the wrapper command
             await self.session.async_send_text(wrapper)
         else:
-            # Direct sending - command is simple enough
+            # Direct sending - command is sent as-is (default behavior)
             await self.session.async_send_text(clean_command)
 
         # Small delay to ensure the command text is fully processed by the terminal
