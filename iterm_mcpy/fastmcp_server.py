@@ -332,7 +332,7 @@ async def create_sessions(
             pane_hierarchy = [
                 {
                     "name": c.get("name"),
-                    "team": c.get("team") or (c.get("team_path")[-1] if c.get("team_path") else None),
+                    "team": c.get("team") or (c.get("team_path")[-1] if c.get("team_path") and len(c.get("team_path")) > 0 else None),
                     "agent": c.get("agent"),
                     "team_path": c.get("team_path"),
                 }
