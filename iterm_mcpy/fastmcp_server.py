@@ -41,6 +41,10 @@ from core.models import (
     PlaybookCommandResult,
     OrchestrateRequest,
     OrchestrateResponse,
+    SetSessionAppearancesRequest,
+    SessionAppearance,
+    AppearanceResult,
+    SetSessionAppearancesResponse,
 )
 
 # Global references for resources (set during lifespan)
@@ -541,18 +545,31 @@ async def execute_cascade_request(
 # ============================================================================
 
 @mcp.tool()
-async def list_sessions(ctx: Context) -> str:
-    """List all available terminal sessions with agent info."""
+async def list_sessions(
+    ctx: Context,
+    agents_only: bool = False,
+) -> str:
+    """List all available terminal sessions with agent info.
+
+    Args:
+        agents_only: If True, only show sessions with registered agents
+    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
-    logger.info("Listing all active sessions")
+    logger.info(f"Listing sessions{' (agents_only)' if agents_only else ''}")
+
     sessions = list(terminal.sessions.values())
     result = []
 
     for session in sessions:
         agent = agent_registry.get_agent_by_session(session.id)
+
+        # Apply filter
+        if agents_only and agent is None:
+            continue
+
         result.append({
             "id": session.id,
             "name": session.name,
@@ -1256,6 +1273,152 @@ async def remove_agent_from_team(
             return f"Failed to remove agent from team (agent not found or not a member)"
     except Exception as e:
         logger.error(f"Error removing agent from team: {e}")
+        return f"Error: {e}"
+
+
+# ============================================================================
+# VISUAL APPEARANCE TOOLS
+# ============================================================================
+
+async def apply_session_appearance(
+    session: ItermSession,
+    appearance: SessionAppearance,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> AppearanceResult:
+    """Apply appearance settings to a single session."""
+    agent = agent_registry.get_agent_by_session(session.id)
+    result = AppearanceResult(
+        session_id=session.id,
+        session_name=session.name,
+        agent=agent.name if agent else None,
+    )
+    changes = []
+
+    try:
+        # Reset first if requested
+        if appearance.reset:
+            await session.reset_colors()
+            changes.append("reset_colors")
+
+        # Apply background color
+        if appearance.background_color:
+            c = appearance.background_color
+            await session.set_background_color(c.red, c.green, c.blue, c.alpha)
+            changes.append(f"background_color=RGB({c.red},{c.green},{c.blue})")
+
+        # Apply tab color
+        if appearance.tab_color:
+            c = appearance.tab_color
+            enabled = appearance.tab_color_enabled if appearance.tab_color_enabled is not None else True
+            await session.set_tab_color(c.red, c.green, c.blue, enabled)
+            changes.append(f"tab_color=RGB({c.red},{c.green},{c.blue})")
+        elif appearance.tab_color_enabled is not None:
+            # Just enable/disable without changing color
+            await session.set_tab_color(0, 0, 0, appearance.tab_color_enabled)
+            changes.append(f"tab_color_enabled={appearance.tab_color_enabled}")
+
+        # Apply cursor color
+        if appearance.cursor_color:
+            c = appearance.cursor_color
+            await session.set_cursor_color(c.red, c.green, c.blue)
+            changes.append(f"cursor_color=RGB({c.red},{c.green},{c.blue})")
+
+        # Apply badge
+        if appearance.badge is not None:
+            await session.set_badge(appearance.badge)
+            changes.append(f"badge='{appearance.badge}'")
+
+        result.success = True
+        result.changes = changes
+        logger.info(f"Applied appearance to {session.name}: {', '.join(changes)}")
+
+    except Exception as e:
+        result.error = str(e)
+        logger.error(f"Error applying appearance to {session.name}: {e}")
+
+    return result
+
+
+@mcp.tool()
+async def set_session_appearances(
+    request: SetSessionAppearancesRequest,
+    ctx: Context
+) -> str:
+    """Set visual appearances for multiple terminal sessions.
+
+    This is the consolidated tool for setting background colors, tab colors,
+    cursor colors, and badges on one or more sessions in a single call.
+
+    Each appearance entry specifies a target session (by agent, name, or session_id)
+    and the visual properties to set.
+
+    Example request:
+    {
+        "appearances": [
+            {
+                "agent": "claude-1",
+                "tab_color": {"red": 100, "green": 200, "blue": 255},
+                "badge": "🤖 Claude-1"
+            },
+            {
+                "agent": "claude-2",
+                "background_color": {"red": 40, "green": 30, "blue": 30},
+                "tab_color": {"red": 255, "green": 150, "blue": 100}
+            },
+            {
+                "agent": "claude-3",
+                "reset": true
+            }
+        ]
+    }
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        req = ensure_model(SetSessionAppearancesRequest, request)
+        results: List[AppearanceResult] = []
+
+        for appearance in req.appearances:
+            # Resolve the target session
+            sessions = await resolve_session(
+                terminal,
+                agent_registry,
+                session_id=appearance.session_id,
+                name=appearance.name,
+                agent=appearance.agent,
+            )
+
+            if not sessions:
+                results.append(AppearanceResult(
+                    session_id="",
+                    session_name=None,
+                    agent=appearance.agent,
+                    success=False,
+                    error=f"No session found for target: agent={appearance.agent}, name={appearance.name}, id={appearance.session_id}"
+                ))
+                continue
+
+            session = sessions[0]
+            result = await apply_session_appearance(session, appearance, agent_registry, logger)
+            results.append(result)
+
+        success_count = sum(1 for r in results if r.success)
+        error_count = sum(1 for r in results if not r.success)
+
+        response = SetSessionAppearancesResponse(
+            results=results,
+            success_count=success_count,
+            error_count=error_count,
+        )
+
+        logger.info(f"Set appearances: {success_count} succeeded, {error_count} failed")
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error in set_session_appearances: {e}")
         return f"Error: {e}"
 
 

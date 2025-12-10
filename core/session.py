@@ -510,3 +510,76 @@ class ItermSession:
     def last_update_time(self) -> float:
         """Get the timestamp of the last screen update."""
         return self._last_screen_update
+
+    async def set_background_color(self, red: int, green: int, blue: int, alpha: int = 255) -> None:
+        """Set the background color of the session.
+
+        Args:
+            red: Red component (0-255)
+            green: Green component (0-255)
+            blue: Blue component (0-255)
+            alpha: Alpha component (0-255), default fully opaque
+        """
+        color = iterm2.Color(red, green, blue, alpha)
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_background_color(color)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_BACKGROUND", f"Background color set to RGB({red},{green},{blue})")
+
+    async def set_tab_color(self, red: int, green: int, blue: int, enabled: bool = True) -> None:
+        """Set the tab color of the session.
+
+        Args:
+            red: Red component (0-255)
+            green: Green component (0-255)
+            blue: Blue component (0-255)
+            enabled: Whether to enable tab coloring
+        """
+        color = iterm2.Color(red, green, blue)
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_tab_color(color)
+        change.set_use_tab_color(enabled)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_TAB_COLOR", f"Tab color set to RGB({red},{green},{blue})")
+
+    async def set_badge(self, text: str) -> None:
+        """Set the badge text for the session.
+
+        Args:
+            text: The badge text to display (supports escape sequences)
+        """
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_badge_text(text)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_BADGE", f"Badge set to: {text}")
+
+    async def set_cursor_color(self, red: int, green: int, blue: int) -> None:
+        """Set the cursor color of the session.
+
+        Args:
+            red: Red component (0-255)
+            green: Green component (0-255)
+            blue: Blue component (0-255)
+        """
+        color = iterm2.Color(red, green, blue)
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_cursor_color(color)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_CURSOR_COLOR", f"Cursor color set to RGB({red},{green},{blue})")
+
+    async def reset_colors(self) -> None:
+        """Reset all color customizations to profile defaults."""
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_use_tab_color(False)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("RESET_COLORS", "Colors reset to profile defaults")

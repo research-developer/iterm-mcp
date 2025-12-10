@@ -307,3 +307,68 @@ class OrchestrateResponse(BaseModel):
     commands: List[PlaybookCommandResult] = Field(default_factory=list, description="Command block results")
     cascade: Optional[CascadeMessageResponse] = Field(default=None, description="Cascade delivery result")
     reads: Optional[ReadSessionsResponse] = Field(default=None, description="Readback results")
+
+
+# ============================================================================
+# VISUAL APPEARANCE MODELS
+# ============================================================================
+
+class ColorSpec(BaseModel):
+    """RGB color specification."""
+
+    red: int = Field(..., ge=0, le=255, description="Red component (0-255)")
+    green: int = Field(..., ge=0, le=255, description="Green component (0-255)")
+    blue: int = Field(..., ge=0, le=255, description="Blue component (0-255)")
+    alpha: int = Field(default=255, ge=0, le=255, description="Alpha component (0-255)")
+
+
+class SessionAppearance(BaseModel):
+    """Visual appearance settings for a session."""
+
+    # Target session (at least one required)
+    session_id: Optional[str] = Field(default=None, description="Direct session ID")
+    name: Optional[str] = Field(default=None, description="Session name")
+    agent: Optional[str] = Field(default=None, description="Agent name")
+
+    # Appearance settings (all optional - only set what you want to change)
+    background_color: Optional[ColorSpec] = Field(default=None, description="Background color")
+    tab_color: Optional[ColorSpec] = Field(default=None, description="Tab color")
+    tab_color_enabled: Optional[bool] = Field(default=None, description="Enable/disable tab color")
+    cursor_color: Optional[ColorSpec] = Field(default=None, description="Cursor color")
+    badge: Optional[str] = Field(default=None, description="Badge text (empty string to clear)")
+    reset: bool = Field(default=False, description="Reset all colors to profile defaults")
+
+    @model_validator(mode='after')
+    def check_at_least_one_target(self):
+        """Validate that at least one session identifier is provided."""
+        if not any([self.session_id, self.name, self.agent]):
+            raise ValueError("At least one identifier (session_id, name, or agent) must be provided")
+        return self
+
+
+class SetSessionAppearancesRequest(BaseModel):
+    """Request to set visual appearances for multiple sessions."""
+
+    appearances: List[SessionAppearance] = Field(
+        ...,
+        description="List of session appearance configurations"
+    )
+
+
+class AppearanceResult(BaseModel):
+    """Result of setting appearance for a single session."""
+
+    session_id: str = Field(..., description="The session ID")
+    session_name: Optional[str] = Field(default=None, description="The session name")
+    agent: Optional[str] = Field(default=None, description="Agent name if registered")
+    success: bool = Field(default=False, description="Whether the update succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    changes: List[str] = Field(default_factory=list, description="List of changes applied")
+
+
+class SetSessionAppearancesResponse(BaseModel):
+    """Response from setting session appearances."""
+
+    results: List[AppearanceResult] = Field(..., description="Results for each session")
+    success_count: int = Field(..., description="Number of successful updates")
+    error_count: int = Field(..., description="Number of errors")
