@@ -813,7 +813,7 @@ async def select_panes_by_hierarchy(
 @mcp.tool()
 async def send_hierarchical_message(
     ctx: Context,
-    targets: List[Dict[str, str]],
+    targets: List[Dict[str, Optional[str]]],
     broadcast: Optional[str] = None,
     skip_duplicates: bool = True,
     execute: bool = True,
