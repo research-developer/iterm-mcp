@@ -267,6 +267,7 @@ class SetActiveSessionRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, description="Session ID")
     agent: Optional[str] = Field(default=None, description="Agent name")
     name: Optional[str] = Field(default=None, description="Session name")
+    focus: bool = Field(default=False, description="Also bring the session to the foreground in iTerm")
 
 
 class PlaybookCommand(BaseModel):
@@ -310,7 +311,7 @@ class OrchestrateResponse(BaseModel):
 
 
 # ============================================================================
-# VISUAL APPEARANCE MODELS
+# SESSION MODIFICATION MODELS
 # ============================================================================
 
 class ColorSpec(BaseModel):
@@ -322,13 +323,17 @@ class ColorSpec(BaseModel):
     alpha: int = Field(default=255, ge=0, le=255, description="Alpha component (0-255)")
 
 
-class SessionAppearance(BaseModel):
-    """Visual appearance settings for a session."""
+class SessionModification(BaseModel):
+    """Modification settings for a session (appearance, focus, active state)."""
 
     # Target session (at least one required)
     session_id: Optional[str] = Field(default=None, description="Direct session ID")
     name: Optional[str] = Field(default=None, description="Session name")
     agent: Optional[str] = Field(default=None, description="Agent name")
+
+    # Session state modifications
+    set_active: bool = Field(default=False, description="Set this session as the active session")
+    focus: bool = Field(default=False, description="Bring this session to the foreground in iTerm")
 
     # Appearance settings (all optional - only set what you want to change)
     background_color: Optional[ColorSpec] = Field(default=None, description="Background color")
@@ -346,29 +351,29 @@ class SessionAppearance(BaseModel):
         return self
 
 
-class SetSessionAppearancesRequest(BaseModel):
-    """Request to set visual appearances for multiple sessions."""
+class ModifySessionsRequest(BaseModel):
+    """Request to modify multiple sessions (appearance, focus, active state)."""
 
-    appearances: List[SessionAppearance] = Field(
+    modifications: List[SessionModification] = Field(
         ...,
-        description="List of session appearance configurations"
+        description="List of session modifications"
     )
 
 
-class AppearanceResult(BaseModel):
-    """Result of setting appearance for a single session."""
+class ModificationResult(BaseModel):
+    """Result of modifying a single session."""
 
     session_id: str = Field(..., description="The session ID")
     session_name: Optional[str] = Field(default=None, description="The session name")
     agent: Optional[str] = Field(default=None, description="Agent name if registered")
-    success: bool = Field(default=False, description="Whether the update succeeded")
+    success: bool = Field(default=False, description="Whether the modification succeeded")
     error: Optional[str] = Field(default=None, description="Error message if failed")
     changes: List[str] = Field(default_factory=list, description="List of changes applied")
 
 
-class SetSessionAppearancesResponse(BaseModel):
-    """Response from setting session appearances."""
+class ModifySessionsResponse(BaseModel):
+    """Response from modifying sessions."""
 
-    results: List[AppearanceResult] = Field(..., description="Results for each session")
-    success_count: int = Field(..., description="Number of successful updates")
+    results: List[ModificationResult] = Field(..., description="Results for each session")
+    success_count: int = Field(..., description="Number of successful modifications")
     error_count: int = Field(..., description="Number of errors")

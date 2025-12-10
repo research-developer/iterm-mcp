@@ -41,10 +41,10 @@ from core.models import (
     PlaybookCommandResult,
     OrchestrateRequest,
     OrchestrateResponse,
-    SetSessionAppearancesRequest,
-    SessionAppearance,
-    AppearanceResult,
-    SetSessionAppearancesResponse,
+    ModifySessionsRequest,
+    SessionModification,
+    ModificationResult,
+    ModifySessionsResponse,
 )
 
 # Global references for resources (set during lifespan)
@@ -586,8 +586,9 @@ async def list_sessions(
 async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> str:
     """Set the active session for subsequent operations.
 
-    Note: This only sets the internal active session state. Use focus_session
-    to both focus the terminal visually AND set the active session.
+    Args:
+        request: Session identifier (session_id, name, or agent) and optional focus flag.
+                 Set focus=True to also bring the session to the foreground in iTerm.
     """
 
     terminal = ctx.request_context.lifespan_context["terminal"]
@@ -608,45 +609,16 @@ async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> 
 
         session = sessions[0]
         agent_registry.active_session = session.id
+
+        if req.focus:
+            await terminal.focus_session(session.id)
+            logger.info(f"Set active session and focused: {session.name} ({session.id})")
+            return f"Active session set and focused: {session.name} ({session.id})"
+
         logger.info(f"Set active session to: {session.name} ({session.id})")
         return f"Active session set to: {session.name} ({session.id})"
     except Exception as e:
         logger.error(f"Error setting active session: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool()
-async def focus_session(request: SetActiveSessionRequest, ctx: Context) -> str:
-    """Focus on a specific terminal session and set it as active.
-
-    This brings the session to the foreground in iTerm and also sets it as the
-    active session for subsequent operations (combining visual focus with
-    internal state).
-    """
-
-    terminal = ctx.request_context.lifespan_context["terminal"]
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        req = ensure_model(SetActiveSessionRequest, request)
-        sessions = await resolve_session(
-            terminal,
-            agent_registry,
-            session_id=req.session_id,
-            name=req.name,
-            agent=req.agent,
-        )
-        if not sessions:
-            return "No matching session found"
-
-        session = sessions[0]
-        await terminal.focus_session(session.id)
-        agent_registry.active_session = session.id
-        logger.info(f"Focused on session: {session.name}")
-        return f"Focused on session: {session.name} ({session.id})"
-    except Exception as e:
-        logger.error(f"Error focusing session: {e}")
         return f"Error: {e}"
 
 
@@ -1287,18 +1259,19 @@ async def remove_agent_from_team(
 
 
 # ============================================================================
-# VISUAL APPEARANCE TOOLS
+# SESSION MODIFICATION TOOLS
 # ============================================================================
 
-async def apply_session_appearance(
+async def apply_session_modification(
     session: ItermSession,
-    appearance: SessionAppearance,
+    modification: SessionModification,
+    terminal: ItermTerminal,
     agent_registry: AgentRegistry,
     logger: logging.Logger,
-) -> AppearanceResult:
-    """Apply appearance settings to a single session."""
+) -> ModificationResult:
+    """Apply modification settings to a single session."""
     agent = agent_registry.get_agent_by_session(session.id)
-    result = AppearanceResult(
+    result = ModificationResult(
         session_id=session.id,
         session_name=session.name,
         agent=agent.name if agent else None,
@@ -1306,68 +1279,81 @@ async def apply_session_appearance(
     changes = []
 
     try:
-        # Reset first if requested
-        if appearance.reset:
+        # Handle set_active
+        if modification.set_active:
+            agent_registry.active_session = session.id
+            changes.append("set_active")
+
+        # Handle focus
+        if modification.focus:
+            await terminal.focus_session(session.id)
+            changes.append("focus")
+
+        # Reset colors first if requested
+        if modification.reset:
             await session.reset_colors()
             changes.append("reset_colors")
 
         # Apply background color
-        if appearance.background_color:
-            c = appearance.background_color
+        if modification.background_color:
+            c = modification.background_color
             await session.set_background_color(c.red, c.green, c.blue, c.alpha)
             changes.append(f"background_color=RGB({c.red},{c.green},{c.blue})")
 
         # Apply tab color
-        if appearance.tab_color:
-            c = appearance.tab_color
-            enabled = appearance.tab_color_enabled if appearance.tab_color_enabled is not None else True
+        if modification.tab_color:
+            c = modification.tab_color
+            enabled = modification.tab_color_enabled if modification.tab_color_enabled is not None else True
             await session.set_tab_color(c.red, c.green, c.blue, enabled)
             changes.append(f"tab_color=RGB({c.red},{c.green},{c.blue})")
-        elif appearance.tab_color_enabled is not None:
+        elif modification.tab_color_enabled is not None:
             # Just enable/disable without changing color
-            await session.set_tab_color(0, 0, 0, appearance.tab_color_enabled)
-            changes.append(f"tab_color_enabled={appearance.tab_color_enabled}")
+            await session.set_tab_color(0, 0, 0, modification.tab_color_enabled)
+            changes.append(f"tab_color_enabled={modification.tab_color_enabled}")
 
         # Apply cursor color
-        if appearance.cursor_color:
-            c = appearance.cursor_color
+        if modification.cursor_color:
+            c = modification.cursor_color
             await session.set_cursor_color(c.red, c.green, c.blue)
             changes.append(f"cursor_color=RGB({c.red},{c.green},{c.blue})")
 
         # Apply badge
-        if appearance.badge is not None:
-            await session.set_badge(appearance.badge)
-            changes.append(f"badge='{appearance.badge}'")
+        if modification.badge is not None:
+            await session.set_badge(modification.badge)
+            changes.append(f"badge='{modification.badge}'")
 
         result.success = True
         result.changes = changes
-        logger.info(f"Applied appearance to {session.name}: {', '.join(changes)}")
+        logger.info(f"Applied modifications to {session.name}: {', '.join(changes)}")
 
     except Exception as e:
         result.error = str(e)
-        logger.error(f"Error applying appearance to {session.name}: {e}")
+        logger.error(f"Error applying modifications to {session.name}: {e}")
 
     return result
 
 
 @mcp.tool()
-async def set_session_appearances(
-    request: SetSessionAppearancesRequest,
+async def modify_sessions(
+    request: ModifySessionsRequest,
     ctx: Context
 ) -> str:
-    """Set visual appearances for multiple terminal sessions.
+    """Modify multiple terminal sessions (appearance, focus, active state).
 
-    This is the consolidated tool for setting background colors, tab colors,
-    cursor colors, and badges on one or more sessions in a single call.
+    This consolidated tool handles all session modifications in a single call:
+    - Visual appearance: background color, tab color, cursor color, badge
+    - Session state: set as active session, bring to foreground (focus)
 
-    Each appearance entry specifies a target session (by agent, name, or session_id)
-    and the visual properties to set.
+    Each modification entry specifies a target session (by agent, name, or session_id)
+    and the properties to modify.
 
     Example request:
     {
-        "appearances": [
+        "modifications": [
             {
                 "agent": "claude-1",
+                "focus": true,
+                "set_active": true,
                 "tab_color": {"red": 100, "green": 200, "blue": 255},
                 "badge": "🤖 Claude-1"
             },
@@ -1388,47 +1374,47 @@ async def set_session_appearances(
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        req = ensure_model(SetSessionAppearancesRequest, request)
-        results: List[AppearanceResult] = []
+        req = ensure_model(ModifySessionsRequest, request)
+        results: List[ModificationResult] = []
 
-        for appearance in req.appearances:
+        for modification in req.modifications:
             # Resolve the target session
             sessions = await resolve_session(
                 terminal,
                 agent_registry,
-                session_id=appearance.session_id,
-                name=appearance.name,
-                agent=appearance.agent,
+                session_id=modification.session_id,
+                name=modification.name,
+                agent=modification.agent,
             )
 
             if not sessions:
-                results.append(AppearanceResult(
+                results.append(ModificationResult(
                     session_id="",
                     session_name=None,
-                    agent=appearance.agent,
+                    agent=modification.agent,
                     success=False,
-                    error=f"No session found for target: agent={appearance.agent}, name={appearance.name}, id={appearance.session_id}"
+                    error=f"No session found for target: agent={modification.agent}, name={modification.name}, id={modification.session_id}"
                 ))
                 continue
 
             session = sessions[0]
-            result = await apply_session_appearance(session, appearance, agent_registry, logger)
+            result = await apply_session_modification(session, modification, terminal, agent_registry, logger)
             results.append(result)
 
         success_count = sum(1 for r in results if r.success)
         error_count = sum(1 for r in results if not r.success)
 
-        response = SetSessionAppearancesResponse(
+        response = ModifySessionsResponse(
             results=results,
             success_count=success_count,
             error_count=error_count,
         )
 
-        logger.info(f"Set appearances: {success_count} succeeded, {error_count} failed")
+        logger.info(f"Modified sessions: {success_count} succeeded, {error_count} failed")
         return response.model_dump_json(indent=2)
 
     except Exception as e:
-        logger.error(f"Error in set_session_appearances: {e}")
+        logger.error(f"Error in modify_sessions: {e}")
         return f"Error: {e}"
 
 

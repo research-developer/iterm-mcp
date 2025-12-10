@@ -341,8 +341,7 @@ The FastMCP implementation provides the following:
 ### Session Management Tools
 
 - `list_sessions` - List all available terminal sessions (with optional `agents_only` filter)
-- `set_active_session` - Set the active session for subsequent operations
-- `focus_session` - Focus on a specific terminal session
+- `set_active_session` - Set the active session for subsequent operations (with optional `focus` to bring to foreground)
 - `create_sessions` - Create multiple sessions with layout and agent registration
 - `check_session_status` - Check if a session is currently processing a command
 
@@ -371,25 +370,29 @@ The FastMCP implementation provides the following:
 - `select_panes_by_hierarchy` - Resolve panes by team/agent hierarchy
 - `send_hierarchical_message` - Send cascading messages using hierarchical specs
 
-### Visual Appearance Tools
+### Session Modification Tools
 
-- `set_session_appearances` - Set visual styles for multiple sessions at once
+- `modify_sessions` - Modify multiple sessions at once (appearance, focus, active state)
 
-The appearance tool allows customizing:
+The modification tool allows:
 
-- **Background color** - RGB values for the session background
-- **Tab color** - RGB values for the iTerm tab indicator
-- **Cursor color** - RGB values for the cursor
-- **Badge** - Text badge displayed in the session (supports emoji)
-- **Reset** - Reset all colors to defaults
+- **set_active** - Set session as the active session for subsequent operations
+- **focus** - Bring session to the foreground in iTerm
+- **background_color** - RGB values for the session background
+- **tab_color** - RGB values for the iTerm tab indicator
+- **cursor_color** - RGB values for the cursor
+- **badge** - Text badge displayed in the session (supports emoji)
+- **reset** - Reset all colors to defaults
 
 Example:
 
 ```json
 {
-  "appearances": [
+  "modifications": [
     {
       "agent": "claude-1",
+      "focus": true,
+      "set_active": true,
       "tab_color": {"red": 100, "green": 200, "blue": 255},
       "badge": "🤖 Claude-1"
     },
