@@ -45,8 +45,8 @@ class SessionMessage(BaseModel):
         description="Whether to press Enter after sending"
     )
     use_encoding: Union[bool, str] = Field(
-        default="auto",
-        description="Base64 encoding: 'auto', True (always), False (never)"
+        default=False,
+        description="Base64 encoding: False (default, direct send), 'auto' (smart), True (always)"
     )
 
     @field_validator('condition', mode='before')

@@ -107,6 +107,11 @@ class TestSessionMessage(unittest.TestCase):
         self.assertTrue(msg_true.use_encoding)
         self.assertFalse(msg_false.use_encoding)
 
+    def test_encoding_default_is_false(self):
+        """Test that use_encoding defaults to False (no base64 encoding)."""
+        msg = SessionMessage(content="echo 'hello world'")
+        self.assertFalse(msg.use_encoding)
+
 
 class TestWriteToSessionsRequest(unittest.TestCase):
     """Test WriteToSessionsRequest model."""

@@ -385,17 +385,17 @@ class ItermTerminal:
         self,
         session_id: str,
         command: str,
-        use_encoding: Union[bool, Literal["auto"]] = "auto"
+        use_encoding: Union[bool, Literal["auto"]] = False
     ) -> None:
-        """Execute a command in a session with smart encoding.
+        """Execute a command in a session.
 
         Args:
             session_id: The ID of the session to execute the command in
             command: The command to execute (raw, unencoded)
             use_encoding: Encoding mode:
-                - "auto" (default): Only encode if command contains unsafe characters
-                - True: Always use base64 encoding
-                - False: Never encode (direct typing)
+                - False (default): Send command directly (recommended)
+                - "auto": Only encode if command contains unusual characters
+                - True: Always use base64 encoding (rarely needed)
 
         Raises:
             ValueError: If the session is not found

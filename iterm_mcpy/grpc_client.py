@@ -44,7 +44,7 @@ class ITermClient:
     def _build_session_message(self, msg: Dict) -> iterm_mcp_pb2.SessionMessage:
         targets = [self._build_session_target(t) for t in msg.get('targets', [])]
 
-        use_encoding_value = msg.get('use_encoding', 'auto')
+        use_encoding_value = msg.get('use_encoding', False)
         if isinstance(use_encoding_value, bool):
             use_encoding_str = 'true' if use_encoding_value else 'false'
         else:

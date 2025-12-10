@@ -57,7 +57,7 @@ class TestCommandOutputTracking(unittest.IsolatedAsyncioTestCase):
         self.session.logger = self.logger
         
         # Mock the execute_command method to simulate command execution
-        async def mock_execute_command(command, use_encoding="auto"):
+        async def mock_execute_command(command, use_encoding=False):
             # Log the command
             self.logger.log_command(command)
             # Simulate command output - we'll just output the command for testing
