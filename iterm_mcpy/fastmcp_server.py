@@ -29,7 +29,6 @@ from core.models import (
     ReadSessionsRequest,
     ReadSessionsResponse,
     SessionOutput,
-    SessionConfig,
     CreateSessionsRequest,
     CreatedSession,
     CreateSessionsResponse,
@@ -39,8 +38,6 @@ from core.models import (
     RegisterAgentRequest,
     CreateTeamRequest,
     SetActiveSessionRequest,
-    PlaybookCommand,
-    Playbook,
     PlaybookCommandResult,
     OrchestrateRequest,
     OrchestrateResponse,
@@ -366,8 +363,6 @@ async def execute_write_request(
                 WriteResult(
                     session_id="",
                     session_name=None,
-                    success=False,
-                    error="No matching sessions found",
                     skipped=True,
                     skipped_reason="no_match",
                 )
