@@ -32,6 +32,7 @@ class LayoutManager:
         self,
         layout_type: LayoutType,
         pane_names: Optional[List[str]] = None,
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]] = None,
     ) -> Dict[str, str]:
         """Create a layout with the specified configuration.
         
@@ -47,11 +48,50 @@ class LayoutManager:
             raise ValueError(f"Unsupported layout type: {layout_type}")
             
         method = getattr(self, method_name)
-        return await method(pane_names)
+        return await method(pane_names, pane_hierarchy)
+
+    def _normalize_pane_names(
+        self,
+        pane_names: Optional[List[str]],
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]],
+        expected_count: int,
+    ) -> List[str]:
+        """Build pane names from explicit names or hierarchy specs."""
+
+        normalized: List[str] = []
+
+        for idx in range(expected_count):
+            explicit_name = pane_names[idx] if pane_names and idx < len(pane_names) else None
+
+            hierarchy_name = None
+            if pane_hierarchy and idx < len(pane_hierarchy):
+                spec = pane_hierarchy[idx] or {}
+                hierarchy_name = spec.get("name")
+
+                if not hierarchy_name:
+                    team = (
+                        spec.get("team")
+                        or spec.get("team_name")
+                        or (spec.get("team_path")[-1] if spec.get("team_path") else None)
+                    )
+                    agent = spec.get("agent") or spec.get("agent_name")
+
+                    if team and agent:
+                        hierarchy_name = f"{team} :: {agent}"
+                    elif team:
+                        hierarchy_name = team
+                    elif agent:
+                        hierarchy_name = agent
+
+            final_name = explicit_name or hierarchy_name or f"Pane-{idx + 1}"
+            normalized.append(final_name)
+
+        return normalized
     
     async def _create_single_layout(
         self,
         pane_names: Optional[List[str]] = None,
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]] = None,
     ) -> Dict[str, str]:
         """Create a single pane layout.
         
@@ -65,7 +105,8 @@ class LayoutManager:
         session = await self.terminal.create_window()
         
         # Set the pane name if provided
-        name = "Main" if not pane_names or not pane_names[0] else pane_names[0]
+        pane_names = self._normalize_pane_names(pane_names, pane_hierarchy, 1)
+        name = pane_names[0] or "Main"
         await session.set_name(name)
         
         return {name: session.id}
@@ -73,6 +114,7 @@ class LayoutManager:
     async def _create_horizontal_split_layout(
         self,
         pane_names: Optional[List[str]] = None,
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]] = None,
     ) -> Dict[str, str]:
         """Create a horizontal split layout with two panes side by side.
         
@@ -82,9 +124,7 @@ class LayoutManager:
         Returns:
             A dictionary mapping pane names to session IDs
         """
-        # Set default pane names if not provided
-        if not pane_names or len(pane_names) < 2:
-            pane_names = ["Left", "Right"]
+        pane_names = self._normalize_pane_names(pane_names, pane_hierarchy, 2)
         
         print(f"Creating horizontal split with panes: {pane_names}")
         
@@ -119,6 +159,7 @@ class LayoutManager:
     async def _create_vertical_split_layout(
         self,
         pane_names: Optional[List[str]] = None,
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]] = None,
     ) -> Dict[str, str]:
         """Create a vertical split layout with two panes stacked.
         
@@ -128,9 +169,7 @@ class LayoutManager:
         Returns:
             A dictionary mapping pane names to session IDs
         """
-        # Set default pane names if not provided
-        if not pane_names or len(pane_names) < 2:
-            pane_names = ["Top", "Bottom"]
+        pane_names = self._normalize_pane_names(pane_names, pane_hierarchy, 2)
         
         # Create a new window for the first pane
         top_session = await self.terminal.create_window()
@@ -151,6 +190,7 @@ class LayoutManager:
     async def _create_quad_layout(
         self,
         pane_names: Optional[List[str]] = None,
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]] = None,
     ) -> Dict[str, str]:
         """Create a quad layout with four panes in a grid.
         
@@ -160,9 +200,7 @@ class LayoutManager:
         Returns:
             A dictionary mapping pane names to session IDs
         """
-        # Set default pane names if not provided
-        if not pane_names or len(pane_names) < 4:
-            pane_names = ["Top Left", "Top Right", "Bottom Left", "Bottom Right"]
+        pane_names = self._normalize_pane_names(pane_names, pane_hierarchy, 4)
         
         # Create a new window for the first pane
         top_left_session = await self.terminal.create_window()
@@ -199,6 +237,7 @@ class LayoutManager:
     async def _create_triple_right_layout(
         self,
         pane_names: Optional[List[str]] = None,
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]] = None,
     ) -> Dict[str, str]:
         """Create a triple right layout with one pane on the left and two on the right.
         
@@ -208,9 +247,7 @@ class LayoutManager:
         Returns:
             A dictionary mapping pane names to session IDs
         """
-        # Set default pane names if not provided
-        if not pane_names or len(pane_names) < 3:
-            pane_names = ["Left", "Top Right", "Bottom Right"]
+        pane_names = self._normalize_pane_names(pane_names, pane_hierarchy, 3)
         
         # Create a new window for the first pane
         left_session = await self.terminal.create_window()
@@ -239,6 +276,7 @@ class LayoutManager:
     async def _create_triple_bottom_layout(
         self,
         pane_names: Optional[List[str]] = None,
+        pane_hierarchy: Optional[List[Dict[str, Optional[str]]]] = None,
     ) -> Dict[str, str]:
         """Create a triple bottom layout with two panes on top and one on the bottom.
         
@@ -248,9 +286,7 @@ class LayoutManager:
         Returns:
             A dictionary mapping pane names to session IDs
         """
-        # Set default pane names if not provided
-        if not pane_names or len(pane_names) < 3:
-            pane_names = ["Top Left", "Top Right", "Bottom"]
+        pane_names = self._normalize_pane_names(pane_names, pane_hierarchy, 3)
         
         # Create a new window for the first pane
         top_left_session = await self.terminal.create_window()
