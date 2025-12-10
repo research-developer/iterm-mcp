@@ -8,6 +8,7 @@ from typing import Optional
 import grpc
 import iterm2
 
+from core.agents import AgentRegistry
 from core.layouts import LayoutManager, LayoutType
 from core.terminal import ItermTerminal
 from iterm_mcpy import iterm_mcp_pb2
@@ -30,6 +31,7 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
         self.connection: Optional[iterm2.Connection] = None
         self.log_dir = os.path.expanduser("~/.iterm_mcp_logs")
         self._init_lock = asyncio.Lock()
+        self.agent_registry: AgentRegistry = AgentRegistry()
 
     async def initialize(self):
         """Initialize the iTerm2 connection and services.
@@ -79,11 +81,13 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
         sessions = list(self.terminal.sessions.values())
         pb_sessions = []
         for s in sessions:
+            agent = self.agent_registry.get_agent_by_session(s.id)
             pb_sessions.append(iterm_mcp_pb2.Session(
                 id=s.id,
                 name=s.name,
                 persistent_id=s.persistent_id,
-                is_processing=getattr(s, 'is_processing', False)
+                is_processing=getattr(s, 'is_processing', False),
+                agent=agent.name if agent else ""
             ))
         return iterm_mcp_pb2.SessionList(sessions=pb_sessions)
 
@@ -148,6 +152,91 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return iterm_mcp_pb2.SessionList()
+
+    async def CreateSessions(self, request, context):
+        if not await self.initialize():
+            context.set_code(grpc.StatusCode.INTERNAL)
+            return iterm_mcp_pb2.CreateSessionsResponse()
+
+        layout_type_map = {
+            "single": LayoutType.SINGLE,
+            "horizontal": LayoutType.HORIZONTAL_SPLIT,
+            "vertical": LayoutType.VERTICAL_SPLIT,
+            "quad": LayoutType.QUAD
+        }
+
+        layout_enum = layout_type_map.get(request.layout.lower(), LayoutType.SINGLE) if request.layout else LayoutType.SINGLE
+
+        session_configs = list(request.sessions)
+        pane_names = [cfg.name for cfg in session_configs]
+        pane_hierarchy = [
+            {
+                "name": cfg.name,
+                "team": cfg.team,
+                "agent": cfg.agent,
+            }
+            for cfg in session_configs
+        ]
+
+        try:
+            sessions_map = await self.layout_manager.create_layout(
+                layout_type=layout_enum,
+                pane_names=pane_names,
+                pane_hierarchy=pane_hierarchy,
+            )
+
+            created_sessions = []
+            created_items = list(sessions_map.items())
+
+            for idx, (pane_name, session_id) in enumerate(created_items):
+                session = await self.terminal.get_session_by_id(session_id)
+                if not session:
+                    continue
+
+                cfg = session_configs[idx] if idx < len(session_configs) else None
+                agent_name = ""
+                team_name = ""
+
+                if cfg:
+                    team_name = cfg.team
+                    # Materialize team hierarchy if team_name is a path (e.g., "parent/child")
+                    if team_name:
+                        team_path = team_name.split("/")
+                        parent = None
+                        current_path = ""
+                        for part in team_path:
+                            current_path = part if not current_path else f"{current_path}/{part}"
+                            if not self.agent_registry.get_team(current_path):
+                                self.agent_registry.create_team(current_path, parent=parent)
+                            parent = current_path
+
+                    if cfg.agent:
+                        teams = [team_name] if team_name else []
+                        self.agent_registry.register_agent(
+                            name=cfg.agent,
+                            session_id=session.id,
+                            teams=teams,
+                        )
+                        agent_name = cfg.agent
+
+                    if cfg.command:
+                        await session.execute_command(cfg.command)
+
+                created_sessions.append(iterm_mcp_pb2.CreatedSession(
+                    session_id=session.id,
+                    name=session.name,
+                    agent=agent_name,
+                    persistent_id=session.persistent_id,
+                ))
+
+            if created_sessions and not self.agent_registry.active_session:
+                self.agent_registry.active_session = created_sessions[0].session_id
+
+            return iterm_mcp_pb2.CreateSessionsResponse(sessions=created_sessions)
+        except Exception as e:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return iterm_mcp_pb2.CreateSessionsResponse()
 
     async def WriteToTerminal(self, request, context):
         if not await self.initialize():
@@ -242,6 +331,10 @@ class ITermService(iterm_mcp_pb2_grpc.ITermServiceServicer):
             session = await self.terminal.get_session_by_name(identifier)
         if not session:
             session = await self.terminal.get_session_by_persistent_id(identifier)
+        if not session:
+            agent = self.agent_registry.get_agent(identifier)
+            if agent:
+                session = await self.terminal.get_session_by_id(agent.session_id)
         return session
 
 

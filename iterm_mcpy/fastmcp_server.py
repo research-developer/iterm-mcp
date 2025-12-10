@@ -18,7 +18,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
-from core.agents import AgentRegistry, CascadingMessage
+from core.agents import AgentRegistry, CascadingMessage, SendTarget
 
 # Global references for resources (set during lifespan)
 _terminal: Optional[ItermTerminal] = None
@@ -140,9 +140,15 @@ async def resolve_session(
     """
     sessions = []
 
-    # If team specified, get all agents in team
+    # If team specified, get all agents in team (optionally filtered by agent)
     if team:
         team_agents = agent_registry.list_agents(team=team)
+
+        if agent:
+            team_agents = [a for a in team_agents if a.name == agent]
+            if not team_agents:
+                return []
+
         for a in team_agents:
             session = await terminal.get_session_by_id(a.session_id)
             if session:
@@ -320,20 +326,33 @@ async def create_sessions(
 
         # Extract session names from configs
         session_names = None
+        pane_hierarchy = None
         if session_configs:
-            session_names = [c.get("name", f"Session-{i}") for i, c in enumerate(session_configs)]
+            session_names = [c.get("name") for c in session_configs]
+            pane_hierarchy = [
+                {
+                    "name": c.get("name"),
+                    "team": c.get("team") or (c.get("team_path")[-1] if c.get("team_path") and len(c.get("team_path")) > 0 else None),
+                    "agent": c.get("agent"),
+                    "team_path": c.get("team_path"),
+                }
+                for c in session_configs
+            ]
 
         # Create the layout
         logger.info(f"Creating {layout_type} layout with sessions: {session_names}")
         sessions_map = await layout_manager.create_layout(
             layout_type=layout_type_enum,
-            pane_names=session_names
+            pane_names=session_names,
+            pane_hierarchy=pane_hierarchy,
         )
 
         result = []
 
+        created_items = list(sessions_map.items())
+
         # Process each created session
-        for session_name, session_id in sessions_map.items():
+        for idx, (session_name, session_id) in enumerate(created_items):
             session = await terminal.get_session_by_id(session_id)
             if not session:
                 continue
@@ -346,30 +365,36 @@ async def create_sessions(
                 "team": None
             }
 
-            # Find matching config
+            # Find matching config (preserve ordering fallback)
             if session_configs:
-                for config in session_configs:
-                    if config.get("name") == session_name:
-                        # Register agent if specified
-                        agent_name = config.get("agent")
-                        team_name = config.get("team")
+                config = session_configs[idx] if idx < len(session_configs) else {}
+                if config:
+                    # Register agent if specified
+                    agent_name = config.get("agent")
+                    team_name = config.get("team") or (config.get("team_path")[-1] if config.get("team_path") else None)
 
-                        if agent_name:
-                            teams = [team_name] if team_name else []
-                            agent_registry.register_agent(
-                                name=agent_name,
-                                session_id=session.id,
-                                teams=teams
-                            )
-                            session_info["agent"] = agent_name
-                            session_info["team"] = team_name
+                    # Materialize team hierarchy (parent chain) if provided
+                    team_path = config.get("team_path") or ([] if not team_name else [team_name])
+                    parent_team = None
+                    for t_name in team_path:
+                        if t_name and not agent_registry.get_team(t_name):
+                            agent_registry.create_team(name=t_name, parent_team=parent_team)
+                        parent_team = t_name
 
-                        # Execute initial command
-                        command = config.get("command")
-                        if command:
-                            await session.execute_command(command)
+                    if agent_name:
+                        teams = [team_name] if team_name else []
+                        agent_registry.register_agent(
+                            name=agent_name,
+                            session_id=session.id,
+                            teams=teams
+                        )
+                        session_info["agent"] = agent_name
+                        session_info["team"] = team_name
 
-                        break
+                    # Execute initial command
+                    command = config.get("command")
+                    if command:
+                        await session.execute_command(command)
 
             result.append(session_info)
 
@@ -602,6 +627,70 @@ async def read_sessions(
         return f"Error: {e}"
 
 
+async def _deliver_cascade(
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    cascade: CascadingMessage,
+    skip_duplicates: bool,
+    execute: bool,
+    logger: logging.Logger,
+) -> str:
+    """Send a cascading message and return serialized results."""
+
+    try:
+        message_targets = agent_registry.resolve_cascade_targets(cascade)
+
+        results = []
+        delivered = 0
+        skipped = 0
+
+        for message, agent_names in message_targets.items():
+            if skip_duplicates:
+                agent_names = agent_registry.filter_unsent_recipients(message, agent_names)
+
+            actually_delivered = []
+
+            for agent_name in agent_names:
+                agent = agent_registry.get_agent(agent_name)
+                if not agent:
+                    continue
+
+                session = await terminal.get_session_by_id(agent.session_id)
+                if not session:
+                    results.append({
+                        "agent": agent_name,
+                        "delivered": False,
+                        "skipped_reason": "session_not_found"
+                    })
+                    skipped += 1
+                    continue
+
+                await session.send_text(message, execute=execute)
+                agent_registry.record_message_sent(message, [agent_name])
+                delivered += 1
+                actually_delivered.append(agent_name)
+
+            if not actually_delivered:
+                skipped += len(agent_names)
+
+            results.append({
+                "message": message,
+                "targets": agent_names,
+                "delivered": actually_delivered
+            })
+
+        logger.info(f"Delivered {delivered} cascading messages ({skipped} skipped)")
+
+        return json.dumps({
+            "results": results,
+            "delivered": delivered,
+            "skipped": skipped
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error sending cascading message: {e}")
+        return f"Error: {e}"
+
+
 @mcp.tool()
 async def send_cascade_message(
     ctx: Context,
@@ -629,78 +718,140 @@ async def send_cascade_message(
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
-    try:
-        cascade = CascadingMessage(
-            broadcast=broadcast,
-            teams=teams or {},
-            agents=agents or {}
-        )
+    cascade = CascadingMessage(
+        broadcast=broadcast,
+        teams=teams or {},
+        agents=agents or {}
+    )
 
-        # Resolve cascade to message -> [agent_names]
-        message_targets = agent_registry.resolve_cascade_targets(cascade)
+    return await _deliver_cascade(
+        terminal=terminal,
+        agent_registry=agent_registry,
+        cascade=cascade,
+        skip_duplicates=skip_duplicates,
+        execute=execute,
+        logger=logger,
+    )
 
-        results = []
-        delivered = 0
-        skipped = 0
 
-        for message, agent_names in message_targets.items():
-            # Filter duplicates
-            if skip_duplicates:
-                agent_names = agent_registry.filter_unsent_recipients(message, agent_names)
+@mcp.tool()
+async def select_panes_by_hierarchy(
+    ctx: Context,
+    targets: List[Dict[str, Optional[str]]],
+    set_active: bool = True,
+) -> str:
+    """Resolve panes by team/agent hierarchy and optionally focus the first.
 
-            actually_delivered = []
-            # Get session IDs
-            for agent_name in agent_names:
-                agent = agent_registry.get_agent(agent_name)
-                if not agent:
-                    continue
+    Args:
+        targets: List of target dicts using SendTarget fields (team/agent)
+        set_active: Whether to set the first resolved session as active
+    """
 
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    results = []
+    resolved_sessions = []
+
+    for target in targets:
+        send_target = SendTarget(**target)
+        team = send_target.team
+        agent_name = send_target.agent
+
+        if agent_name:
+            agent = agent_registry.get_agent(agent_name)
+            if not agent:
+                results.append({"agent": agent_name, "team": team, "error": "unknown_agent"})
+                continue
+
+            if team and not agent.is_member_of(team):
+                results.append({"agent": agent_name, "team": team, "error": "agent_not_in_team"})
+                continue
+
+            session = await terminal.get_session_by_id(agent.session_id)
+            if not session:
+                results.append({"agent": agent_name, "team": team, "error": "session_not_found"})
+                continue
+
+            resolved_sessions.append(session)
+            results.append({
+                "agent": agent_name,
+                "team": team,
+                "session_id": session.id,
+                "session_name": session.name
+            })
+            continue
+
+        if team:
+            team_agents = agent_registry.list_agents(team=team)
+            if not team_agents:
+                results.append({"team": team, "error": "team_has_no_agents"})
+                continue
+
+            for agent in team_agents:
                 session = await terminal.get_session_by_id(agent.session_id)
-                if not session:
+                if session:
+                    resolved_sessions.append(session)
                     results.append({
-                        "agent": agent_name,
-                        "delivered": False,
-                        "skipped_reason": "session_not_found"
+                        "agent": agent.name,
+                        "team": team,
+                        "session_id": session.id,
+                        "session_name": session.name
                     })
-                    skipped += 1
-                    continue
 
-                # Determine message type based on where this specific message came from
-                message_type = "broadcast"
-                if agent_name in (agents or {}) and (agents or {}).get(agent_name) == message:
-                    message_type = "agent"
-                elif any(agent.is_member_of(t) and (teams or {}).get(t) == message for t in (teams or {}).keys()):
-                    message_type = "team"
+    if set_active and resolved_sessions:
+        agent_registry.active_session = resolved_sessions[0].id
+        logger.info(f"Active session set via hierarchy: {resolved_sessions[0].name}")
 
-                # Send message
-                if execute:
-                    await session.execute_command(message)
-                else:
-                    await session.send_text(message, execute=False)
+    return json.dumps({
+        "resolved": results,
+        "active_session": resolved_sessions[0].id if set_active and resolved_sessions else None
+    }, indent=2)
 
-                results.append({
-                    "agent": agent_name,
-                    "session_id": session.id,
-                    "message_type": message_type,
-                    "delivered": True
-                })
-                delivered += 1
-                actually_delivered.append(agent_name)
 
-            # Record messages sent
-            if actually_delivered:
-                agent_registry.record_message_sent(message, actually_delivered)
+@mcp.tool()
+async def send_hierarchical_message(
+    ctx: Context,
+    targets: List[Dict[str, Optional[str]]],
+    broadcast: Optional[str] = None,
+    skip_duplicates: bool = True,
+    execute: bool = True,
+) -> str:
+    """Send cascading messages using hierarchical SendTarget specs."""
 
-        logger.info(f"Cascade: delivered={delivered}, skipped={skipped}")
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
 
-        return json.dumps({
-            "results": results,
-            "delivered_count": delivered,
-            "skipped_count": skipped
-        }, indent=2)
-    except Exception as e:
-        logger.error(f"Error in send_cascade_message: {e}")
-        return f"Error: {e}"
+    send_targets = [SendTarget(**t) for t in targets]
+
+    cascade = CascadingMessage(
+        broadcast=broadcast,
+        teams={},
+        agents={},
+    )
+
+    for target in send_targets:
+        if target.team and target.agent:
+            agent_obj = agent_registry.get_agent(target.agent)
+            if not agent_obj or not agent_obj.is_member_of(target.team):
+                logger.error(f"Agent '{target.agent}' is not a member of team '{target.team}'. Skipping.")
+                continue
+            cascade.agents[target.agent] = target.message or broadcast or ""
+        elif target.agent:
+            cascade.agents[target.agent] = target.message or broadcast or ""
+        elif target.team:
+            cascade.teams[target.team] = target.message or broadcast or ""
+
+    return await _deliver_cascade(
+        terminal=terminal,
+        agent_registry=agent_registry,
+        cascade=cascade,
+        skip_duplicates=skip_duplicates,
+        execute=execute,
+        logger=logger,
+    )
 
 
 # ============================================================================
