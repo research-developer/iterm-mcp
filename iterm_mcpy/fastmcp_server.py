@@ -584,7 +584,11 @@ async def list_sessions(
 
 @mcp.tool()
 async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> str:
-    """Set the active session for subsequent operations."""
+    """Set the active session for subsequent operations.
+
+    Note: This only sets the internal active session state. Use focus_session
+    to both focus the terminal visually AND set the active session.
+    """
 
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
@@ -613,7 +617,12 @@ async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> 
 
 @mcp.tool()
 async def focus_session(request: SetActiveSessionRequest, ctx: Context) -> str:
-    """Focus on a specific terminal session."""
+    """Focus on a specific terminal session and set it as active.
+
+    This brings the session to the foreground in iTerm and also sets it as the
+    active session for subsequent operations (combining visual focus with
+    internal state).
+    """
 
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
@@ -633,6 +642,7 @@ async def focus_session(request: SetActiveSessionRequest, ctx: Context) -> str:
 
         session = sessions[0]
         await terminal.focus_session(session.id)
+        agent_registry.active_session = session.id
         logger.info(f"Focused on session: {session.name}")
         return f"Focused on session: {session.name} ({session.id})"
     except Exception as e:
