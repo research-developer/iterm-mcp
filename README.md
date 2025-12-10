@@ -51,21 +51,25 @@ This will install the package with all required dependencies, including the MCP 
 ```
 iterm-mcp/
 ├── pyproject.toml                # Python packaging configuration
-└── iterm_mcp_python/             # Main package
-    ├── __init__.py               # Package initialization
-    ├── core/                     # Core functionality
-    │   ├── __init__.py
-    │   ├── session.py            # iTerm session management
-    │   ├── terminal.py           # Terminal window/tab management
-    │   └── layouts.py            # Predefined layouts
-    ├── server/                   # Server implementations
-    │   ├── __init__.py
-    │   ├── main.py               # Entry point with option selection
-    │   ├── mcp_server.py         # Legacy MCP server implementation
-    │   └── fastmcp_server.py     # New FastMCP implementation
-    └── utils/                    # Utility functions
-        ├── __init__.py
-        └── logging.py            # Logging utilities
+├── core/                         # Core functionality
+│   ├── __init__.py
+│   ├── session.py                # iTerm session management
+│   ├── terminal.py               # Terminal window/tab management
+│   ├── layouts.py                # Predefined layouts
+│   ├── agents.py                 # Agent/team registry
+│   └── models.py                 # Pydantic request/response models
+├── iterm_mcpy/                   # Server implementations
+│   ├── __init__.py
+│   ├── fastmcp_server.py         # FastMCP implementation (recommended)
+│   ├── grpc_server.py            # gRPC server implementation
+│   ├── grpc_client.py            # gRPC client for programmatic access
+│   └── iterm_mcp_pb2*.py         # Generated protobuf code
+├── protos/                       # Protocol buffer definitions
+│   └── iterm_mcp.proto
+├── utils/                        # Utility functions
+│   ├── __init__.py
+│   └── logging.py                # Logging utilities
+└── tests/                        # Test suite
 ```
 
 ## Development Setup
@@ -334,35 +338,93 @@ await send_hierarchical_message(
 
 The FastMCP implementation provides the following:
 
-### Tools
-- `list_sessions` - List all available terminal sessions
+### Session Management Tools
+
+- `list_sessions` - List all available terminal sessions (with optional `agents_only` filter)
+- `set_active_session` - Set the active session for subsequent operations
 - `focus_session` - Focus on a specific terminal session
-- `create_layout` - Create a new terminal layout with named sessions
-- `write_to_terminal` - Write a command to a terminal session (with option to type without executing)
-- `read_terminal_output` - Read output from a terminal session
-- `send_control_character` - Send a control character to a terminal session (Ctrl+C, Ctrl+D, etc.)
-- `send_special_key` - Send a special key to a terminal session (Enter, Tab, Escape, Arrow keys, etc.)
+- `create_sessions` - Create multiple sessions with layout and agent registration
 - `check_session_status` - Check if a session is currently processing a command
-- `get_session_by_persistent_id` - Get a session by its persistent ID
-- `set_session_max_lines` - Set the maximum number of lines to retrieve for a session
-- `start_monitoring_session` - Start real-time monitoring for a terminal session
-- `stop_monitoring_session` - Stop real-time monitoring for a terminal session
-- `list_persistent_sessions` - List all persistent sessions available for reconnection
+
+### Command Execution Tools
+
+- `write_to_sessions` - Write to multiple sessions in parallel with targeting
+- `read_sessions` - Read from multiple sessions in parallel with filtering
+- `send_control_character` - Send a control character (Ctrl+C, Ctrl+D, etc.)
+- `send_special_key` - Send a special key (Enter, Tab, Escape, Arrow keys, etc.)
+
+### Agent & Team Management
+
+- `register_agent` - Register a named agent bound to a session
+- `list_agents` - List all registered agents (optionally filtered by team)
+- `remove_agent` - Remove an agent registration
+- `create_team` - Create a new team for grouping agents
+- `list_teams` - List all teams
+- `remove_team` - Remove a team
+- `assign_agent_to_team` - Add an agent to a team
+- `remove_agent_from_team` - Remove an agent from a team
+
+### Orchestration Tools
+
+- `orchestrate_playbook` - Execute a high-level playbook (layout + commands + cascade + reads)
+- `send_cascade_message` - Send priority-based cascading messages to agents/teams
+- `select_panes_by_hierarchy` - Resolve panes by team/agent hierarchy
+- `send_hierarchical_message` - Send cascading messages using hierarchical specs
+
+### Visual Appearance Tools
+
+- `set_session_appearances` - Set visual styles for multiple sessions at once
+
+The appearance tool allows customizing:
+
+- **Background color** - RGB values for the session background
+- **Tab color** - RGB values for the iTerm tab indicator
+- **Cursor color** - RGB values for the cursor
+- **Badge** - Text badge displayed in the session (supports emoji)
+- **Reset** - Reset all colors to defaults
+
+Example:
+
+```json
+{
+  "appearances": [
+    {
+      "agent": "claude-1",
+      "tab_color": {"red": 100, "green": 200, "blue": 255},
+      "badge": "🤖 Claude-1"
+    },
+    {
+      "agent": "claude-2",
+      "background_color": {"red": 40, "green": 30, "blue": 30},
+      "tab_color": {"red": 255, "green": 150, "blue": 100}
+    }
+  ]
+}
+```
+
+### Monitoring Tools
+
+- `start_monitoring_session` - Start real-time monitoring for a session
+- `stop_monitoring_session` - Stop real-time monitoring for a session
 
 ### Resources
+
 - `terminal://{session_id}/output` - Get the output from a terminal session
 - `terminal://{session_id}/info` - Get information about a terminal session
 - `terminal://sessions` - Get a list of all terminal sessions
+- `agents://all` - Get a list of all registered agents
+- `teams://all` - Get a list of all teams
 
 ### Prompts
-- `monitor_terminal` - Prompt for monitoring a terminal session
-- `execute_command` - Prompt for executing a command and analyzing the output
 
-## Parallel Multi-Agent Orchestration
+- `orchestrate_agents` - Prompt for orchestrating multiple agents
+- `monitor_team` - Prompt for monitoring a team of agents
+
+## Multi-Agent Orchestration
 
 The iTerm MCP server supports coordinating multiple Claude Code instances through named agents, teams, and parallel session operations.
 
-### Agent & Team Management
+### Agent & Team Concepts
 
 Agents bind a name to an iTerm session, enabling targeted communication. Teams group agents for broadcast operations.
 
@@ -378,22 +440,6 @@ create_team(name="backend", description="Backend developers")
 # List agents by team
 list_agents(team="frontend")  # Returns alice and bob
 ```
-
-### New MCP Tools for Parallel Operations
-
-- `register_agent` - Register a named agent bound to a session
-- `list_agents` - List all registered agents (optionally filtered by team)
-- `remove_agent` - Remove an agent registration
-- `create_team` - Create a new team for grouping agents
-- `list_teams` - List all teams
-- `remove_team` - Remove a team
-- `assign_agent_to_team` - Add an agent to a team
-- `remove_agent_from_team` - Remove an agent from a team
-- `set_active_session` - Set active session by ID, name, or agent
-- `write_to_sessions` - Write to multiple sessions in parallel
-- `read_sessions` - Read from multiple sessions in parallel
-- `create_sessions` - Create multiple sessions with layout in one call
-- `send_cascade_message` - Send priority-based cascading messages
 
 ### Playbook Orchestration
 
