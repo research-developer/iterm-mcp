@@ -351,6 +351,19 @@ class AgentRegistry:
 
         return [r for r in recipients if r not in already_received]
 
+    def get_recent_messages(self, limit: int = 10) -> List[Dict[str, str]]:
+        """Expose recent message hashes for telemetry dashboards."""
+
+        recent = list(self._message_history)[-limit:]
+        return [
+            {
+                "content_hash": record.content_hash,
+                "recipients": record.recipients,
+                "timestamp": record.timestamp.isoformat(),
+            }
+            for record in recent
+        ]
+
     # ==================== Cascading Messages ====================
 
     def resolve_cascade_targets(self, cascade: CascadingMessage) -> Dict[str, List[str]]:
