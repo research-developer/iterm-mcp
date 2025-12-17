@@ -233,10 +233,10 @@ Purpose: Epic proposal for stakeholder review
 - `FOLLOWUP_ISSUES.md` - Enhancement issues from previous epic
 
 ### This Proposal
-- `EPIC_PROPOSAL_QUICK_REFERENCE.md` - Checklist format (you are here)
+- `EPIC_PROPOSAL_QUICK_REFERENCE.md` - Checklist format
 - `EPIC_PROPOSAL_SUMMARY.md` - Executive summary
 - `EPIC_PROPOSAL_MULTI_AGENT_ORCHESTRATION.md` - Full technical proposal
-- `EPIC_PROPOSAL_INDEX.md` - This index document
+- `EPIC_PROPOSAL_INDEX.md` - This index document (you are here)
 
 ### External References
 - [iTerm2 Python API Documentation](https://iterm2.com/python-api/)
