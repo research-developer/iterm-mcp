@@ -4,7 +4,7 @@
 
 This directory contains a comprehensive Epic proposal for transforming the iTerm MCP server into an advanced visual multi-agent orchestration platform. The proposal leverages deep iTerm2 Python API capabilities currently unused in the codebase.
 
-## 📚 Documentation Suite (4 Documents)
+## 📚 Documentation Suite (5 Documents)
 
 ### Start Here: Index & Navigation
 **📖 [EPIC_PROPOSAL_INDEX.md](EPIC_PROPOSAL_INDEX.md)** - Read this first!
