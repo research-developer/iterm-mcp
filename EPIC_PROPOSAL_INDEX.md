@@ -2,7 +2,7 @@
 
 ## 📚 Documentation Suite
 
-This epic proposal consists of three complementary documents designed for different audiences:
+This epic proposal consists of three core proposal documents, plus a README and this INDEX, designed for different audiences:
 
 ### 1. Quick Reference (Start Here) ⚡
 **File:** `EPIC_PROPOSAL_QUICK_REFERENCE.md` (11KB, 328 lines)  
