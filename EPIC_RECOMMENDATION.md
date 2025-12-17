@@ -40,11 +40,9 @@ These items are nice-to-have features that don't block epic closure:
 ## 📝 Recommended Next Steps
 
 1. **Close this epic** - Mark as "Complete" 
-2. **Create new enhancement issues:**
-   - "Add observability dashboard for agent orchestration"
-   - "Audit test strategy against claude-code-mcp and happy-cli patterns"
-   - "Add macOS CI runner for integration tests"
-   - "Create stress and benchmark test suite"
+2. **Execute Roadmap:**
+   - Follow the plan in **[IMPROVEMENT_ROADMAP.md](IMPROVEMENT_ROADMAP.md)**
+   - Prioritize "Test Infrastructure Hardening" (Phase 1)
 3. **Tag release** - Consider tagging current state as v1.0.0
 
 ## 🎯 Rationale for Closure
