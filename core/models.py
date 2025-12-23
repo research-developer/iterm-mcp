@@ -1,8 +1,20 @@
 """Pydantic models for MCP session operations API."""
 
 import re
-from typing import Dict, List, Optional, Union
+from datetime import datetime
+from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Supported AI agent CLI types
+AgentType = Literal["claude", "gemini", "codex", "copilot"]
+
+# Agent CLI launch commands
+AGENT_CLI_COMMANDS: Dict[str, str] = {
+    "claude": "claude",
+    "gemini": "gemini",
+    "codex": "codex",
+    "copilot": "gh copilot",
+}
 
 
 class SessionTarget(BaseModel):
@@ -139,6 +151,10 @@ class SessionConfig(BaseModel):
 
     name: str = Field(..., description="Name for the session")
     agent: Optional[str] = Field(default=None, description="Agent name to register")
+    agent_type: Optional[AgentType] = Field(
+        default=None,
+        description="AI agent CLI to launch: claude, gemini, codex, or copilot"
+    )
     team: Optional[str] = Field(default=None, description="Team to assign agent to")
     command: Optional[str] = Field(default=None, description="Initial command to run")
     max_lines: Optional[int] = Field(default=None, description="Max output lines")
@@ -377,3 +393,70 @@ class ModifySessionsResponse(BaseModel):
     results: List[ModificationResult] = Field(..., description="Results for each session")
     success_count: int = Field(..., description="Number of successful modifications")
     error_count: int = Field(..., description="Number of errors")
+
+
+# ============================================================================
+# NOTIFICATION MODELS
+# ============================================================================
+
+NotificationLevel = Literal["info", "warning", "error", "success", "blocked"]
+
+
+class AgentNotification(BaseModel):
+    """A notification from an agent about its status."""
+
+    agent: str = Field(..., description="Agent name")
+    timestamp: datetime = Field(default_factory=datetime.now, description="When the notification was created")
+    level: NotificationLevel = Field(..., description="Notification severity level")
+    summary: str = Field(..., max_length=100, description="One-line summary")
+    context: Optional[str] = Field(default=None, description="Additional context for follow-up")
+    action_hint: Optional[str] = Field(default=None, description="Suggested next action")
+
+
+class GetNotificationsRequest(BaseModel):
+    """Request to get recent notifications."""
+
+    limit: int = Field(default=10, ge=1, le=100, description="Max notifications to return")
+    level: Optional[NotificationLevel] = Field(default=None, description="Filter by level")
+    agent: Optional[str] = Field(default=None, description="Filter by agent")
+    since: Optional[datetime] = Field(default=None, description="Only notifications after this time")
+
+
+class GetNotificationsResponse(BaseModel):
+    """Response containing notifications."""
+
+    notifications: List[AgentNotification] = Field(..., description="Recent notifications")
+    total_count: int = Field(..., description="Total matching notifications")
+    has_more: bool = Field(default=False, description="More notifications available")
+
+
+# ============================================================================
+# WAIT FOR AGENT MODELS
+# ============================================================================
+
+AgentStatus = Literal["idle", "running", "blocked", "error", "unknown"]
+
+
+class WaitForAgentRequest(BaseModel):
+    """Request to wait for an agent to complete."""
+
+    agent: str = Field(..., description="Agent name to wait for")
+    wait_up_to: int = Field(default=30, ge=1, le=600, description="Max seconds to wait")
+    return_output: bool = Field(default=True, description="Include recent output on timeout")
+    summary_on_timeout: bool = Field(default=True, description="Generate progress summary if timed out")
+
+
+class WaitResult(BaseModel):
+    """Result of waiting for an agent."""
+
+    agent: str = Field(..., description="Agent name")
+    completed: bool = Field(..., description="True if agent finished/became idle")
+    timed_out: bool = Field(..., description="True if wait_up_to was exceeded")
+    elapsed_seconds: float = Field(..., description="How long we waited")
+    status: AgentStatus = Field(..., description="Current agent status")
+    output: Optional[str] = Field(default=None, description="Recent output if requested")
+    summary: Optional[str] = Field(default=None, description="Progress summary if timed out")
+    can_continue_waiting: bool = Field(
+        default=True,
+        description="Hint: is it worth waiting more?"
+    )

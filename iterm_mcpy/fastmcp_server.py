@@ -9,7 +9,9 @@ import logging
 import os
 import re
 import sys
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import AsyncIterator, Dict, List, Optional, Any
 
 import iterm2
@@ -45,12 +47,115 @@ from core.models import (
     SessionModification,
     ModificationResult,
     ModifySessionsResponse,
+    # Agent type support
+    AGENT_CLI_COMMANDS,
+    # Notification models
+    AgentNotification,
+    GetNotificationsRequest,
+    GetNotificationsResponse,
+    # Wait for agent models
+    WaitForAgentRequest,
+    WaitResult,
 )
 
 # Global references for resources (set during lifespan)
 _terminal: Optional[ItermTerminal] = None
 _logger: Optional[logging.Logger] = None
 _agent_registry: Optional[AgentRegistry] = None
+_notification_manager: Optional["NotificationManager"] = None
+
+
+# ============================================================================
+# NOTIFICATION MANAGER
+# ============================================================================
+
+class NotificationManager:
+    """Manages agent notifications with ring buffer storage."""
+
+    # Status icons for compact display
+    STATUS_ICONS = {
+        "info": "ℹ",
+        "warning": "⚠",
+        "error": "✗",
+        "success": "✓",
+        "blocked": "⏸",
+    }
+
+    def __init__(self, max_per_agent: int = 50, max_total: int = 200):
+        self._notifications: List[AgentNotification] = []
+        self._max_per_agent = max_per_agent
+        self._max_total = max_total
+        self._lock = asyncio.Lock()
+
+    async def add(self, notification: AgentNotification) -> None:
+        """Add a notification, maintaining ring buffer limits."""
+        async with self._lock:
+            self._notifications.append(notification)
+            # Trim to max total
+            if len(self._notifications) > self._max_total:
+                self._notifications = self._notifications[-self._max_total:]
+
+    async def add_simple(
+        self,
+        agent: str,
+        level: str,
+        summary: str,
+        context: Optional[str] = None,
+        action_hint: Optional[str] = None,
+    ) -> None:
+        """Convenience method to add a notification."""
+        notification = AgentNotification(
+            agent=agent,
+            timestamp=datetime.now(),
+            level=level,  # type: ignore
+            summary=summary[:100],
+            context=context,
+            action_hint=action_hint,
+        )
+        await self.add(notification)
+
+    async def get(
+        self,
+        limit: int = 10,
+        level: Optional[str] = None,
+        agent: Optional[str] = None,
+        since: Optional[datetime] = None,
+    ) -> List[AgentNotification]:
+        """Get notifications with optional filters."""
+        async with self._lock:
+            result = self._notifications.copy()
+
+        # Apply filters
+        if level:
+            result = [n for n in result if n.level == level]
+        if agent:
+            result = [n for n in result if n.agent == agent]
+        if since:
+            result = [n for n in result if n.timestamp >= since]
+
+        # Return most recent first, limited
+        return sorted(result, key=lambda n: n.timestamp, reverse=True)[:limit]
+
+    async def get_latest_per_agent(self) -> Dict[str, AgentNotification]:
+        """Get the most recent notification for each agent."""
+        async with self._lock:
+            latest: Dict[str, AgentNotification] = {}
+            for n in reversed(self._notifications):
+                if n.agent not in latest:
+                    latest[n.agent] = n
+            return latest
+
+    def format_compact(self, notifications: List[AgentNotification]) -> str:
+        """Format notifications for compact TUI display."""
+        if not notifications:
+            return "━━━ No notifications ━━━"
+
+        lines = ["━━━ Agent Status ━━━"]
+        for n in notifications:
+            icon = self.STATUS_ICONS.get(n.level, "?")
+            lines.append(f"{n.agent:<12} {icon} {n.summary}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        return "\n".join(lines)
 
 
 @asynccontextmanager
@@ -117,11 +222,17 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         agent_registry = AgentRegistry()
         logger.info("Agent registry initialized successfully")
 
+        # Initialize notification manager
+        logger.info("Initializing notification manager...")
+        notification_manager = NotificationManager()
+        logger.info("Notification manager initialized successfully")
+
         # Set global references for resources
-        global _terminal, _logger, _agent_registry
+        global _terminal, _logger, _agent_registry, _notification_manager
         _terminal = terminal
         _logger = logger
         _agent_registry = agent_registry
+        _notification_manager = notification_manager
 
         # Yield the initialized components
         yield {
@@ -129,6 +240,7 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "terminal": terminal,
             "layout_manager": layout_manager,
             "agent_registry": agent_registry,
+            "notification_manager": notification_manager,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -293,6 +405,7 @@ async def execute_create_sessions(
         config = next((cfg for cfg in create_request.sessions if cfg.name == pane_name), None)
 
         agent_name = None
+        agent_type = None
         if config and config.agent:
             teams = [config.team] if config.team else []
             agent_registry.register_agent(
@@ -302,7 +415,17 @@ async def execute_create_sessions(
             )
             agent_name = config.agent
 
-        if config and config.command:
+        # Launch AI agent CLI if agent_type specified
+        if config and config.agent_type:
+            agent_type = config.agent_type
+            cli_command = AGENT_CLI_COMMANDS.get(agent_type)
+            if cli_command:
+                logger.info(f"Launching {agent_type} agent in session {pane_name}: {cli_command}")
+                await session.execute_command(cli_command)
+            else:
+                logger.warning(f"Unknown agent type: {agent_type}")
+        elif config and config.command:
+            # Only run custom command if no agent_type (agent_type takes precedence)
             await session.execute_command(config.command)
 
         if config and config.monitor:
@@ -1682,6 +1805,266 @@ Watch for:
 
 Coordinate responses as needed using write_to_sessions or send_cascade_message.
 """
+
+
+# ============================================================================
+# NOTIFICATION TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def get_notifications(request: GetNotificationsRequest, ctx: Context) -> str:
+    """Get recent agent notifications.
+
+    Returns a list of notifications about agent status changes, errors,
+    completions, and other events. Use this to stay aware of what's happening
+    across all managed agents.
+    """
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        req = ensure_model(GetNotificationsRequest, request)
+        notifications = await notification_manager.get(
+            limit=req.limit,
+            level=req.level,
+            agent=req.agent,
+            since=req.since,
+        )
+
+        response = GetNotificationsResponse(
+            notifications=notifications,
+            total_count=len(notifications),
+            has_more=len(notifications) == req.limit,
+        )
+
+        logger.info(f"Retrieved {len(notifications)} notifications")
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting notifications: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def get_agent_status_summary(ctx: Context) -> str:
+    """Get a compact status summary of all agents.
+
+    Returns a one-line-per-agent summary showing the most recent
+    notification for each agent. Great for quick status checks.
+    """
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Get latest notification per agent
+        latest = await notification_manager.get_latest_per_agent()
+
+        # Also include agents with no notifications
+        all_agents = agent_registry.list_agents()
+        for agent in all_agents:
+            if agent.name not in latest:
+                # Create a placeholder notification
+                latest[agent.name] = AgentNotification(
+                    agent=agent.name,
+                    timestamp=datetime.now(),
+                    level="info",
+                    summary="No activity recorded",
+                )
+
+        notifications = list(latest.values())
+        formatted = notification_manager.format_compact(notifications)
+
+        logger.info(f"Generated status summary for {len(notifications)} agents")
+        return formatted
+
+    except Exception as e:
+        logger.error(f"Error generating status summary: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def notify(
+    agent: str,
+    level: str,
+    summary: str,
+    context: Optional[str] = None,
+    action_hint: Optional[str] = None,
+    ctx: Context = None,
+) -> str:
+    """Manually add a notification for an agent.
+
+    Use this to record significant events like task completion,
+    errors encountered, or when an agent needs attention.
+
+    Args:
+        agent: The agent name
+        level: One of: info, warning, error, success, blocked
+        summary: Brief one-line summary (max 100 chars)
+        context: Optional additional context
+        action_hint: Optional suggested next action
+    """
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        await notification_manager.add_simple(
+            agent=agent,
+            level=level,
+            summary=summary,
+            context=context,
+            action_hint=action_hint,
+        )
+        logger.info(f"Added notification for {agent}: [{level}] {summary}")
+        return f"Notification added for {agent}"
+
+    except Exception as e:
+        logger.error(f"Error adding notification: {e}")
+        return f"Error: {e}"
+
+
+# ============================================================================
+# WAIT FOR AGENT TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def wait_for_agent(request: WaitForAgentRequest, ctx: Context) -> str:
+    """Wait for an agent to complete or reach idle state.
+
+    This allows an orchestrator to wait for a subagent to finish its current
+    task. If the wait times out, returns a progress summary so you can decide
+    whether to wait longer or take action.
+
+    Args:
+        request: Contains agent name, timeout, and output options
+
+    Returns:
+        WaitResult with completion status, elapsed time, and optional output/summary
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        req = ensure_model(WaitForAgentRequest, request)
+
+        # Find the agent
+        agent = agent_registry.get_agent(req.agent)
+        if not agent:
+            return WaitResult(
+                agent=req.agent,
+                completed=False,
+                timed_out=False,
+                elapsed_seconds=0,
+                status="unknown",
+                summary=f"Agent '{req.agent}' not found",
+                can_continue_waiting=False,
+            ).model_dump_json(indent=2)
+
+        # Get the session
+        session = await terminal.get_session_by_id(agent.session_id)
+        if not session:
+            return WaitResult(
+                agent=req.agent,
+                completed=False,
+                timed_out=False,
+                elapsed_seconds=0,
+                status="unknown",
+                summary=f"Session for agent '{req.agent}' not found",
+                can_continue_waiting=False,
+            ).model_dump_json(indent=2)
+
+        logger.info(f"Waiting up to {req.wait_up_to}s for agent {req.agent}")
+
+        # Capture initial output for comparison
+        initial_output = await session.get_screen_contents()
+
+        # Poll for completion
+        start_time = time.time()
+        poll_interval = 0.5  # Check every 500ms
+        last_output = initial_output
+
+        while True:
+            elapsed = time.time() - start_time
+
+            # Check if timed out
+            if elapsed >= req.wait_up_to:
+                # Timed out - generate summary
+                current_output = await session.get_screen_contents()
+
+                summary = None
+                if req.summary_on_timeout:
+                    # Generate a simple summary based on output changes
+                    if current_output != initial_output:
+                        lines = current_output.strip().split('\n')
+                        last_lines = lines[-3:] if len(lines) > 3 else lines
+                        summary = f"Still running. Last output: {' | '.join(last_lines)}"
+                    else:
+                        summary = "No output change detected during wait period"
+
+                # Add notification
+                await notification_manager.add_simple(
+                    agent=req.agent,
+                    level="info",
+                    summary=f"Wait timed out after {int(elapsed)}s",
+                    context=summary,
+                )
+
+                result = WaitResult(
+                    agent=req.agent,
+                    completed=False,
+                    timed_out=True,
+                    elapsed_seconds=elapsed,
+                    status="running",
+                    output=current_output if req.return_output else None,
+                    summary=summary,
+                    can_continue_waiting=True,
+                )
+                logger.info(f"Wait for {req.agent} timed out after {elapsed:.1f}s")
+                return result.model_dump_json(indent=2)
+
+            # Check if processing has stopped (idle)
+            is_processing = getattr(session, 'is_processing', False)
+            if not is_processing:
+                # Check if output has stabilized
+                current_output = await session.get_screen_contents()
+                if current_output == last_output:
+                    # Agent appears idle
+                    await notification_manager.add_simple(
+                        agent=req.agent,
+                        level="success",
+                        summary=f"Completed after {int(elapsed)}s",
+                    )
+
+                    result = WaitResult(
+                        agent=req.agent,
+                        completed=True,
+                        timed_out=False,
+                        elapsed_seconds=elapsed,
+                        status="idle",
+                        output=current_output if req.return_output else None,
+                        summary="Agent completed successfully",
+                        can_continue_waiting=False,
+                    )
+                    logger.info(f"Agent {req.agent} completed after {elapsed:.1f}s")
+                    return result.model_dump_json(indent=2)
+
+                last_output = current_output
+
+            await asyncio.sleep(poll_interval)
+
+    except Exception as e:
+        logger.error(f"Error waiting for agent: {e}")
+        return WaitResult(
+            agent=request.agent if hasattr(request, 'agent') else "unknown",
+            completed=False,
+            timed_out=False,
+            elapsed_seconds=0,
+            status="error",
+            summary=str(e),
+            can_continue_waiting=False,
+        ).model_dump_json(indent=2)
 
 
 # ============================================================================
