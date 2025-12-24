@@ -21,7 +21,7 @@ from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage, SendTarget
-from core.tags import SessionTagLockManager
+from core.tags import SessionTagLockManager, FocusCooldownManager
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -65,6 +65,7 @@ _logger: Optional[logging.Logger] = None
 _agent_registry: Optional[AgentRegistry] = None
 _notification_manager: Optional["NotificationManager"] = None
 _tag_lock_manager: Optional[SessionTagLockManager] = None
+_focus_cooldown: Optional[FocusCooldownManager] = None
 
 
 # ============================================================================
@@ -230,14 +231,20 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         notification_manager = NotificationManager()
         logger.info("Notification manager initialized successfully")
 
+        # Initialize focus cooldown manager
+        logger.info("Initializing focus cooldown manager...")
+        focus_cooldown = FocusCooldownManager()
+        logger.info("Focus cooldown manager initialized (cooldown=2s)")
+
         # Set global references for resources
         global _terminal, _logger, _agent_registry, _notification_manager
         _terminal = terminal
         _logger = logger
         _agent_registry = agent_registry
         _notification_manager = notification_manager
-        global _tag_lock_manager
+        global _tag_lock_manager, _focus_cooldown
         _tag_lock_manager = lock_manager
+        _focus_cooldown = focus_cooldown
 
         # Yield the initialized components
         yield {
@@ -247,6 +254,7 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "agent_registry": agent_registry,
             "notification_manager": notification_manager,
             "tag_lock_manager": lock_manager,
+            "focus_cooldown": focus_cooldown,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -852,6 +860,7 @@ async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> 
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
+    focus_cooldown = ctx.request_context.lifespan_context.get("focus_cooldown")
 
     try:
         req = ensure_model(SetActiveSessionRequest, request)
@@ -866,10 +875,31 @@ async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> 
             return "No matching session found"
 
         session = sessions[0]
+        agent = agent_registry.get_agent_by_session(session.id)
+        agent_name = agent.name if agent else None
         agent_registry.active_session = session.id
 
         if req.focus:
+            # Check focus cooldown
+            if focus_cooldown:
+                allowed, blocking_agent, remaining = focus_cooldown.check_cooldown(
+                    session.id, agent_name
+                )
+                if not allowed:
+                    error_msg = (
+                        f"Focus cooldown active: {remaining:.1f}s remaining. "
+                        f"Last focus by agent '{blocking_agent or 'unknown'}'. "
+                        f"Wait or use the same agent."
+                    )
+                    logger.warning(f"Focus blocked for {session.name}: cooldown {remaining:.1f}s")
+                    return f"Error: {error_msg}"
+
             await terminal.focus_session(session.id)
+
+            # Record focus event
+            if focus_cooldown:
+                focus_cooldown.record_focus(session.id, agent_name)
+
             logger.info(f"Set active session and focused: {session.name} ({session.id})")
             return f"Active session set and focused: {session.name} ({session.id})"
 
@@ -1544,13 +1574,15 @@ async def apply_session_modification(
     terminal: ItermTerminal,
     agent_registry: AgentRegistry,
     logger: logging.Logger,
+    focus_cooldown: Optional[FocusCooldownManager] = None,
 ) -> ModificationResult:
     """Apply modification settings to a single session."""
     agent = agent_registry.get_agent_by_session(session.id)
+    agent_name = agent.name if agent else None
     result = ModificationResult(
         session_id=session.id,
         session_name=session.name,
-        agent=agent.name if agent else None,
+        agent=agent_name,
     )
     changes = []
 
@@ -1560,10 +1592,28 @@ async def apply_session_modification(
             agent_registry.active_session = session.id
             changes.append("set_active")
 
-        # Handle focus
+        # Handle focus with cooldown check
         if modification.focus:
+            if focus_cooldown:
+                allowed, blocking_agent, remaining = focus_cooldown.check_cooldown(
+                    session.id, agent_name
+                )
+                if not allowed:
+                    result.error = (
+                        f"Focus cooldown active: {remaining:.1f}s remaining. "
+                        f"Last focus by agent '{blocking_agent or 'unknown'}'. "
+                        f"Wait or use the same agent."
+                    )
+                    logger.warning(f"Focus blocked for {session.name}: cooldown {remaining:.1f}s")
+                    return result
+
             await terminal.focus_session(session.id)
             changes.append("focus")
+
+            # Record the focus event for cooldown
+            if focus_cooldown:
+                focus_cooldown.record_focus(session.id, agent_name)
+                logger.debug(f"Recorded focus event for {session.name} by {agent_name}")
 
         # Reset colors first if requested
         if modification.reset:
@@ -1648,6 +1698,7 @@ async def modify_sessions(
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
+    focus_cooldown = ctx.request_context.lifespan_context.get("focus_cooldown")
 
     try:
         req = ensure_model(ModifySessionsRequest, request)
@@ -1674,7 +1725,9 @@ async def modify_sessions(
                 continue
 
             session = sessions[0]
-            result = await apply_session_modification(session, modification, terminal, agent_registry, logger)
+            result = await apply_session_modification(
+                session, modification, terminal, agent_registry, logger, focus_cooldown
+            )
             results.append(result)
 
         success_count = sum(1 for r in results if r.success)

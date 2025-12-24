@@ -8,8 +8,10 @@ import shutil
 import tempfile
 import unittest
 
+import time
+
 from core.agents import AgentRegistry
-from core.tags import SessionTagLockManager
+from core.tags import SessionTagLockManager, FocusCooldownManager
 
 
 class TestSessionTagging(unittest.TestCase):
@@ -265,6 +267,116 @@ class TestPermissionChecks(unittest.TestCase):
         allowed, owner = self.manager.check_permission("s1", None)
         self.assertTrue(allowed)
         self.assertIsNone(owner)
+
+
+class TestFocusCooldown(unittest.TestCase):
+    """Test focus cooldown to prevent rapid session switching."""
+
+    def test_first_focus_always_allowed(self):
+        """Scenario: First focus request is always allowed."""
+        cooldown = FocusCooldownManager(cooldown_seconds=2.0)
+        allowed, blocking_agent, remaining = cooldown.check_cooldown("s1", "agent-a")
+        self.assertTrue(allowed)
+        self.assertIsNone(blocking_agent)
+        self.assertEqual(remaining, 0.0)
+
+    def test_focus_blocked_during_cooldown(self):
+        """Scenario: Different session focus blocked during cooldown."""
+        cooldown = FocusCooldownManager(cooldown_seconds=2.0)
+        cooldown.record_focus("s1", "agent-a")
+
+        # Different session should be blocked
+        allowed, blocking_agent, remaining = cooldown.check_cooldown("s2", "agent-b")
+        self.assertFalse(allowed)
+        self.assertEqual(blocking_agent, "agent-a")
+        self.assertGreater(remaining, 0)
+
+    def test_same_session_focus_is_idempotent(self):
+        """Scenario: Same session can be focused again (idempotent)."""
+        cooldown = FocusCooldownManager(cooldown_seconds=2.0)
+        cooldown.record_focus("s1", "agent-a")
+
+        # Same session should be allowed
+        allowed, blocking_agent, remaining = cooldown.check_cooldown("s1", "agent-b")
+        self.assertTrue(allowed)
+
+    def test_same_agent_can_focus_different_session(self):
+        """Scenario: Same agent can focus different session."""
+        cooldown = FocusCooldownManager(cooldown_seconds=2.0)
+        cooldown.record_focus("s1", "agent-a")
+
+        # Same agent focusing different session should be allowed
+        allowed, blocking_agent, remaining = cooldown.check_cooldown("s2", "agent-a")
+        self.assertTrue(allowed)
+
+    def test_focus_allowed_after_cooldown_expires(self):
+        """Scenario: Focus allowed after cooldown period expires."""
+        cooldown = FocusCooldownManager(cooldown_seconds=0.1)  # Short cooldown
+        cooldown.record_focus("s1", "agent-a")
+
+        # Wait for cooldown to expire
+        time.sleep(0.15)
+
+        allowed, blocking_agent, remaining = cooldown.check_cooldown("s2", "agent-b")
+        self.assertTrue(allowed)
+        self.assertEqual(remaining, 0.0)
+
+    def test_reset_clears_cooldown(self):
+        """Scenario: Reset clears the cooldown state."""
+        cooldown = FocusCooldownManager(cooldown_seconds=2.0)
+        cooldown.record_focus("s1", "agent-a")
+
+        # Should be blocked
+        allowed, _, _ = cooldown.check_cooldown("s2", "agent-b")
+        self.assertFalse(allowed)
+
+        # Reset
+        cooldown.reset()
+
+        # Should now be allowed
+        allowed, _, _ = cooldown.check_cooldown("s2", "agent-b")
+        self.assertTrue(allowed)
+
+    def test_get_status_shows_cooldown_info(self):
+        """Scenario: get_status returns current cooldown state."""
+        cooldown = FocusCooldownManager(cooldown_seconds=2.0)
+
+        # Before any focus
+        status = cooldown.get_status()
+        self.assertFalse(status["in_cooldown"])
+        self.assertIsNone(status["last_session"])
+        self.assertIsNone(status["last_agent"])
+
+        # After focus
+        cooldown.record_focus("s1", "agent-a")
+        status = cooldown.get_status()
+        self.assertTrue(status["in_cooldown"])
+        self.assertEqual(status["last_session"], "s1")
+        self.assertEqual(status["last_agent"], "agent-a")
+        self.assertGreater(status["remaining_seconds"], 0)
+
+    def test_cooldown_seconds_configurable(self):
+        """Scenario: Cooldown period is configurable."""
+        cooldown = FocusCooldownManager(cooldown_seconds=5.0)
+        self.assertEqual(cooldown.cooldown_seconds, 5.0)
+
+        cooldown.cooldown_seconds = 10.0
+        self.assertEqual(cooldown.cooldown_seconds, 10.0)
+
+        # Negative values should be clamped to 0
+        cooldown.cooldown_seconds = -1.0
+        self.assertEqual(cooldown.cooldown_seconds, 0.0)
+
+    def test_none_agent_still_triggers_cooldown(self):
+        """Scenario: Focus without agent still triggers cooldown."""
+        cooldown = FocusCooldownManager(cooldown_seconds=2.0)
+        cooldown.record_focus("s1", None)
+
+        # Different session by different agent should be blocked
+        allowed, blocking_agent, remaining = cooldown.check_cooldown("s2", "agent-b")
+        self.assertFalse(allowed)
+        self.assertIsNone(blocking_agent)  # No blocking agent name
+        self.assertGreater(remaining, 0)
 
 
 if __name__ == "__main__":
