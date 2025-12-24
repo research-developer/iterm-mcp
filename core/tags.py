@@ -1,6 +1,6 @@
 """Session tagging and locking utilities."""
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 
 class SessionTagLockManager:
@@ -11,10 +11,16 @@ class SessionTagLockManager:
         self._locks: Dict[str, str] = {}
 
     # ---------------------- Tag management ---------------------- #
+    @staticmethod
+    def _normalize_tags(tags: List[str]) -> Set[str]:
+        """Normalize and deduplicate tags."""
+        return {t.strip() for t in tags if t.strip()}
+
     def set_tags(self, session_id: str, tags: List[str], append: bool = True) -> List[str]:
         """Set or append tags for a session."""
-        normalized = {t.strip() for t in tags if t and t.strip()}
+        normalized = self._normalize_tags(tags)
         if not normalized and not append:
+            # Replace-with-empty semantics: clear all tags when append is False
             self._tags.pop(session_id, None)
             return []
 
@@ -32,7 +38,7 @@ class SessionTagLockManager:
         if session_id not in self._tags:
             return []
 
-        remaining = self._tags[session_id] - {t.strip() for t in tags}
+        remaining = self._tags[session_id] - self._normalize_tags(tags)
         if remaining:
             self._tags[session_id] = remaining
         else:
@@ -45,13 +51,13 @@ class SessionTagLockManager:
         return sorted(self._tags.get(session_id, set()))
 
     # ---------------------- Lock management --------------------- #
-    def lock_session(self, session_id: str, agent: str) -> bool:
-        """Lock a session for an agent. Returns True if lock acquired or already owned."""
+    def lock_session(self, session_id: str, agent: str) -> Tuple[bool, Optional[str]]:
+        """Lock a session for an agent. Returns (acquired, current_owner)."""
         owner = self._locks.get(session_id)
         if owner is None or owner == agent:
             self._locks[session_id] = agent
-            return True
-        return False
+            return True, agent
+        return False, owner
 
     def unlock_session(self, session_id: str, agent: Optional[str] = None) -> bool:
         """Unlock a session if unlocked or owned by the provided agent."""
@@ -87,7 +93,7 @@ class SessionTagLockManager:
         return False, owner
 
     # ---------------------- Combined info ----------------------- #
-    def describe(self, session_id: str) -> Dict[str, Optional[List[str]]]:
+    def describe(self, session_id: str) -> Dict[str, Union[List[str], Optional[str]]]:
         """Return tags and lock owner for a session."""
         return {
             "tags": self.get_tags(session_id),

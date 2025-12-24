@@ -1,6 +1,5 @@
 """Tests for session tagging and locking."""
 
-import os
 import shutil
 import tempfile
 import unittest
@@ -10,7 +9,7 @@ from core.tags import SessionTagLockManager
 
 
 class TestSessionTagging(unittest.TestCase):
-    """Validate tag CRUD operations."""
+    """Validate tag create/read/update/delete operations on sessions."""
 
     def test_add_and_remove_tags(self):
         manager = SessionTagLockManager()
@@ -29,11 +28,13 @@ class TestSessionTagging(unittest.TestCase):
 
 
 class TestSessionLocking(unittest.TestCase):
-    """Validate lock acquisition and enforcement."""
+    """Validate session lock acquisition, enforcement, and release."""
 
     def test_lock_enforcement(self):
         manager = SessionTagLockManager()
-        self.assertTrue(manager.lock_session("s1", "agent-a"))
+        acquired, owner = manager.lock_session("s1", "agent-a")
+        self.assertTrue(acquired)
+        self.assertEqual(owner, "agent-a")
         self.assertTrue(manager.is_locked("s1"))
         self.assertEqual(manager.lock_owner("s1"), "agent-a")
 
@@ -64,7 +65,8 @@ class TestLockCleanup(unittest.TestCase):
         registry = AgentRegistry(data_dir=self.temp_dir, lock_manager=manager)
         registry.register_agent("agent-x", "session-1")
 
-        self.assertTrue(manager.lock_session("session-1", "agent-x"))
+        acquired, _ = manager.lock_session("session-1", "agent-x")
+        self.assertTrue(acquired)
         self.assertTrue(manager.is_locked("session-1"))
 
         registry.remove_agent("agent-x")

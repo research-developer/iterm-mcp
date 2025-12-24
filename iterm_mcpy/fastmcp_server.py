@@ -223,7 +223,6 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         logger.info("Initializing agent registry...")
         lock_manager = SessionTagLockManager()
         agent_registry = AgentRegistry(lock_manager=lock_manager)
-        agent_registry.attach_lock_manager(lock_manager)
         logger.info("Agent registry initialized successfully")
 
         # Initialize notification manager
@@ -342,6 +341,24 @@ def check_condition(content: str, condition: Optional[str]) -> bool:
         return bool(re.search(condition, content))
     except re.error:
         return False
+
+
+async def notify_lock_request(
+    notification_manager: Optional["NotificationManager"],
+    owner: Optional[str],
+    session_identifier: str,
+    requester: Optional[str],
+    action_hint: str = "Approve or unlock to allow access",
+) -> None:
+    """Send a standardized lock access notification."""
+    if notification_manager and owner:
+        await notification_manager.add_simple(
+            owner,
+            "blocked",
+            f"Session {session_identifier} locked",
+            context=f"Request by {requester or 'unknown'}",
+            action_hint=action_hint,
+        )
 
 
 def ensure_model(model_cls, payload):
@@ -475,14 +492,13 @@ async def execute_write_request(
             if not allowed:
                 result.skipped = True
                 result.skipped_reason = "locked"
-                if notification_manager and owner:
-                    await notification_manager.add_simple(
-                        owner,
-                        "blocked",
-                        f"Session {session.name} locked",
-                        context=f"Request by {requesting_agent or 'unknown'}",
-                        action_hint="Approve or unlock to allow access",
-                    )
+                safe_name = session.name or session.id
+                await notify_lock_request(
+                    notification_manager,
+                    owner,
+                    safe_name,
+                    requesting_agent,
+                )
                 return result
 
         if message.condition:
@@ -765,11 +781,12 @@ async def lock_session(
     if not lock_manager:
         return "Tag/lock manager unavailable"
 
-    acquired = lock_manager.lock_session(session_id, agent)
-    if acquired:
-        return json.dumps({"session_id": session_id, "locked_by": agent}, indent=2)
-    owner = lock_manager.lock_owner(session_id)
-    return json.dumps({"session_id": session_id, "locked_by": owner, "status": "locked"}, indent=2)
+    acquired, owner = lock_manager.lock_session(session_id, agent)
+    status = "acquired" if acquired else "locked"
+    return json.dumps(
+        {"session_id": session_id, "locked_by": owner, "status": status},
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -783,8 +800,17 @@ async def unlock_session(
     if not lock_manager:
         return "Tag/lock manager unavailable"
 
+    previous_owner = lock_manager.lock_owner(session_id)
     success = lock_manager.unlock_session(session_id, agent)
-    return json.dumps({"session_id": session_id, "unlocked": success, "locked_by": lock_manager.lock_owner(session_id)}, indent=2)
+    return json.dumps(
+        {
+            "session_id": session_id,
+            "unlocked": success,
+            "previous_owner": previous_owner,
+            "locked_by": lock_manager.lock_owner(session_id),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -795,22 +821,21 @@ async def request_session_access(
 ) -> str:
     """Request permission to write to a locked session."""
     lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
-    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
     if not lock_manager:
         return "Tag/lock manager unavailable"
 
+    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
     allowed, owner = lock_manager.check_permission(session_id, agent)
     if allowed:
         return json.dumps({"session_id": session_id, "allowed": True}, indent=2)
 
-    if notification_manager and owner:
-        await notification_manager.add_simple(
-            owner,
-            "blocked",
-            f"Access request for session {session_id}",
-            context=f"Requested by {agent}",
-            action_hint="Respond by unlocking if approved",
-        )
+    await notify_lock_request(
+        notification_manager,
+        owner,
+        session_id,
+        agent,
+        action_hint="Respond by unlocking if approved",
+    )
 
     return json.dumps({"session_id": session_id, "allowed": False, "locked_by": owner}, indent=2)
 
