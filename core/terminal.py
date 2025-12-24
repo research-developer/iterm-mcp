@@ -154,7 +154,37 @@ class ItermTerminal:
                 return session
         
         return None
-    
+
+    async def get_focused_session(self) -> Optional[ItermSession]:
+        """Get the currently focused session.
+
+        Returns:
+            The currently focused session, or None if no session is focused
+        """
+        if not self.app:
+            return None
+
+        # Get the current window
+        window = self.app.current_terminal_window
+        if not window:
+            return None
+
+        # Get the current tab
+        tab = window.current_tab
+        if not tab:
+            return None
+
+        # Get the current session
+        iterm_session = tab.current_session
+        if not iterm_session:
+            return None
+
+        # Refresh sessions to ensure we have the latest
+        await self._refresh_sessions()
+
+        # Return the matching ItermSession wrapper
+        return self.sessions.get(iterm_session.session_id)
+
     async def create_window(self) -> ItermSession:
         """Create a new iTerm2 window.
         

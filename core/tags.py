@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 
 
 # Default cooldown period in seconds
-DEFAULT_FOCUS_COOLDOWN_SECONDS = 2.0
+DEFAULT_FOCUS_COOLDOWN_SECONDS = 5.0
 
 
 class FocusCooldownManager:

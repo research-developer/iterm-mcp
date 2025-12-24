@@ -423,6 +423,11 @@ async def execute_create_sessions(
             f"Invalid layout type: {create_request.layout}. Use one of: {[lt.name for lt in LayoutType]}"
         ) from exc
 
+    # Save the currently focused session to restore after creation
+    # (creating new windows steals focus from the user's current session)
+    original_focused = await terminal.get_focused_session()
+    original_session_id = original_focused.id if original_focused else None
+
     pane_names = [cfg.name or f"Session-{idx}" for idx, cfg in enumerate(create_request.sessions)]
     logger.info(f"Creating layout {layout_type.name} with panes: {pane_names}")
 
@@ -474,6 +479,14 @@ async def execute_create_sessions(
 
     if created and not agent_registry.active_session:
         agent_registry.active_session = created[0].session_id
+
+    # Restore focus to the original session to avoid disrupting the user
+    if original_session_id:
+        try:
+            await terminal.focus_session(original_session_id)
+            logger.debug(f"Restored focus to original session: {original_session_id}")
+        except Exception as e:
+            logger.warning(f"Could not restore focus to original session: {e}")
 
     return CreateSessionsResponse(sessions=created, window_id=create_request.window_id or "")
 
@@ -882,9 +895,11 @@ async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> 
         if req.focus:
             # Check focus cooldown
             if focus_cooldown:
+                logger.info(f"Checking focus cooldown for {session.name} (agent={agent_name})")
                 allowed, blocking_agent, remaining = focus_cooldown.check_cooldown(
                     session.id, agent_name
                 )
+                logger.info(f"Cooldown check result: allowed={allowed}, blocking_agent={blocking_agent}, remaining={remaining:.1f}s")
                 if not allowed:
                     error_msg = (
                         f"Focus cooldown active: {remaining:.1f}s remaining. "
@@ -893,6 +908,8 @@ async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> 
                     )
                     logger.warning(f"Focus blocked for {session.name}: cooldown {remaining:.1f}s")
                     return f"Error: {error_msg}"
+            else:
+                logger.warning("No focus_cooldown manager available!")
 
             await terminal.focus_session(session.id)
 
