@@ -14,6 +14,7 @@ from .agents import (
     CascadingMessage,
     MessageRecord
 )
+from .tags import SessionTagLockManager
 from .models import (
     SessionTarget,
     SessionMessage,
@@ -83,6 +84,7 @@ __all__ = [
     'SendTarget',
     'CascadingMessage',
     'MessageRecord',
+    'SessionTagLockManager',
     # API models
     'SessionTarget',
     'SessionMessage',

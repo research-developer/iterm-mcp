@@ -3,12 +3,15 @@
 import hashlib
 import json
 import os
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set
-from collections import deque
+from typing import Dict, List, Optional, Set, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from .tags import SessionTagLockManager
 
 
 class Agent(BaseModel):
@@ -63,7 +66,12 @@ class CascadingMessage(BaseModel):
 class AgentRegistry:
     """Manages agents, teams, and message deduplication with JSONL persistence."""
 
-    def __init__(self, data_dir: Optional[str] = None, max_message_history: int = 1000):
+    def __init__(
+        self,
+        data_dir: Optional[str] = None,
+        max_message_history: int = 1000,
+        lock_manager: Optional["SessionTagLockManager"] = None,
+    ):
         """Initialize the agent registry.
 
         Args:
@@ -87,9 +95,14 @@ class AgentRegistry:
 
         # Active session tracking
         self._active_session: Optional[str] = None
+        self.lock_manager = lock_manager
 
         # Load existing data
         self._load_data()
+
+    def attach_lock_manager(self, lock_manager: "SessionTagLockManager") -> None:
+        """Attach a lock manager after initialization."""
+        self.lock_manager = lock_manager
 
     def _load_data(self) -> None:
         """Load agents and teams from JSONL files."""
@@ -184,6 +197,8 @@ class AgentRegistry:
         if name in self._agents:
             del self._agents[name]
             self._save_agents()
+            if self.lock_manager:
+                self.lock_manager.release_locks_by_agent(name)
             return True
         return False
 

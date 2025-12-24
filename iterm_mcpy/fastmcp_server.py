@@ -21,6 +21,7 @@ from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage, SendTarget
+from core.tags import SessionTagLockManager
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -63,6 +64,7 @@ _terminal: Optional[ItermTerminal] = None
 _logger: Optional[logging.Logger] = None
 _agent_registry: Optional[AgentRegistry] = None
 _notification_manager: Optional["NotificationManager"] = None
+_tag_lock_manager: Optional[SessionTagLockManager] = None
 
 
 # ============================================================================
@@ -219,7 +221,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 
         # Initialize agent registry
         logger.info("Initializing agent registry...")
-        agent_registry = AgentRegistry()
+        lock_manager = SessionTagLockManager()
+        agent_registry = AgentRegistry(lock_manager=lock_manager)
         logger.info("Agent registry initialized successfully")
 
         # Initialize notification manager
@@ -233,6 +236,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         _logger = logger
         _agent_registry = agent_registry
         _notification_manager = notification_manager
+        global _tag_lock_manager
+        _tag_lock_manager = lock_manager
 
         # Yield the initialized components
         yield {
@@ -241,6 +246,7 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "layout_manager": layout_manager,
             "agent_registry": agent_registry,
             "notification_manager": notification_manager,
+            "tag_lock_manager": lock_manager,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -335,6 +341,24 @@ def check_condition(content: str, condition: Optional[str]) -> bool:
         return bool(re.search(condition, content))
     except re.error:
         return False
+
+
+async def notify_lock_request(
+    notification_manager: Optional["NotificationManager"],
+    owner: Optional[str],
+    session_identifier: str,
+    requester: Optional[str],
+    action_hint: str = "Approve or unlock to allow access",
+) -> None:
+    """Send a standardized lock access notification."""
+    if notification_manager and owner:
+        await notification_manager.add_simple(
+            owner,
+            "blocked",
+            f"Session {session_identifier} locked",
+            context=f"Request by {requester or 'unknown'}",
+            action_hint=action_hint,
+        )
 
 
 def ensure_model(model_cls, payload):
@@ -451,13 +475,31 @@ async def execute_write_request(
     terminal: ItermTerminal,
     agent_registry: AgentRegistry,
     logger: logging.Logger,
+    lock_manager: Optional[SessionTagLockManager] = None,
+    notification_manager: Optional["NotificationManager"] = None,
 ) -> WriteToSessionsResponse:
     """Send messages according to WriteToSessionsRequest and return structured results."""
 
     results: List[WriteResult] = []
+    active_agent = agent_registry.get_active_agent()
+    requesting_agent = write_request.requesting_agent or (active_agent.name if active_agent else None)
 
     async def send_to_session(session: ItermSession, message: SessionMessage) -> WriteResult:
         result = WriteResult(session_id=session.id, session_name=session.name)
+
+        if lock_manager:
+            allowed, owner = lock_manager.check_permission(session.id, requesting_agent)
+            if not allowed:
+                result.skipped = True
+                result.skipped_reason = "locked"
+                safe_name = session.name or session.id
+                await notify_lock_request(
+                    notification_manager,
+                    owner,
+                    safe_name,
+                    requesting_agent,
+                )
+                return result
 
         if message.condition:
             output = await session.get_screen_contents()
@@ -679,6 +721,7 @@ async def list_sessions(
     """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     logger.info(f"Listing sessions{' (agents_only)' if agents_only else ''}")
@@ -693,16 +736,108 @@ async def list_sessions(
         if agents_only and agent is None:
             continue
 
-        result.append({
+        session_meta = {
             "id": session.id,
             "name": session.name,
             "persistent_id": session.persistent_id,
             "agent": agent.name if agent else None,
             "teams": agent.teams if agent else []
-        })
+        }
+
+        if lock_manager:
+            session_meta["tags"] = lock_manager.get_tags(session.id)
+            session_meta["locked_by"] = lock_manager.lock_owner(session.id)
+
+        result.append(session_meta)
 
     logger.info(f"Found {len(result)} active sessions")
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def set_session_tags(
+    ctx: Context,
+    session_id: str,
+    tags: List[str],
+    append: bool = True,
+) -> str:
+    """Set or append tags on a session."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    updated = lock_manager.set_tags(session_id, tags, append=append)
+    return json.dumps({"session_id": session_id, "tags": updated}, indent=2)
+
+
+@mcp.tool()
+async def lock_session(
+    ctx: Context,
+    session_id: str,
+    agent: str,
+) -> str:
+    """Lock a session for an agent."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    acquired, owner = lock_manager.lock_session(session_id, agent)
+    status = "acquired" if acquired else "locked"
+    return json.dumps(
+        {"session_id": session_id, "locked_by": owner, "status": status},
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def unlock_session(
+    ctx: Context,
+    session_id: str,
+    agent: Optional[str] = None,
+) -> str:
+    """Unlock a session (optionally enforcing owner match)."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    previous_owner = lock_manager.lock_owner(session_id)
+    success = lock_manager.unlock_session(session_id, agent)
+    return json.dumps(
+        {
+            "session_id": session_id,
+            "unlocked": success,
+            "previous_owner": previous_owner,
+            "locked_by": lock_manager.lock_owner(session_id),
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def request_session_access(
+    ctx: Context,
+    session_id: str,
+    agent: str,
+) -> str:
+    """Request permission to write to a locked session."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
+    allowed, owner = lock_manager.check_permission(session_id, agent)
+    if allowed:
+        return json.dumps({"session_id": session_id, "allowed": True}, indent=2)
+
+    await notify_lock_request(
+        notification_manager,
+        owner,
+        session_id,
+        agent,
+        action_hint="Respond by unlocking if approved",
+    )
+
+    return json.dumps({"session_id": session_id, "allowed": False, "locked_by": owner}, indent=2)
 
 
 @mcp.tool()
@@ -752,6 +887,8 @@ async def create_sessions(request: CreateSessionsRequest, ctx: Context) -> str:
     terminal = ctx.request_context.lifespan_context["terminal"]
     layout_manager = ctx.request_context.lifespan_context["layout_manager"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -774,11 +911,20 @@ async def write_to_sessions(request: WriteToSessionsRequest, ctx: Context) -> st
 
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
         write_request = ensure_model(WriteToSessionsRequest, request)
-        result = await execute_write_request(write_request, terminal, agent_registry, logger)
+        result = await execute_write_request(
+            write_request,
+            terminal,
+            agent_registry,
+            logger,
+            lock_manager=lock_manager,
+            notification_manager=notification_manager,
+        )
         return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error in write_to_sessions: {e}")
@@ -1032,7 +1178,14 @@ async def orchestrate_playbook(request: OrchestrateRequest, ctx: Context) -> str
                 parallel=command.parallel,
                 skip_duplicates=command.skip_duplicates,
             )
-            write_result = await execute_write_request(write_request, terminal, agent_registry, logger)
+            write_result = await execute_write_request(
+                write_request,
+                terminal,
+                agent_registry,
+                logger,
+                lock_manager=lock_manager,
+                notification_manager=notification_manager,
+            )
             command_results.append(PlaybookCommandResult(name=command.name, write_result=write_result))
 
         response.commands = command_results
