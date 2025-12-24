@@ -88,6 +88,10 @@ class WriteToSessionsRequest(BaseModel):
         default=True,
         description="Skip sending if message was already sent to target"
     )
+    requesting_agent: Optional[str] = Field(
+        default=None,
+        description="Agent initiating the write (used for lock enforcement)"
+    )
 
 
 class ReadTarget(BaseModel):
