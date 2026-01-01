@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+#### Agent-Driven Feedback System
+
+A comprehensive feedback system for AI agents using iterm-mcp to report issues and suggestions.
+
+- **Core Components** (`core/feedback.py`)
+  - `FeedbackEntry` - Pydantic model with auto-generated IDs, agent identification, categorization, and GitHub integration
+  - `FeedbackContext` - Captures git state, project path, recent activity, and terminal snapshots
+  - `FeedbackConfig` - Configuration for error threshold, periodic, pattern, and GitHub triggers
+  - `FeedbackHookManager` - Multi-trigger hook system with environment variable overrides
+  - `FeedbackCollector` - Context capture and feedback file creation
+  - `FeedbackRegistry` - JSONL persistence with CRUD operations and querying
+  - `FeedbackForker` - Git worktree isolation for feedback fixes
+  - `GitHubIntegration` - GitHub CLI (`gh`) integration for issue creation
+
+- **MCP Tools** (`iterm_mcpy/fastmcp_server.py`)
+  - `submit_feedback` - Manual feedback submission
+  - `check_feedback_triggers` - Record errors/tool calls, check trigger conditions
+  - `query_feedback` - List/search feedback entries with filters
+  - `fork_for_feedback` - Spawn forked session in git worktree
+  - `triage_feedback_to_github` - Create GitHub issue from feedback
+  - `notify_feedback_update` - Notify agents about PR/status updates
+  - `get_feedback_config` - Get trigger configuration
+
+- **Tests** (`tests/test_feedback.py`, `tests/test_mcp_feedback_tools.py`)
+  - 31 unit tests for core feedback components
+  - 29 integration tests for MCP tools
+  - Environment variable override tests
+  - NotificationManager integration tests
+
 - Update README with new features documentation ([89a7179](../../commit/89a7179))
 - Correct project structure in documentation ([89a7179](../../commit/89a7179))
 - Add comprehensive documentation for parallel multi-agent orchestration ([1bf9784](../../commit/1bf9784))
