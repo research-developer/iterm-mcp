@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-11-28
+
+### Changes:
+- Refactor tests to use `AsyncMock` for async initialization
+- Improve async test patterns and reliability
