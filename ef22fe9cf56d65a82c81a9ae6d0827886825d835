@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-12-05
+
+### Changes:
+- Update FastMCP resource handlers for compatibility
+- Add direct runner script for easier server startup
