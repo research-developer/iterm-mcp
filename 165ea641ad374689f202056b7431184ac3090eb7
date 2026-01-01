@@ -1,0 +1,13 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-11-27
+**Breaking Change:** Yes
+
+### Changes:
+- Implement gRPC server alongside FastMCP server
+- Rename module from `server` to `iterm_mcpy`
+- Add protobuf definitions in `protos/iterm_mcp.proto`
+- Add generated protobuf files
+- Add `watch_tests.sh` script for development
+- Add gRPC smoke tests
