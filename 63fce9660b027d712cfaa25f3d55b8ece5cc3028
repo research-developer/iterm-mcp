@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-12-05
+
+### Changes:
+- Remove unused `session_map` variable from example code
+- Clean up example code
