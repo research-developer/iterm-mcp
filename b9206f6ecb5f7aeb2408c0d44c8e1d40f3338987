@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-12-05
+
+### Changes:
+- Upgrade codecov GitHub action
+- Make coverage omit patterns explicit in configuration
