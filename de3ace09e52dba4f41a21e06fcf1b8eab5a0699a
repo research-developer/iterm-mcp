@@ -1,0 +1,12 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-03-04
+
+### Changes:
+- Add `send_special_key` method supporting Enter, Tab, Escape, arrow keys, etc.
+- Add `send_special_key` MCP tool
+- Add `execute` parameter to `write_to_terminal` for CLI interaction
+- Change server port to 12340-12349 range to avoid conflicts
+- Add automatic port selection if primary port is busy
+- Improve `install_claude_desktop.py` with server status checking
