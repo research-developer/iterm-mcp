@@ -1,0 +1,11 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-03-02
+
+### Changes:
+- Replace subscription-based monitoring with polling-based approach
+- Add async initialization waiting with timeout for monitoring
+- Implement event-based signaling for monitor task readiness
+- Fix line-by-line filtering to correctly process individual output lines
+- Change `stop_monitoring` to async method for proper cleanup
