@@ -1,0 +1,9 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-12-05
+**PR:** #12
+
+### Changes:
+- Apply PR review feedback for gRPC support
+- Improve code quality based on review
