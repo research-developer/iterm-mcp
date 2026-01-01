@@ -1,0 +1,9 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-12-05
+**Breaking Change:** Yes
+
+### Changes:
+- Update gRPC proto definitions for parallel operations
+- Update gRPC client to support new parallel API
