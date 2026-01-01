@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-11-27
+
+### Changes:
+- Add 1mcp-linux-x64 to .gitignore
+- Fix .gitignore formatting for Jupyter patterns
