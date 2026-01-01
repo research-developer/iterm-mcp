@@ -1,0 +1,12 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-12-23
+**PR:** #53
+
+### Changes:
+- Add session tagging system with CRUD operations
+- Add session locking with agent enforcement
+- Add `set_session_tags` MCP tool for tag management
+- Add `lock_session`, `unlock_session`, and `request_session_access` MCP tools
+- Add comprehensive test suite with 24 tests for tagging and locking
