@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-11-30
+
+### Changes:
+- Add gRPC client implementation for programmatic access
+- Add CI workflow for automated testing
