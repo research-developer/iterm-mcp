@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-03-04
+
+### Changes:
+- Update imports throughout codebase for new structure
+- Update install script for new directory layout
