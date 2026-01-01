@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-04-15
+
+### Changes:
+- Update server to maintain persistent connections
+- Improve session management reliability
