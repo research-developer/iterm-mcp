@@ -1,0 +1,10 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-10-25
+
+### Changes:
+- Add `execute_command()` method to `ItermTerminal`
+- Add command position tracking via `_last_command_index` in logger
+- Add `get_output_since_last_command()` method
+- Enable retrieval of output generated since the last command
