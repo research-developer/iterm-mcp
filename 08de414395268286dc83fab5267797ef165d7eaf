@@ -1,0 +1,10 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-03-04
+**Breaking Change:** Yes
+
+### Changes:
+- Remove TypeScript implementation and dependencies
+- Move code from `iterm_mcp_python/` to root directory
+- Simplify project structure for better maintainability
