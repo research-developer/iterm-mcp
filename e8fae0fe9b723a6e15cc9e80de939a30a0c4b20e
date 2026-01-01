@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-12-05
+
+### Changes:
+- Add smart base64 encoding option for command execution
+- Handle special characters and quotes in commands
