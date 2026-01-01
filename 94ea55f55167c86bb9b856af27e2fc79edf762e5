@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-12-05
+
+### Changes:
+- Improve CI test selection logic
+- Update package configuration based on review
