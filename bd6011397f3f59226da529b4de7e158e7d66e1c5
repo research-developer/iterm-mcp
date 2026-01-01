@@ -1,0 +1,10 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-12-10
+
+### Changes:
+- Add `ColorSpec`, `SessionAppearance` models to core/models.py
+- Add color and badge methods to `ItermSession`: `set_background_color`, `set_tab_color`, `set_cursor_color`, `set_badge`, `reset_colors`
+- Add `set_session_appearances` MCP tool for bulk appearance updates
+- Add `agents_only` filter parameter to `list_sessions` tool
