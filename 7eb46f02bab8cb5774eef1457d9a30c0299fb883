@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-03-04
+
+### Changes:
+- Remove TypeScript references from CLAUDE.md
+- Document latest changes and project structure
