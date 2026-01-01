@@ -2376,9 +2376,8 @@ async def submit_feedback(
 
         # Collect context
         collector = FeedbackCollector()
-        context = await collector.collect_context(
-            agent_id=agent_name,
-            session_id=session_id,
+        context = await collector.capture_context(
+            project_path=os.getcwd(),
             recent_tool_calls=[],  # Would need hook integration for real data
             recent_errors=error_messages or [],
         )
@@ -2404,8 +2403,8 @@ async def submit_feedback(
             error_messages=error_messages,
         )
 
-        # Save to registry
-        await feedback_registry.add_entry(entry)
+        # Save to registry (sync method, no await needed)
+        feedback_registry.add(entry)
 
         # Notify
         await notification_manager.add_simple(
@@ -2455,35 +2454,33 @@ async def check_feedback_triggers(
 
     try:
         triggered = []
+        stats = hook_manager.get_stats(agent_name)
 
-        # Record error and check threshold
+        # Record error and check threshold - record_error returns trigger type if threshold reached
         if error_message:
-            hook_manager.record_error(agent_name, error_message)
-            if hook_manager.should_trigger_on_error(agent_name):
+            trigger_type = hook_manager.record_error(agent_name, error_message)
+            if trigger_type == FeedbackTriggerType.ERROR_THRESHOLD:
                 triggered.append({
                     "trigger": "error_threshold",
-                    "reason": f"Error threshold reached ({hook_manager.config.error_threshold.count} errors)",
-                    "errors": hook_manager.get_recent_errors(agent_name),
+                    "reason": f"Error threshold reached ({stats['error_threshold']} errors)",
+                    "error": error_message,
                 })
-                hook_manager.reset_error_count(agent_name)
 
-        # Record tool call and check periodic
+        # Record tool call and check periodic - record_tool_call returns trigger type if threshold reached
         if tool_call_name:
-            hook_manager.record_tool_call(agent_name, tool_call_name)
-            if hook_manager.should_trigger_periodic(agent_name):
+            trigger_type = hook_manager.record_tool_call(agent_name)
+            if trigger_type == FeedbackTriggerType.PERIODIC:
                 triggered.append({
                     "trigger": "periodic",
-                    "reason": f"Periodic check ({hook_manager.config.periodic.tool_call_count} tool calls)",
+                    "reason": f"Periodic check ({stats['tool_call_threshold']} tool calls)",
                 })
-                hook_manager.reset_tool_count(agent_name)
 
-        # Check for pattern matches
+        # Check for pattern matches - check_pattern returns trigger type if pattern found
         if output_text:
-            patterns_found = hook_manager.check_patterns(output_text)
-            if patterns_found:
+            trigger_type = hook_manager.check_pattern(agent_name, output_text)
+            if trigger_type == FeedbackTriggerType.PATTERN_DETECTED:
                 triggered.append({
                     "trigger": "pattern",
-                    "patterns": patterns_found,
                     "reason": "Feedback pattern detected in output",
                 })
 
@@ -2641,23 +2638,25 @@ async def triage_feedback_to_github(
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Get the feedback entry
-        entry = await feedback_registry.get_by_id(feedback_id)
+        # Get the feedback entry (sync method, no await needed)
+        entry = feedback_registry.get(feedback_id)
         if not entry:
             return json.dumps({"error": f"Feedback {feedback_id} not found"}, indent=2)
 
         # Create GitHub issue
         issue_url = await github_integration.create_issue(
-            entry=entry,
-            extra_labels=labels,
+            feedback=entry,
+            labels=labels,
             assignee=assignee,
         )
 
         if issue_url:
-            # Update entry with issue URL
-            entry.github_issue_url = issue_url
-            entry.status = FeedbackStatus.TRIAGED
-            await feedback_registry.update_entry(entry)
+            # Update entry with issue URL (sync method, no await needed)
+            feedback_registry.update(
+                entry.id,
+                github_issue_url=issue_url,
+                status=FeedbackStatus.TRIAGED,
+            )
 
             # Notify the agent
             await notification_manager.add_simple(
@@ -2711,8 +2710,8 @@ async def notify_feedback_update(
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Get the feedback entry
-        entry = await feedback_registry.get_by_id(feedback_id)
+        # Get the feedback entry (sync method, no await needed)
+        entry = feedback_registry.get(feedback_id)
         if not entry:
             return json.dumps({"error": f"Feedback {feedback_id} not found"}, indent=2)
 
@@ -2725,13 +2724,18 @@ async def notify_feedback_update(
             "resolved": FeedbackStatus.RESOLVED,
         }
 
+        # Build updates dict
+        updates = {}
         if update_type in status_map:
-            entry.status = status_map[update_type]
+            updates["status"] = status_map[update_type]
 
         if pr_url:
-            entry.github_pr_url = pr_url
+            updates["github_pr_url"] = pr_url
 
-        await feedback_registry.update_entry(entry)
+        # Update entry (sync method, no await needed)
+        updated_entry = feedback_registry.update(entry.id, **updates)
+        if updated_entry:
+            entry = updated_entry
 
         # Notify the agent
         level = "success" if update_type == "ready_for_testing" else "info"
