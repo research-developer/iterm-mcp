@@ -1,0 +1,16 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-12-05
+**Breaking Change:** Yes
+
+### Changes:
+- Add `Agent`, `Team`, `AgentRegistry` classes with JSONL persistence
+- Add Pydantic models: `SessionTarget`, `SessionMessage`, `WriteToSessionsRequest`
+- Rename `write_to_terminal` to `write_to_sessions`, `read_terminal_output` to `read_sessions`
+- Implement parallel execution using `asyncio.gather`
+- Add `send_conditions` regex for conditional message dispatch
+- Implement duplicate message prevention with SHA256 hashing
+- Add cascading message support (broadcast -> team -> agent specificity)
+- Add `register_agent`, `create_team`, `assign_agent_to_team` MCP tools
+- Add `set_active_session` for default session targeting
