@@ -1,0 +1,12 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-03-02
+
+### Changes:
+- Implement MCP server for iTerm2 controller
+- Expose terminal management via MCP tools
+- Add resources for session information
+- Create prompts for command execution and monitoring
+- Add Claude Desktop integration setup
+- Update dependencies to include MCP SDK
