@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-03-02
+
+### Changes:
+- Document known WebSocket close frame issue in CLAUDE.md
+- Provide workaround guidance
