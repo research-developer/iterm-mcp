@@ -1,0 +1,9 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-12-23
+
+### Changes:
+- Add `calculate_text_delay()` function for dynamic delay based on text length
+- Fix race condition where Enter was processed before large text pastes completed
+- Apply delay scaling: base 50ms + 0.02ms/char, max 500ms
