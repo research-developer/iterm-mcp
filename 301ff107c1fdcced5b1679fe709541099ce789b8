@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-12-02
+
+### Changes:
+- Fix `ListSessions` test to pass proper `Empty` message
+- Resolve protobuf compatibility issue in tests
