@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-12-09
+
+### Changes:
+- Fix type hint in `send_hierarchical_message` to accept Optional values
+- Improve type safety for hierarchical message dispatch
