@@ -1,0 +1,10 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-10-26
+
+### Changes:
+- Add `execute_command()` method with base64 encoding support
+- Fix quote and special character handling issues
+- Commands are encoded, sent as eval wrapper, decoded and executed
+- Add optional `use_encoding` flag for backwards compatibility
