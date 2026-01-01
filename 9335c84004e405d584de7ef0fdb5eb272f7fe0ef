@@ -1,0 +1,9 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-12-05
+
+### Changes:
+- Add Epic status documentation
+- Fix protobuf duplicates
+- Add coverage reporting to CI
