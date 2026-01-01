@@ -1,0 +1,9 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-12-07
+
+### Changes:
+- Add support for hierarchical pane layouts
+- Implement cascading control flow for message dispatch
+- Add `send_hierarchical_message` for team/agent targeting
