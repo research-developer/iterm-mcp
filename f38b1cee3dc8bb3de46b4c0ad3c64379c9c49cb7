@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-11-27
+
+### Changes:
+- Move base64 import from function-level to module-level
+- Improve import organization
