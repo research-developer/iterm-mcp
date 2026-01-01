@@ -1,0 +1,12 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-12-23
+**PR:** #40
+
+### Changes:
+- Add `AgentType` literal support for claude, gemini, codex, copilot CLIs
+- Add `agent_type` field to `SessionConfig` for auto-launching agent CLIs
+- Add notification system with `NotificationManager` ring buffer storage
+- Add `get_notifications`, `get_agent_status_summary`, `notify` MCP tools
+- Add `wait_for_agent` tool with polling, timeout, and progress summaries
