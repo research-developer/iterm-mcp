@@ -1,0 +1,11 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-03-02
+
+### Changes:
+- Implement screen monitoring using iTerm2's API
+- Add snapshot files for real-time output access
+- Create regex-based output filtering system
+- Support callbacks for terminal output processing
+- Add tests for monitoring and filtering functionality
