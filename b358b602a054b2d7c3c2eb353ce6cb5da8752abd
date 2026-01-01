@@ -1,0 +1,13 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-03-02
+
+### Changes:
+- Implement UUID-based persistent session IDs for reconnection
+- Add persistent session storage in `~/.iterm_mcp_logs/persistent_sessions.json`
+- Create `get_session_by_persistent_id` method for session lookup
+- Add configurable line limits for screen content retrieval
+- Implement per-session and global default line limits
+- Create overflow tracking for large terminal outputs
+- Add comprehensive test suites for both features
