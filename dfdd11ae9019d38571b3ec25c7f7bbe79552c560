@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-11-30
+
+### Changes:
+- Update protobuf version requirement in dependencies
+- Ensure compatibility with generated protobuf code
