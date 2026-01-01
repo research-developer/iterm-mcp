@@ -1,0 +1,13 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-03-02
+
+### Changes:
+- Refactor core implementation to use iTerm2 Python API
+- Create comprehensive session and terminal management classes
+- Add logging system for tracking session activity
+- Implement layout management with named panes
+- Add test suite for functionality verification
+- Create demo script showing basic functionality
+- Update documentation with usage examples
