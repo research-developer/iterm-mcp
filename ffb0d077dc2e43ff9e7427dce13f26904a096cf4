@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-03-04
+
+### Changes:
+- Fix test imports for reorganized directory structure
+- Ensure all tests pass with new layout
