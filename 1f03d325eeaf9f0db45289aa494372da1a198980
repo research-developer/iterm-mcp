@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-03-02
+
+### Changes:
+- Fix parameter mismatch in `create_layout` function
+- Keep parameter name as `session_names` in MCP server, pass as `pane_names` to layout manager
