@@ -1,0 +1,8 @@
+## Changelog Entry
+
+**Type:** Fixed
+**Date:** 2025-12-23
+
+### Changes:
+- Prevent new sessions from stealing focus during creation
+- Improve focus cooldown behavior for better session management
