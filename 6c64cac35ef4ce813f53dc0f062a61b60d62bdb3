@@ -1,0 +1,13 @@
+## Changelog Entry
+
+**Type:** Added
+**Date:** 2025-03-04
+
+### Changes:
+- Create FastMCP-based implementation using official MCP Python SDK
+- Convert all tools to decorator-based syntax
+- Add resources for terminal output and information
+- Add prompts for monitoring and command execution
+- Implement proper lifespan management for iTerm2 connections
+- Fix WebSocket close frame issues by using official SDK
+- Add aggressive termination to prevent hanging on exit
