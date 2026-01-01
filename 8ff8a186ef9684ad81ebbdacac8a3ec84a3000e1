@@ -1,0 +1,10 @@
+## Changelog Entry
+
+**Type:** Changed
+**Date:** 2025-12-10
+**Breaking Change:** Yes
+
+### Changes:
+- Rename `set_session_appearances` to `modify_sessions`
+- Add `focus` and `set_active` parameters to session modifications
+- Consolidate session appearance and focus operations into single tool
