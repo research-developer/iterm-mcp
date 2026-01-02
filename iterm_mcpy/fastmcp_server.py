@@ -23,6 +23,7 @@ from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage, SendTarget
 from utils.telemetry import TelemetryEmitter
 from core.tags import SessionTagLockManager, FocusCooldownManager
+from core.profiles import ProfileManager, get_profile_manager
 from core.feedback import (
     FeedbackCategory,
     FeedbackStatus,
@@ -86,6 +87,7 @@ _feedback_registry: Optional[FeedbackRegistry] = None
 _feedback_hook_manager: Optional[FeedbackHookManager] = None
 _feedback_forker: Optional[FeedbackForker] = None
 _github_integration: Optional[GitHubIntegration] = None
+_profile_manager: Optional[ProfileManager] = None
 
 
 # ============================================================================
@@ -272,6 +274,11 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         github_integration = GitHubIntegration()
         logger.info("Feedback system initialized successfully")
 
+        # Initialize profile manager
+        logger.info("Initializing profile manager...")
+        profile_manager = get_profile_manager(logger)
+        logger.info(f"Profile manager initialized with {len(profile_manager.list_team_profiles())} team profiles")
+
         # Set global references for resources
         global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
@@ -287,6 +294,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         _feedback_hook_manager = feedback_hook_manager
         _feedback_forker = feedback_forker
         _github_integration = github_integration
+        global _profile_manager
+        _profile_manager = profile_manager
 
         # Yield the initialized components
         yield {
@@ -302,6 +311,7 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "feedback_hook_manager": feedback_hook_manager,
             "feedback_forker": feedback_forker,
             "github_integration": github_integration,
+            "profile_manager": profile_manager,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -505,6 +515,7 @@ async def execute_create_sessions(
     layout_manager: LayoutManager,
     agent_registry: AgentRegistry,
     logger: logging.Logger,
+    profile_manager: Optional[ProfileManager] = None,
 ) -> CreateSessionsResponse:
     """Create sessions based on a CreateSessionsRequest."""
 
@@ -535,14 +546,39 @@ async def execute_create_sessions(
 
         agent_name = None
         agent_type = None
+        team_name = None
         if config and config.agent:
             teams = [config.team] if config.team else []
+            team_name = config.team
             agent_registry.register_agent(
                 name=config.agent,
                 session_id=session.id,
                 teams=teams,
             )
             agent_name = config.agent
+
+            # Apply team profile colors if agent is in a team
+            if team_name and profile_manager:
+                team_profile = profile_manager.get_or_create_team_profile(team_name)
+                profile_manager.save_profiles()
+                # Apply the team's tab color to the session
+                r, g, b = team_profile.color.to_rgb()
+                try:
+                    await session.session.async_set_profile_properties(
+                        iterm2.LocalWriteOnlyProfile(
+                            values={
+                                "Tab Color": {
+                                    "Red Component": r,
+                                    "Green Component": g,
+                                    "Blue Component": b,
+                                    "Color Space": "sRGB"
+                                }
+                            }
+                        )
+                    )
+                    logger.debug(f"Applied team '{team_name}' color to session {pane_name}")
+                except Exception as e:
+                    logger.warning(f"Could not apply team color to session: {e}")
 
         # Launch AI agent CLI if agent_type specified
         if config and config.agent_type:
@@ -1026,13 +1062,17 @@ async def create_sessions(request: CreateSessionsRequest, ctx: Context) -> str:
     terminal = ctx.request_context.lifespan_context["terminal"]
     layout_manager = ctx.request_context.lifespan_context["layout_manager"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
     lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
         create_request = ensure_model(CreateSessionsRequest, request)
-        result = await execute_create_sessions(create_request, terminal, layout_manager, agent_registry, logger)
+        result = await execute_create_sessions(
+            create_request, terminal, layout_manager, agent_registry, logger,
+            profile_manager=profile_manager
+        )
         logger.info(f"Created {len(result.sessions)} sessions")
         return result.model_dump_json(indent=2)
     except Exception as e:
@@ -1299,6 +1339,7 @@ async def orchestrate_playbook(request: OrchestrateRequest, ctx: Context) -> str
     terminal = ctx.request_context.lifespan_context["terminal"]
     layout_manager = ctx.request_context.lifespan_context["layout_manager"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -1308,7 +1349,10 @@ async def orchestrate_playbook(request: OrchestrateRequest, ctx: Context) -> str
         response = OrchestrateResponse()
 
         if playbook.layout:
-            response.layout = await execute_create_sessions(playbook.layout, terminal, layout_manager, agent_registry, logger)
+            response.layout = await execute_create_sessions(
+                playbook.layout, terminal, layout_manager, agent_registry, logger,
+                profile_manager=profile_manager
+            )
 
         command_results: List[PlaybookCommandResult] = []
         for command in playbook.commands:
@@ -1550,6 +1594,7 @@ async def create_team(request: CreateTeamRequest, ctx: Context) -> str:
     """Create a new team."""
 
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -1560,12 +1605,18 @@ async def create_team(request: CreateTeamRequest, ctx: Context) -> str:
             parent_team=req.parent_team,
         )
 
-        logger.info(f"Created team '{team.name}'")
+        # Create a profile for the team with auto-assigned color
+        team_profile = profile_manager.get_or_create_team_profile(team.name)
+        profile_manager.save_profiles()
+
+        logger.info(f"Created team '{team.name}' with profile color hue={team_profile.color.hue:.1f}")
 
         return json.dumps({
             "name": team.name,
             "description": team.description,
-            "parent_team": team.parent_team
+            "parent_team": team.parent_team,
+            "profile_guid": team_profile.guid,
+            "color_hue": round(team_profile.color.hue, 1)
         }, indent=2)
     except Exception as e:
         logger.error(f"Error creating team: {e}")
@@ -1576,19 +1627,25 @@ async def create_team(request: CreateTeamRequest, ctx: Context) -> str:
 async def list_teams(ctx: Context) -> str:
     """List all teams."""
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
         teams = agent_registry.list_teams()
-        result = [
-            {
+        result = []
+        for t in teams:
+            team_info = {
                 "name": t.name,
                 "description": t.description,
                 "parent_team": t.parent_team,
                 "member_count": len(agent_registry.list_agents(team=t.name))
             }
-            for t in teams
-        ]
+            # Include profile info if available
+            team_profile = profile_manager.get_team_profile(t.name)
+            if team_profile:
+                team_info["profile_guid"] = team_profile.guid
+                team_info["color_hue"] = round(team_profile.color.hue, 1)
+            result.append(team_info)
 
         logger.info(f"Listed {len(result)} teams")
         return json.dumps(result, indent=2)
@@ -1608,11 +1665,18 @@ async def remove_team(
         team_name: Name of the team to remove
     """
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
         if agent_registry.remove_team(team_name):
-            logger.info(f"Removed team '{team_name}'")
+            # Also remove the team's profile
+            profile_removed = profile_manager.remove_team_profile(team_name)
+            if profile_removed:
+                profile_manager.save_profiles()
+                logger.info(f"Removed team '{team_name}' and its profile")
+            else:
+                logger.info(f"Removed team '{team_name}' (no profile to remove)")
             return f"Team '{team_name}' removed successfully"
         else:
             return f"Team '{team_name}' not found"
