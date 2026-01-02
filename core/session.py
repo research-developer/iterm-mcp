@@ -19,6 +19,29 @@ SHELL_UNSAFE_CHARS = set("\"'`$!\\|&;<>(){}[]")
 # Simpler pattern for common safe commands (alphanumeric, spaces, basic punctuation)
 SIMPLE_COMMAND_PATTERN = re.compile(r'^[a-zA-Z0-9_\-./: =,@#%^*+~]+$')
 
+# Constants for text input delay calculation
+BASE_DELAY_SECONDS = 0.05  # 50ms base delay
+DELAY_PER_CHAR_SECONDS = 0.00002  # 0.02ms per character (1000 chars = 20ms extra)
+MAX_DELAY_SECONDS = 0.5  # Maximum 500ms delay
+
+
+def calculate_text_delay(text: str) -> float:
+    """Calculate appropriate delay before sending Enter based on text length.
+
+    For large text pastes, iTerm needs time to process the input buffer before
+    the Enter key is sent. This function returns a delay that scales with text
+    length to prevent race conditions where Enter is processed before the text.
+
+    Args:
+        text: The text being sent to the terminal
+
+    Returns:
+        Delay in seconds (between BASE_DELAY_SECONDS and MAX_DELAY_SECONDS)
+    """
+    text_length = len(text)
+    calculated_delay = BASE_DELAY_SECONDS + (text_length * DELAY_PER_CHAR_SECONDS)
+    return min(calculated_delay, MAX_DELAY_SECONDS)
+
 
 def needs_base64_encoding(command: str) -> bool:
     """Check if a command contains characters that need base64 encoding.
@@ -157,21 +180,23 @@ class ItermSession:
     
     async def send_text(self, text: str, execute: bool = True) -> None:
         """Send text to the session.
-        
+
         Args:
             text: The text to send
             execute: Whether to execute the text as a command by sending Enter
         """
         # Strip any trailing newlines/carriage returns to avoid double execution
         clean_text = text.rstrip("\r\n")
-        
+
         # Send the text first
         await self.session.async_send_text(clean_text)
-        
+
         # Send Enter/Return key to execute if requested
         if execute:
-            # Wait a tiny bit to ensure text is processed before Enter
-            await asyncio.sleep(0.05)
+            # Wait for iTerm to process the text before sending Enter
+            # Delay scales with text length to handle large pastes
+            delay = calculate_text_delay(clean_text)
+            await asyncio.sleep(delay)
             await self.session.async_send_text("\r")
         
         # Log the command
@@ -181,19 +206,26 @@ class ItermSession:
     async def execute_command(
         self,
         command: str,
-        use_encoding: Union[bool, Literal["auto"]] = "auto"
+        use_encoding: Union[bool, Literal["auto"]] = False
     ) -> None:
-        """Execute a command in the session with smart encoding.
+        """Execute a command in the session.
 
-        This method handles complex commands with quotes and special characters
-        by encoding them to avoid shell parsing issues.
+        By default, sends the command directly without any encoding. The base64
+        encoding option exists for edge cases where direct typing fails, but
+        should rarely be needed since most shells handle quoted/escaped input.
 
         Args:
             command: The command to execute (raw, unencoded)
             use_encoding: Encoding mode:
-                - "auto" (default): Only encode if command contains unsafe characters
-                - True: Always use base64 encoding
-                - False: Never encode (direct typing)
+                - False (default): Send command directly (recommended)
+                - "auto": Only encode if command contains unusual characters
+                - True: Always use base64 encoding (rarely needed)
+
+        Note:
+            The base64 encoding wraps commands in 'eval "$(echo ... | base64 -d)"'
+            which can trigger security policy violations in some environments.
+            Only use encoding when absolutely necessary (e.g., binary data or
+            control characters in the command).
         """
         # Strip any trailing newlines/carriage returns from input
         clean_command = command.rstrip("\r\n")
@@ -217,14 +249,16 @@ class ItermSession:
 
             # Send the wrapper command
             await self.session.async_send_text(wrapper)
+            text_sent = wrapper
         else:
-            # Direct sending - command is simple enough
+            # Direct sending - command is sent as-is (default behavior)
             await self.session.async_send_text(clean_command)
+            text_sent = clean_command
 
-        # Small delay to ensure the command text is fully processed by the terminal
-        # before sending the Enter key. Without this delay, rapid typing followed by
-        # Enter can cause race conditions where Enter is processed before the text.
-        await asyncio.sleep(0.05)
+        # Wait for iTerm to process the text before sending Enter
+        # Delay scales with text length to handle large pastes
+        delay = calculate_text_delay(text_sent)
+        await asyncio.sleep(delay)
         await self.session.async_send_text("\r")
 
         # Log the original command (not the encoded wrapper)
@@ -503,3 +537,76 @@ class ItermSession:
     def last_update_time(self) -> float:
         """Get the timestamp of the last screen update."""
         return self._last_screen_update
+
+    async def set_background_color(self, red: int, green: int, blue: int, alpha: int = 255) -> None:
+        """Set the background color of the session.
+
+        Args:
+            red: Red component (0-255)
+            green: Green component (0-255)
+            blue: Blue component (0-255)
+            alpha: Alpha component (0-255), default fully opaque
+        """
+        color = iterm2.Color(red, green, blue, alpha)
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_background_color(color)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_BACKGROUND", f"Background color set to RGB({red},{green},{blue})")
+
+    async def set_tab_color(self, red: int, green: int, blue: int, enabled: bool = True) -> None:
+        """Set the tab color of the session.
+
+        Args:
+            red: Red component (0-255)
+            green: Green component (0-255)
+            blue: Blue component (0-255)
+            enabled: Whether to enable tab coloring
+        """
+        color = iterm2.Color(red, green, blue)
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_tab_color(color)
+        change.set_use_tab_color(enabled)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_TAB_COLOR", f"Tab color set to RGB({red},{green},{blue})")
+
+    async def set_badge(self, text: str) -> None:
+        """Set the badge text for the session.
+
+        Args:
+            text: The badge text to display (supports escape sequences)
+        """
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_badge_text(text)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_BADGE", f"Badge set to: {text}")
+
+    async def set_cursor_color(self, red: int, green: int, blue: int) -> None:
+        """Set the cursor color of the session.
+
+        Args:
+            red: Red component (0-255)
+            green: Green component (0-255)
+            blue: Blue component (0-255)
+        """
+        color = iterm2.Color(red, green, blue)
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_cursor_color(color)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("SET_CURSOR_COLOR", f"Cursor color set to RGB({red},{green},{blue})")
+
+    async def reset_colors(self) -> None:
+        """Reset all color customizations to profile defaults."""
+        change = iterm2.LocalWriteOnlyProfile()
+        change.set_use_tab_color(False)
+        await self.session.async_set_profile_properties(change)
+
+        if self.logger:
+            self.logger.log_custom_event("RESET_COLORS", "Colors reset to profile defaults")

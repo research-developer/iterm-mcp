@@ -14,6 +14,27 @@ from .agents import (
     CascadingMessage,
     MessageRecord
 )
+from .tags import SessionTagLockManager, FocusCooldownManager
+from .feedback import (
+    # Enums
+    FeedbackCategory,
+    FeedbackStatus,
+    FeedbackTriggerType,
+    # Models
+    FeedbackContext,
+    FeedbackEntry,
+    FeedbackConfig,
+    ErrorThresholdConfig,
+    PeriodicConfig,
+    PatternConfig,
+    GitHubConfig,
+    # Core classes
+    FeedbackHookManager,
+    FeedbackCollector,
+    FeedbackRegistry,
+    FeedbackForker,
+    GitHubIntegration,
+)
 from .models import (
     SessionTarget,
     SessionMessage,
@@ -26,12 +47,19 @@ from .models import (
     CreateSessionsRequest,
     CreatedSession,
     CreateSessionsResponse,
+    WriteResult,
+    WriteToSessionsResponse,
     CascadeMessageRequest,
     CascadeResult,
     CascadeMessageResponse,
     RegisterAgentRequest,
     CreateTeamRequest,
     SetActiveSessionRequest,
+    PlaybookCommand,
+    Playbook,
+    PlaybookCommandResult,
+    OrchestrateRequest,
+    OrchestrateResponse,
 )
 
 # Type checking imports for IDE support
@@ -76,6 +104,24 @@ __all__ = [
     'SendTarget',
     'CascadingMessage',
     'MessageRecord',
+    'SessionTagLockManager',
+    'FocusCooldownManager',
+    # Feedback system
+    'FeedbackCategory',
+    'FeedbackStatus',
+    'FeedbackTriggerType',
+    'FeedbackContext',
+    'FeedbackEntry',
+    'FeedbackConfig',
+    'ErrorThresholdConfig',
+    'PeriodicConfig',
+    'PatternConfig',
+    'GitHubConfig',
+    'FeedbackHookManager',
+    'FeedbackCollector',
+    'FeedbackRegistry',
+    'FeedbackForker',
+    'GitHubIntegration',
     # API models
     'SessionTarget',
     'SessionMessage',
@@ -88,10 +134,17 @@ __all__ = [
     'CreateSessionsRequest',
     'CreatedSession',
     'CreateSessionsResponse',
+    'WriteResult',
+    'WriteToSessionsResponse',
     'CascadeMessageRequest',
     'CascadeResult',
     'CascadeMessageResponse',
     'RegisterAgentRequest',
     'CreateTeamRequest',
     'SetActiveSessionRequest',
+    'PlaybookCommand',
+    'Playbook',
+    'PlaybookCommandResult',
+    'OrchestrateRequest',
+    'OrchestrateResponse',
 ]

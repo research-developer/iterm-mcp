@@ -1,8 +1,20 @@
 """Pydantic models for MCP session operations API."""
 
 import re
-from typing import Dict, List, Optional, Union
+from datetime import datetime
+from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Supported AI agent CLI types
+AgentType = Literal["claude", "gemini", "codex", "copilot"]
+
+# Agent CLI launch commands
+AGENT_CLI_COMMANDS: Dict[str, str] = {
+    "claude": "claude",
+    "gemini": "gemini",
+    "codex": "codex",
+    "copilot": "gh copilot",
+}
 
 
 class SessionTarget(BaseModel):
@@ -45,8 +57,8 @@ class SessionMessage(BaseModel):
         description="Whether to press Enter after sending"
     )
     use_encoding: Union[bool, str] = Field(
-        default="auto",
-        description="Base64 encoding: 'auto', True (always), False (never)"
+        default=False,
+        description="Base64 encoding: False (default, direct send), 'auto' (smart), True (always)"
     )
 
     @field_validator('condition', mode='before')
@@ -75,6 +87,10 @@ class WriteToSessionsRequest(BaseModel):
     skip_duplicates: bool = Field(
         default=True,
         description="Skip sending if message was already sent to target"
+    )
+    requesting_agent: Optional[str] = Field(
+        default=None,
+        description="Agent initiating the write (used for lock enforcement)"
     )
 
 
@@ -139,6 +155,10 @@ class SessionConfig(BaseModel):
 
     name: str = Field(..., description="Name for the session")
     agent: Optional[str] = Field(default=None, description="Agent name to register")
+    agent_type: Optional[AgentType] = Field(
+        default=None,
+        description="AI agent CLI to launch: claude, gemini, codex, or copilot"
+    )
     team: Optional[str] = Field(default=None, description="Team to assign agent to")
     command: Optional[str] = Field(default=None, description="Initial command to run")
     max_lines: Optional[int] = Field(default=None, description="Max output lines")
@@ -175,7 +195,27 @@ class CreateSessionsResponse(BaseModel):
     """Response from creating sessions."""
 
     sessions: List[CreatedSession] = Field(..., description="Created sessions")
-    window_id: str = Field(..., description="Window ID containing sessions")
+    window_id: str = Field(default="", description="Window ID containing sessions")
+
+
+class WriteResult(BaseModel):
+    """Result of writing to a single session."""
+
+    session_id: str = Field(..., description="The session ID")
+    session_name: Optional[str] = Field(default=None, description="The session name")
+    success: bool = Field(default=False, description="Whether the write succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    skipped: bool = Field(default=False, description="Whether the write was skipped")
+    skipped_reason: Optional[str] = Field(default=None, description="Reason for skipping")
+
+
+class WriteToSessionsResponse(BaseModel):
+    """Response from writing to sessions."""
+
+    results: List[WriteResult] = Field(..., description="Results for each target session")
+    sent_count: int = Field(..., description="Number of successful sends")
+    skipped_count: int = Field(..., description="Number of skipped sends")
+    error_count: int = Field(..., description="Number of errors")
 
 
 class CascadeMessageRequest(BaseModel):
@@ -247,3 +287,180 @@ class SetActiveSessionRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, description="Session ID")
     agent: Optional[str] = Field(default=None, description="Agent name")
     name: Optional[str] = Field(default=None, description="Session name")
+    focus: bool = Field(default=False, description="Also bring the session to the foreground in iTerm")
+
+
+class PlaybookCommand(BaseModel):
+    """A named block of commands in a playbook."""
+
+    name: str = Field(default="commands", description="Label for the command block")
+    messages: List[SessionMessage] = Field(..., description="Messages to send")
+    parallel: bool = Field(default=True, description="Send messages in parallel")
+    skip_duplicates: bool = Field(default=True, description="Skip duplicate agent deliveries")
+
+
+class Playbook(BaseModel):
+    """High-level orchestration plan."""
+
+    layout: Optional[CreateSessionsRequest] = Field(default=None, description="Optional layout/session creation")
+    commands: List[PlaybookCommand] = Field(default_factory=list, description="Ordered command blocks")
+    cascade: Optional[CascadeMessageRequest] = Field(default=None, description="Optional cascade after commands")
+    reads: Optional[ReadSessionsRequest] = Field(default=None, description="Optional final read operations")
+
+
+class PlaybookCommandResult(BaseModel):
+    """Result of running a playbook command block."""
+
+    name: str = Field(..., description="Command block label")
+    write_result: WriteToSessionsResponse = Field(..., description="Write results for the block")
+
+
+class OrchestrateRequest(BaseModel):
+    """Request to orchestrate a playbook."""
+
+    playbook: Playbook = Field(..., description="Playbook to execute")
+
+
+class OrchestrateResponse(BaseModel):
+    """Response from orchestrating a playbook."""
+
+    layout: Optional[CreateSessionsResponse] = Field(default=None, description="Layout creation result")
+    commands: List[PlaybookCommandResult] = Field(default_factory=list, description="Command block results")
+    cascade: Optional[CascadeMessageResponse] = Field(default=None, description="Cascade delivery result")
+    reads: Optional[ReadSessionsResponse] = Field(default=None, description="Readback results")
+
+
+# ============================================================================
+# SESSION MODIFICATION MODELS
+# ============================================================================
+
+class ColorSpec(BaseModel):
+    """RGB color specification."""
+
+    red: int = Field(..., ge=0, le=255, description="Red component (0-255)")
+    green: int = Field(..., ge=0, le=255, description="Green component (0-255)")
+    blue: int = Field(..., ge=0, le=255, description="Blue component (0-255)")
+    alpha: int = Field(default=255, ge=0, le=255, description="Alpha component (0-255)")
+
+
+class SessionModification(BaseModel):
+    """Modification settings for a session (appearance, focus, active state)."""
+
+    # Target session (at least one required)
+    session_id: Optional[str] = Field(default=None, description="Direct session ID")
+    name: Optional[str] = Field(default=None, description="Session name")
+    agent: Optional[str] = Field(default=None, description="Agent name")
+
+    # Session state modifications
+    set_active: bool = Field(default=False, description="Set this session as the active session")
+    focus: bool = Field(default=False, description="Bring this session to the foreground in iTerm")
+
+    # Appearance settings (all optional - only set what you want to change)
+    background_color: Optional[ColorSpec] = Field(default=None, description="Background color")
+    tab_color: Optional[ColorSpec] = Field(default=None, description="Tab color")
+    tab_color_enabled: Optional[bool] = Field(default=None, description="Enable/disable tab color")
+    cursor_color: Optional[ColorSpec] = Field(default=None, description="Cursor color")
+    badge: Optional[str] = Field(default=None, description="Badge text (empty string to clear)")
+    reset: bool = Field(default=False, description="Reset all colors to profile defaults")
+
+    @model_validator(mode='after')
+    def check_at_least_one_target(self):
+        """Validate that at least one session identifier is provided."""
+        if not any([self.session_id, self.name, self.agent]):
+            raise ValueError("At least one identifier (session_id, name, or agent) must be provided")
+        return self
+
+
+class ModifySessionsRequest(BaseModel):
+    """Request to modify multiple sessions (appearance, focus, active state)."""
+
+    modifications: List[SessionModification] = Field(
+        ...,
+        description="List of session modifications"
+    )
+
+
+class ModificationResult(BaseModel):
+    """Result of modifying a single session."""
+
+    session_id: str = Field(..., description="The session ID")
+    session_name: Optional[str] = Field(default=None, description="The session name")
+    agent: Optional[str] = Field(default=None, description="Agent name if registered")
+    success: bool = Field(default=False, description="Whether the modification succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    changes: List[str] = Field(default_factory=list, description="List of changes applied")
+
+
+class ModifySessionsResponse(BaseModel):
+    """Response from modifying sessions."""
+
+    results: List[ModificationResult] = Field(..., description="Results for each session")
+    success_count: int = Field(..., description="Number of successful modifications")
+    error_count: int = Field(..., description="Number of errors")
+
+
+# ============================================================================
+# NOTIFICATION MODELS
+# ============================================================================
+
+NotificationLevel = Literal["info", "warning", "error", "success", "blocked"]
+
+
+class AgentNotification(BaseModel):
+    """A notification from an agent about its status."""
+
+    agent: str = Field(..., description="Agent name")
+    timestamp: datetime = Field(default_factory=datetime.now, description="When the notification was created")
+    level: NotificationLevel = Field(..., description="Notification severity level")
+    summary: str = Field(..., max_length=100, description="One-line summary")
+    context: Optional[str] = Field(default=None, description="Additional context for follow-up")
+    action_hint: Optional[str] = Field(default=None, description="Suggested next action")
+
+
+class GetNotificationsRequest(BaseModel):
+    """Request to get recent notifications."""
+
+    limit: int = Field(default=10, ge=1, le=100, description="Max notifications to return")
+    level: Optional[NotificationLevel] = Field(default=None, description="Filter by level")
+    agent: Optional[str] = Field(default=None, description="Filter by agent")
+    since: Optional[datetime] = Field(default=None, description="Only notifications after this time")
+
+
+class GetNotificationsResponse(BaseModel):
+    """Response containing notifications."""
+
+    notifications: List[AgentNotification] = Field(..., description="Recent notifications")
+    total_count: int = Field(..., description="Total matching notifications")
+    has_more: bool = Field(default=False, description="More notifications available")
+
+
+# ============================================================================
+# WAIT FOR AGENT MODELS
+# ============================================================================
+
+AgentStatus = Literal["idle", "running", "blocked", "error", "unknown"]
+
+
+class WaitForAgentRequest(BaseModel):
+    """Request to wait for an agent to complete."""
+
+    agent: str = Field(..., description="Agent name to wait for")
+    wait_up_to: int = Field(default=30, ge=1, le=600, description="Max seconds to wait")
+    return_output: bool = Field(default=True, description="Include recent output on timeout")
+    summary_on_timeout: bool = Field(default=True, description="Generate progress summary if timed out")
+
+
+class WaitResult(BaseModel):
+    """Result of waiting for an agent."""
+
+    agent: str = Field(..., description="Agent name")
+    completed: bool = Field(..., description="True if agent finished/became idle")
+    timed_out: bool = Field(..., description="True if wait_up_to was exceeded")
+    elapsed_seconds: float = Field(..., description="How long we waited")
+    status: AgentStatus = Field(..., description="Current agent status")
+    output: Optional[str] = Field(default=None, description="Recent output if requested")
+    summary: Optional[str] = Field(default=None, description="Progress summary if timed out")
+    can_continue_waiting: bool = Field(
+        default=True,
+        description="Hint: is it worth waiting more?"
+    )

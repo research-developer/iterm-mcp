@@ -75,6 +75,6 @@ ipython_config.py
 
 # Local development
 Untitled*.ipynb
-**.worktrees
-
+**.worktrees/
+1mcp-linux-x64.worktrees/
 1mcp-linux-x64

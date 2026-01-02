@@ -9,8 +9,10 @@ import logging
 import os
 import re
 import sys
+import time
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, List, Optional, Union, Any
+from datetime import datetime
+from typing import AsyncIterator, Dict, List, Optional, Any
 
 import iterm2
 from mcp.server.fastmcp import FastMCP, Context
@@ -18,8 +20,58 @@ from mcp.server.fastmcp import FastMCP, Context
 from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
-from core.agents import AgentRegistry, CascadingMessage
+from core.agents import AgentRegistry, CascadingMessage, SendTarget
 from utils.telemetry import TelemetryEmitter
+from core.tags import SessionTagLockManager, FocusCooldownManager
+from core.feedback import (
+    FeedbackCategory,
+    FeedbackStatus,
+    FeedbackTriggerType,
+    FeedbackContext,
+    FeedbackEntry,
+    FeedbackConfig,
+    FeedbackHookManager,
+    FeedbackCollector,
+    FeedbackRegistry,
+    FeedbackForker,
+    GitHubIntegration,
+)
+from core.models import (
+    SessionTarget,
+    SessionMessage,
+    WriteToSessionsRequest,
+    WriteResult,
+    WriteToSessionsResponse,
+    ReadTarget,
+    ReadSessionsRequest,
+    ReadSessionsResponse,
+    SessionOutput,
+    CreateSessionsRequest,
+    CreatedSession,
+    CreateSessionsResponse,
+    CascadeMessageRequest,
+    CascadeResult,
+    CascadeMessageResponse,
+    RegisterAgentRequest,
+    CreateTeamRequest,
+    SetActiveSessionRequest,
+    PlaybookCommandResult,
+    OrchestrateRequest,
+    OrchestrateResponse,
+    ModifySessionsRequest,
+    SessionModification,
+    ModificationResult,
+    ModifySessionsResponse,
+    # Agent type support
+    AGENT_CLI_COMMANDS,
+    # Notification models
+    AgentNotification,
+    GetNotificationsRequest,
+    GetNotificationsResponse,
+    # Wait for agent models
+    WaitForAgentRequest,
+    WaitResult,
+)
 
 # Global references for resources (set during lifespan)
 _terminal: Optional[ItermTerminal] = None
@@ -27,6 +79,106 @@ _logger: Optional[logging.Logger] = None
 _agent_registry: Optional[AgentRegistry] = None
 _telemetry: Optional[TelemetryEmitter] = None
 _telemetry_server_task: Optional[asyncio.Task] = None
+_notification_manager: Optional["NotificationManager"] = None
+_tag_lock_manager: Optional[SessionTagLockManager] = None
+_focus_cooldown: Optional[FocusCooldownManager] = None
+_feedback_registry: Optional[FeedbackRegistry] = None
+_feedback_hook_manager: Optional[FeedbackHookManager] = None
+_feedback_forker: Optional[FeedbackForker] = None
+_github_integration: Optional[GitHubIntegration] = None
+
+
+# ============================================================================
+# NOTIFICATION MANAGER
+# ============================================================================
+
+class NotificationManager:
+    """Manages agent notifications with ring buffer storage."""
+
+    # Status icons for compact display
+    STATUS_ICONS = {
+        "info": "ℹ",
+        "warning": "⚠",
+        "error": "✗",
+        "success": "✓",
+        "blocked": "⏸",
+    }
+
+    def __init__(self, max_per_agent: int = 50, max_total: int = 200):
+        self._notifications: List[AgentNotification] = []
+        self._max_per_agent = max_per_agent
+        self._max_total = max_total
+        self._lock = asyncio.Lock()
+
+    async def add(self, notification: AgentNotification) -> None:
+        """Add a notification, maintaining ring buffer limits."""
+        async with self._lock:
+            self._notifications.append(notification)
+            # Trim to max total
+            if len(self._notifications) > self._max_total:
+                self._notifications = self._notifications[-self._max_total:]
+
+    async def add_simple(
+        self,
+        agent: str,
+        level: str,
+        summary: str,
+        context: Optional[str] = None,
+        action_hint: Optional[str] = None,
+    ) -> None:
+        """Convenience method to add a notification."""
+        notification = AgentNotification(
+            agent=agent,
+            timestamp=datetime.now(),
+            level=level,  # type: ignore
+            summary=summary[:100],
+            context=context,
+            action_hint=action_hint,
+        )
+        await self.add(notification)
+
+    async def get(
+        self,
+        limit: int = 10,
+        level: Optional[str] = None,
+        agent: Optional[str] = None,
+        since: Optional[datetime] = None,
+    ) -> List[AgentNotification]:
+        """Get notifications with optional filters."""
+        async with self._lock:
+            result = self._notifications.copy()
+
+        # Apply filters
+        if level:
+            result = [n for n in result if n.level == level]
+        if agent:
+            result = [n for n in result if n.agent == agent]
+        if since:
+            result = [n for n in result if n.timestamp >= since]
+
+        # Return most recent first, limited
+        return sorted(result, key=lambda n: n.timestamp, reverse=True)[:limit]
+
+    async def get_latest_per_agent(self) -> Dict[str, AgentNotification]:
+        """Get the most recent notification for each agent."""
+        async with self._lock:
+            latest: Dict[str, AgentNotification] = {}
+            for n in reversed(self._notifications):
+                if n.agent not in latest:
+                    latest[n.agent] = n
+            return latest
+
+    def format_compact(self, notifications: List[AgentNotification]) -> str:
+        """Format notifications for compact TUI display."""
+        if not notifications:
+            return "━━━ No notifications ━━━"
+
+        lines = ["━━━ Agent Status ━━━"]
+        for n in notifications:
+            icon = self.STATUS_ICONS.get(n.level, "?")
+            lines.append(f"{n.agent:<12} {icon} {n.summary}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        return "\n".join(lines)
 
 
 @asynccontextmanager
@@ -90,20 +242,51 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
 
         # Initialize agent registry
         logger.info("Initializing agent registry...")
-        agent_registry = AgentRegistry()
+        lock_manager = SessionTagLockManager()
+        agent_registry = AgentRegistry(lock_manager=lock_manager)
         logger.info("Agent registry initialized successfully")
 
+        # Initialize telemetry emitter
+        logger.info("Initializing telemetry emitter...")
         telemetry = TelemetryEmitter(
             log_manager=getattr(terminal, "log_manager", None),
             agent_registry=agent_registry,
         )
+        logger.info("Telemetry emitter initialized successfully")
+
+        # Initialize notification manager
+        logger.info("Initializing notification manager...")
+        notification_manager = NotificationManager()
+        logger.info("Notification manager initialized successfully")
+
+        # Initialize focus cooldown manager
+        logger.info("Initializing focus cooldown manager...")
+        focus_cooldown = FocusCooldownManager()
+        logger.info("Focus cooldown manager initialized (cooldown=2s)")
+
+        # Initialize feedback system
+        logger.info("Initializing feedback system...")
+        feedback_registry = FeedbackRegistry()
+        feedback_hook_manager = FeedbackHookManager()
+        feedback_forker = FeedbackForker()
+        github_integration = GitHubIntegration()
+        logger.info("Feedback system initialized successfully")
 
         # Set global references for resources
-        global _terminal, _logger, _agent_registry, _telemetry
+        global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
         _logger = logger
         _agent_registry = agent_registry
         _telemetry = telemetry
+        _notification_manager = notification_manager
+        global _tag_lock_manager, _focus_cooldown
+        _tag_lock_manager = lock_manager
+        _focus_cooldown = focus_cooldown
+        global _feedback_registry, _feedback_hook_manager, _feedback_forker, _github_integration
+        _feedback_registry = feedback_registry
+        _feedback_hook_manager = feedback_hook_manager
+        _feedback_forker = feedback_forker
+        _github_integration = github_integration
 
         # Yield the initialized components
         yield {
@@ -111,9 +294,16 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "terminal": terminal,
             "layout_manager": layout_manager,
             "agent_registry": agent_registry,
+            "telemetry": telemetry,
+            "notification_manager": notification_manager,
+            "tag_lock_manager": lock_manager,
+            "focus_cooldown": focus_cooldown,
+            "feedback_registry": feedback_registry,
+            "feedback_hook_manager": feedback_hook_manager,
+            "feedback_forker": feedback_forker,
+            "github_integration": github_integration,
             "logger": logger,
-            "log_dir": log_dir,
-            "telemetry": telemetry
+            "log_dir": log_dir
         }
 
     finally:
@@ -150,9 +340,15 @@ async def resolve_session(
     """
     sessions = []
 
-    # If team specified, get all agents in team
+    # If team specified, get all agents in team (optionally filtered by agent)
     if team:
         team_agents = agent_registry.list_agents(team=team)
+
+        if agent:
+            team_agents = [a for a in team_agents if a.name == agent]
+            if not team_agents:
+                return []
+
         for a in team_agents:
             session = await terminal.get_session_by_id(a.session_id)
             if session:
@@ -247,60 +443,575 @@ async def _start_telemetry_server(port: int, duration: int = 300) -> str:
     return f"Telemetry web dashboard running at http://localhost:{port} for {duration}s"
 
 
+async def notify_lock_request(
+    notification_manager: Optional["NotificationManager"],
+    owner: Optional[str],
+    session_identifier: str,
+    requester: Optional[str],
+    action_hint: str = "Approve or unlock to allow access",
+) -> None:
+    """Send a standardized lock access notification."""
+    if notification_manager and owner:
+        await notification_manager.add_simple(
+            owner,
+            "blocked",
+            f"Session {session_identifier} locked",
+            context=f"Request by {requester or 'unknown'}",
+            action_hint=action_hint,
+        )
+
+
+def ensure_model(model_cls, payload):
+    """Validate or coerce an incoming payload into a Pydantic model."""
+
+    if isinstance(payload, model_cls):
+        return payload
+    return model_cls.model_validate(payload)
+
+
+async def resolve_target_sessions(
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    targets: Optional[List[SessionTarget]] = None,
+) -> List[ItermSession]:
+    """Resolve a list of session targets to unique sessions."""
+
+    if not targets:
+        return await resolve_session(terminal, agent_registry)
+
+    sessions: List[ItermSession] = []
+    seen = set()
+
+    for target in targets:
+        resolved = await resolve_session(
+            terminal,
+            agent_registry,
+            session_id=target.session_id,
+            name=target.name,
+            agent=target.agent,
+            team=target.team,
+        )
+        for session in resolved:
+            if session.id not in seen:
+                sessions.append(session)
+                seen.add(session.id)
+
+    return sessions
+
+
+async def execute_create_sessions(
+    create_request: CreateSessionsRequest,
+    terminal: ItermTerminal,
+    layout_manager: LayoutManager,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> CreateSessionsResponse:
+    """Create sessions based on a CreateSessionsRequest."""
+
+    try:
+        layout_type = LayoutType[create_request.layout.upper()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Invalid layout type: {create_request.layout}. Use one of: {[lt.name for lt in LayoutType]}"
+        ) from exc
+
+    # Save the currently focused session to restore after creation
+    # (creating new windows steals focus from the user's current session)
+    original_focused = await terminal.get_focused_session()
+    original_session_id = original_focused.id if original_focused else None
+
+    pane_names = [cfg.name or f"Session-{idx}" for idx, cfg in enumerate(create_request.sessions)]
+    logger.info(f"Creating layout {layout_type.name} with panes: {pane_names}")
+
+    sessions_map = await layout_manager.create_layout(layout_type=layout_type, pane_names=pane_names)
+    created: List[CreatedSession] = []
+
+    for pane_name, session_id in sessions_map.items():
+        session = await terminal.get_session_by_id(session_id)
+        if not session:
+            continue
+
+        config = next((cfg for cfg in create_request.sessions if cfg.name == pane_name), None)
+
+        agent_name = None
+        agent_type = None
+        if config and config.agent:
+            teams = [config.team] if config.team else []
+            agent_registry.register_agent(
+                name=config.agent,
+                session_id=session.id,
+                teams=teams,
+            )
+            agent_name = config.agent
+
+        # Launch AI agent CLI if agent_type specified
+        if config and config.agent_type:
+            agent_type = config.agent_type
+            cli_command = AGENT_CLI_COMMANDS.get(agent_type)
+            if cli_command:
+                logger.info(f"Launching {agent_type} agent in session {pane_name}: {cli_command}")
+                await session.execute_command(cli_command)
+            else:
+                logger.warning(f"Unknown agent type: {agent_type}")
+        elif config and config.command:
+            # Only run custom command if no agent_type (agent_type takes precedence)
+            await session.execute_command(config.command)
+
+        if config and config.monitor:
+            await session.start_monitoring(update_interval=0.2)
+
+        created.append(
+            CreatedSession(
+                session_id=session.id,
+                name=session.name,
+                agent=agent_name,
+                persistent_id=session.persistent_id,
+            )
+        )
+
+    if created and not agent_registry.active_session:
+        agent_registry.active_session = created[0].session_id
+
+    # Restore focus to the original session to avoid disrupting the user
+    if original_session_id:
+        try:
+            await terminal.focus_session(original_session_id)
+            logger.debug(f"Restored focus to original session: {original_session_id}")
+        except Exception as e:
+            logger.warning(f"Could not restore focus to original session: {e}")
+
+    return CreateSessionsResponse(sessions=created, window_id=create_request.window_id or "")
+
+
+async def execute_write_request(
+    write_request: WriteToSessionsRequest,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+    lock_manager: Optional[SessionTagLockManager] = None,
+    notification_manager: Optional["NotificationManager"] = None,
+) -> WriteToSessionsResponse:
+    """Send messages according to WriteToSessionsRequest and return structured results."""
+
+    results: List[WriteResult] = []
+    active_agent = agent_registry.get_active_agent()
+    requesting_agent = write_request.requesting_agent or (active_agent.name if active_agent else None)
+
+    async def send_to_session(session: ItermSession, message: SessionMessage) -> WriteResult:
+        result = WriteResult(session_id=session.id, session_name=session.name)
+
+        if lock_manager:
+            allowed, owner = lock_manager.check_permission(session.id, requesting_agent)
+            if not allowed:
+                result.skipped = True
+                result.skipped_reason = "locked"
+                safe_name = session.name or session.id
+                await notify_lock_request(
+                    notification_manager,
+                    owner,
+                    safe_name,
+                    requesting_agent,
+                )
+                return result
+
+        if message.condition:
+            output = await session.get_screen_contents()
+            if not check_condition(output, message.condition):
+                result.skipped = True
+                result.skipped_reason = "condition_not_met"
+                return result
+
+        agent = agent_registry.get_agent_by_session(session.id)
+        if write_request.skip_duplicates and agent:
+            if agent_registry.was_message_sent(message.content, agent.name):
+                result.skipped = True
+                result.skipped_reason = "duplicate"
+                return result
+
+        try:
+            if message.execute:
+                await session.execute_command(message.content)
+            else:
+                await session.send_text(message.content, execute=False)
+
+            if agent:
+                agent_registry.record_message_sent(message.content, [agent.name])
+            result.success = True
+        except Exception as exc:
+            result.error = str(exc)
+
+        return result
+
+    tasks: List[Any] = []
+
+    for message in write_request.messages:
+        sessions = await resolve_target_sessions(terminal, agent_registry, message.targets)
+        if not sessions:
+            results.append(
+                WriteResult(
+                    session_id="",
+                    session_name=None,
+                    skipped=True,
+                    skipped_reason="no_match",
+                )
+            )
+            continue
+
+        for session in sessions:
+            if write_request.parallel:
+                tasks.append(send_to_session(session, message))
+            else:
+                results.append(await send_to_session(session, message))
+
+    if write_request.parallel and tasks:
+        for response in await asyncio.gather(*tasks):
+            results.append(response)
+
+    sent_count = sum(1 for r in results if r.success)
+    skipped_count = sum(1 for r in results if r.skipped)
+    error_count = sum(1 for r in results if not r.success and not r.skipped)
+
+    logger.info(f"Delivered {sent_count}/{len(results)} messages (skipped={skipped_count}, errors={error_count})")
+
+    return WriteToSessionsResponse(
+        results=results,
+        sent_count=sent_count,
+        skipped_count=skipped_count,
+        error_count=error_count,
+    )
+
+
+async def execute_read_request(
+    read_request: ReadSessionsRequest,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> ReadSessionsResponse:
+    """Read outputs according to ReadSessionsRequest."""
+
+    outputs: List[SessionOutput] = []
+
+    async def read_from_session(session: ItermSession, max_lines: Optional[int]) -> SessionOutput:
+        content = await session.get_screen_contents(max_lines=max_lines)
+
+        if read_request.filter_pattern:
+            try:
+                pattern = re.compile(read_request.filter_pattern)
+                lines = content.split("\n")
+                filtered = [line for line in lines if pattern.search(line)]
+                content = "\n".join(filtered)
+            except re.error as regex_err:
+                logger.error(f"Invalid filter_pattern '{read_request.filter_pattern}': {regex_err}")
+
+        agent = agent_registry.get_agent_by_session(session.id)
+        line_count = len(content.split("\n")) if content else 0
+        truncated = bool(max_lines and line_count >= max_lines)
+
+        return SessionOutput(
+            session_id=session.id,
+            name=session.name,
+            agent=agent.name if agent else None,
+            content=content,
+            line_count=line_count,
+            truncated=truncated,
+        )
+
+    tasks: List[Any] = []
+
+    targets = read_request.targets or [ReadTarget()]
+    for target in targets:
+        sessions = await resolve_target_sessions(
+            terminal,
+            agent_registry,
+            [
+                SessionTarget(
+                    session_id=target.session_id,
+                    name=target.name,
+                    agent=target.agent,
+                    team=target.team,
+                )
+            ] if any([target.session_id, target.name, target.agent, target.team]) else None,
+        )
+
+        for session in sessions:
+            if read_request.parallel:
+                tasks.append(read_from_session(session, target.max_lines))
+            else:
+                outputs.append(await read_from_session(session, target.max_lines))
+
+    if read_request.parallel and tasks:
+        outputs.extend(await asyncio.gather(*tasks))
+
+    logger.info(f"Read output from {len(outputs)} sessions")
+    return ReadSessionsResponse(outputs=outputs, total_sessions=len(outputs))
+
+
+async def execute_cascade_request(
+    cascade_request: CascadeMessageRequest,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> CascadeMessageResponse:
+    """Execute a cascade delivery and return structured results."""
+
+    cascade = CascadingMessage(
+        broadcast=cascade_request.broadcast,
+        teams=cascade_request.teams,
+        agents=cascade_request.agents,
+    )
+
+    message_targets = agent_registry.resolve_cascade_targets(cascade)
+    results: List[CascadeResult] = []
+    delivered = 0
+    skipped = 0
+
+    for message, agent_names in message_targets.items():
+        if cascade_request.skip_duplicates:
+            agent_names = agent_registry.filter_unsent_recipients(message, agent_names)
+
+        delivered_agents = []
+        for agent_name in agent_names:
+            agent = agent_registry.get_agent(agent_name)
+            if not agent:
+                continue
+
+            session = await terminal.get_session_by_id(agent.session_id)
+            if not session:
+                results.append(
+                    CascadeResult(
+                        agent=agent_name,
+                        session_id="",
+                        message_type="unknown",
+                        delivered=False,
+                        skipped_reason="session_not_found",
+                    )
+                )
+                skipped += 1
+                continue
+
+            message_type = "broadcast"
+            if cascade_request.agents.get(agent_name, None) == message:
+                message_type = "agent"
+            elif any(agent.is_member_of(team) and cascade_request.teams.get(team) == message for team in cascade_request.teams):
+                message_type = "team"
+
+            if cascade_request.execute:
+                await session.execute_command(message)
+            else:
+                await session.send_text(message, execute=False)
+
+            results.append(
+                CascadeResult(
+                    agent=agent_name,
+                    session_id=session.id,
+                    message_type=message_type,
+                    delivered=True,
+                )
+            )
+            delivered_agents.append(agent_name)
+            delivered += 1
+
+        if delivered_agents:
+            agent_registry.record_message_sent(message, delivered_agents)
+
+    logger.info(f"Cascade: delivered={delivered}, skipped={skipped}")
+    return CascadeMessageResponse(results=results, delivered_count=delivered, skipped_count=skipped)
+
+
 # ============================================================================
 # SESSION MANAGEMENT TOOLS
 # ============================================================================
 
 @mcp.tool()
-async def list_sessions(ctx: Context) -> str:
-    """List all available terminal sessions with agent info."""
+async def list_sessions(
+    ctx: Context,
+    agents_only: bool = False,
+) -> str:
+    """List all available terminal sessions with agent info.
+
+    Args:
+        agents_only: If True, only show sessions with registered agents
+    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
-    logger.info("Listing all active sessions")
+    logger.info(f"Listing sessions{' (agents_only)' if agents_only else ''}")
+
     sessions = list(terminal.sessions.values())
     result = []
 
     for session in sessions:
         agent = agent_registry.get_agent_by_session(session.id)
-        result.append({
+
+        # Apply filter
+        if agents_only and agent is None:
+            continue
+
+        session_meta = {
             "id": session.id,
             "name": session.name,
             "persistent_id": session.persistent_id,
             "agent": agent.name if agent else None,
             "teams": agent.teams if agent else []
-        })
+        }
+
+        if lock_manager:
+            session_meta["tags"] = lock_manager.get_tags(session.id)
+            session_meta["locked_by"] = lock_manager.lock_owner(session.id)
+
+        result.append(session_meta)
 
     logger.info(f"Found {len(result)} active sessions")
     return json.dumps(result, indent=2)
 
 
 @mcp.tool()
-async def set_active_session(
+async def set_session_tags(
     ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None
+    session_id: str,
+    tags: List[str],
+    append: bool = True,
 ) -> str:
+    """Set or append tags on a session."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    updated = lock_manager.set_tags(session_id, tags, append=append)
+    return json.dumps({"session_id": session_id, "tags": updated}, indent=2)
+
+
+@mcp.tool()
+async def lock_session(
+    ctx: Context,
+    session_id: str,
+    agent: str,
+) -> str:
+    """Lock a session for an agent."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    acquired, owner = lock_manager.lock_session(session_id, agent)
+    status = "acquired" if acquired else "locked"
+    return json.dumps(
+        {"session_id": session_id, "locked_by": owner, "status": status},
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def unlock_session(
+    ctx: Context,
+    session_id: str,
+    agent: Optional[str] = None,
+) -> str:
+    """Unlock a session (optionally enforcing owner match)."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    previous_owner = lock_manager.lock_owner(session_id)
+    success = lock_manager.unlock_session(session_id, agent)
+    return json.dumps(
+        {
+            "session_id": session_id,
+            "unlocked": success,
+            "previous_owner": previous_owner,
+            "locked_by": lock_manager.lock_owner(session_id),
+        },
+        indent=2,
+    )
+
+
+@mcp.tool()
+async def request_session_access(
+    ctx: Context,
+    session_id: str,
+    agent: str,
+) -> str:
+    """Request permission to write to a locked session."""
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    if not lock_manager:
+        return "Tag/lock manager unavailable"
+
+    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
+    allowed, owner = lock_manager.check_permission(session_id, agent)
+    if allowed:
+        return json.dumps({"session_id": session_id, "allowed": True}, indent=2)
+
+    await notify_lock_request(
+        notification_manager,
+        owner,
+        session_id,
+        agent,
+        action_hint="Respond by unlocking if approved",
+    )
+
+    return json.dumps({"session_id": session_id, "allowed": False, "locked_by": owner}, indent=2)
+
+
+@mcp.tool()
+async def set_active_session(request: SetActiveSessionRequest, ctx: Context) -> str:
     """Set the active session for subsequent operations.
 
     Args:
-        session_id: Direct session ID
-        agent: Agent name
-        name: Session name
+        request: Session identifier (session_id, name, or agent) and optional focus flag.
+                 Set focus=True to also bring the session to the foreground in iTerm.
     """
+
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
+    focus_cooldown = ctx.request_context.lifespan_context.get("focus_cooldown")
 
     try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent)
+        req = ensure_model(SetActiveSessionRequest, request)
+        sessions = await resolve_session(
+            terminal,
+            agent_registry,
+            session_id=req.session_id,
+            name=req.name,
+            agent=req.agent,
+        )
         if not sessions:
             return "No matching session found"
 
         session = sessions[0]
+        agent = agent_registry.get_agent_by_session(session.id)
+        agent_name = agent.name if agent else None
         agent_registry.active_session = session.id
+
+        if req.focus:
+            # Check focus cooldown
+            if focus_cooldown:
+                logger.info(f"Checking focus cooldown for {session.name} (agent={agent_name})")
+                allowed, blocking_agent, remaining = focus_cooldown.check_cooldown(
+                    session.id, agent_name
+                )
+                logger.info(f"Cooldown check result: allowed={allowed}, blocking_agent={blocking_agent}, remaining={remaining:.1f}s")
+                if not allowed:
+                    error_msg = (
+                        f"Focus cooldown active: {remaining:.1f}s remaining. "
+                        f"Last focus by agent '{blocking_agent or 'unknown'}'. "
+                        f"Wait or use the same agent."
+                    )
+                    logger.warning(f"Focus blocked for {session.name}: cooldown {remaining:.1f}s")
+                    return f"Error: {error_msg}"
+            else:
+                logger.warning("No focus_cooldown manager available!")
+
+            await terminal.focus_session(session.id)
+
+            # Record focus event
+            if focus_cooldown:
+                focus_cooldown.record_focus(session.id, agent_name)
+
+            logger.info(f"Set active session and focused: {session.name} ({session.id})")
+            return f"Active session set and focused: {session.name} ({session.id})"
+
         logger.info(f"Set active session to: {session.name} ({session.id})")
         return f"Active session set to: {session.name} ({session.id})"
     except Exception as e:
@@ -309,131 +1020,21 @@ async def set_active_session(
 
 
 @mcp.tool()
-async def focus_session(
-    ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None
-) -> str:
-    """Focus on a specific terminal session.
+async def create_sessions(request: CreateSessionsRequest, ctx: Context) -> str:
+    """Create new terminal sessions with optional agent registration."""
 
-    Args:
-        session_id: Direct session ID
-        agent: Agent name
-        name: Session name
-    """
-    terminal = ctx.request_context.lifespan_context["terminal"]
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent)
-        if not sessions:
-            return "No matching session found"
-
-        session = sessions[0]
-        await terminal.focus_session(session.id)
-        logger.info(f"Focused on session: {session.name}")
-        return f"Focused on session: {session.name} ({session.id})"
-    except Exception as e:
-        logger.error(f"Error focusing session: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool()
-async def create_sessions(
-    layout_type: str,
-    ctx: Context,
-    session_configs: Optional[List[Dict[str, Any]]] = None
-) -> str:
-    """Create new terminal sessions with optional agent registration.
-
-    Args:
-        layout_type: Layout type (single, horizontal, vertical, quad)
-        session_configs: Optional list of session configurations:
-            - name: Session name (required)
-            - agent: Agent name to register (optional)
-            - team: Team to assign agent to (optional)
-            - command: Initial command to run (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     layout_manager = ctx.request_context.lifespan_context["layout_manager"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Convert layout type
-        layout_map = {
-            "single": LayoutType.SINGLE,
-            "horizontal": LayoutType.HORIZONTAL_SPLIT,
-            "vertical": LayoutType.VERTICAL_SPLIT,
-            "quad": LayoutType.QUAD
-        }
-        layout_type_enum = layout_map.get(layout_type.lower())
-        if not layout_type_enum:
-            return f"Invalid layout type: {layout_type}. Use: single, horizontal, vertical, quad"
-
-        # Extract session names from configs
-        session_names = None
-        if session_configs:
-            session_names = [c.get("name", f"Session-{i}") for i, c in enumerate(session_configs)]
-
-        # Create the layout
-        logger.info(f"Creating {layout_type} layout with sessions: {session_names}")
-        sessions_map = await layout_manager.create_layout(
-            layout_type=layout_type_enum,
-            pane_names=session_names
-        )
-
-        result = []
-
-        # Process each created session
-        for session_name, session_id in sessions_map.items():
-            session = await terminal.get_session_by_id(session_id)
-            if not session:
-                continue
-
-            session_info = {
-                "session_id": session.id,
-                "name": session.name,
-                "persistent_id": session.persistent_id,
-                "agent": None,
-                "team": None
-            }
-
-            # Find matching config
-            if session_configs:
-                for config in session_configs:
-                    if config.get("name") == session_name:
-                        # Register agent if specified
-                        agent_name = config.get("agent")
-                        team_name = config.get("team")
-
-                        if agent_name:
-                            teams = [team_name] if team_name else []
-                            agent_registry.register_agent(
-                                name=agent_name,
-                                session_id=session.id,
-                                teams=teams
-                            )
-                            session_info["agent"] = agent_name
-                            session_info["team"] = team_name
-
-                        # Execute initial command
-                        command = config.get("command")
-                        if command:
-                            await session.execute_command(command)
-
-                        break
-
-            result.append(session_info)
-
-        # Set first session as active if none set
-        if result and not agent_registry.active_session:
-            agent_registry.active_session = result[0]["session_id"]
-
-        logger.info(f"Created {len(result)} sessions")
-        return json.dumps(result, indent=2)
+        create_request = ensure_model(CreateSessionsRequest, request)
+        result = await execute_create_sessions(create_request, terminal, layout_manager, agent_registry, logger)
+        logger.info(f"Created {len(result.sessions)} sessions")
+        return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error creating sessions: {e}")
         return f"Error: {e}"
@@ -444,254 +1045,59 @@ async def create_sessions(
 # ============================================================================
 
 @mcp.tool()
-async def write_to_sessions(
-    messages: List[Dict[str, Any]],
-    ctx: Context,
-    parallel: bool = True,
-    skip_duplicates: bool = True
-) -> str:
-    """Write messages to one or more sessions.
+async def write_to_sessions(request: WriteToSessionsRequest, ctx: Context) -> str:
+    """Write messages to one or more sessions using the gRPC-aligned schema."""
 
-    Args:
-        messages: List of message objects:
-            - content: Text to send (required)
-            - session_id: Target session ID (optional)
-            - name: Target session name (optional)
-            - agent: Target agent name (optional)
-            - team: Target team (sends to all members) (optional)
-            - condition: Regex pattern - only send if session output matches (optional)
-            - execute: Whether to press Enter (default: true)
-        parallel: Execute sends in parallel (default: true)
-        skip_duplicates: Skip if message already sent to target (default: true)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
-    results = []
-
-    async def send_to_session(session: ItermSession, content: str, execute: bool, condition: Optional[str]) -> Dict:
-        """Send message to a single session."""
-        result = {
-            "session_id": session.id,
-            "name": session.name,
-            "delivered": False,
-            "skipped_reason": None
-        }
-
-        # Check condition if specified
-        if condition:
-            output = await session.get_screen_contents()
-            if not check_condition(output, condition):
-                result["skipped_reason"] = "condition_not_met"
-                return result
-
-        # Check for duplicates
-        agent = agent_registry.get_agent_by_session(session.id)
-        if skip_duplicates and agent:
-            if agent_registry.was_message_sent(content, agent.name):
-                result["skipped_reason"] = "duplicate"
-                return result
-
-        # Send the message
-        if execute:
-            await session.execute_command(content)
-        else:
-            await session.send_text(content, execute=False)
-
-        # Record message sent
-        if agent:
-            agent_registry.record_message_sent(content, [agent.name])
-
-        result["delivered"] = True
-        return result
-
     try:
-        tasks = []
-
-        for msg in messages:
-            content = msg.get("content", "")
-            if not content:
-                continue
-
-            execute = msg.get("execute", True)
-            condition = msg.get("condition")
-
-            # Resolve target sessions
-            sessions = await resolve_session(
-                terminal, agent_registry,
-                session_id=msg.get("session_id"),
-                name=msg.get("name"),
-                agent=msg.get("agent"),
-                team=msg.get("team")
-            )
-
-            if not sessions:
-                results.append({
-                    "content": content[:50],
-                    "error": "No matching sessions found"
-                })
-                continue
-
-            # Create tasks for each session
-            for session in sessions:
-                if parallel:
-                    tasks.append(send_to_session(session, content, execute, condition))
-                else:
-                    result = await send_to_session(session, content, execute, condition)
-                    results.append(result)
-
-        # Execute parallel tasks
-        if parallel and tasks:
-            parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in parallel_results:
-                if isinstance(r, Exception):
-                    results.append({"error": str(r)})
-                else:
-                    results.append(r)
-
-        delivered = sum(1 for r in results if r.get("delivered"))
-        logger.info(f"Delivered {delivered}/{len(results)} messages")
-
-        return json.dumps({
-            "results": results,
-            "delivered_count": delivered,
-            "total_count": len(results)
-        }, indent=2)
+        write_request = ensure_model(WriteToSessionsRequest, request)
+        result = await execute_write_request(
+            write_request,
+            terminal,
+            agent_registry,
+            logger,
+            lock_manager=lock_manager,
+            notification_manager=notification_manager,
+        )
+        return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error in write_to_sessions: {e}")
         return f"Error: {e}"
 
 
 @mcp.tool()
-async def read_sessions(
-    ctx: Context,
-    targets: Optional[List[Dict[str, Any]]] = None,
-    parallel: bool = True,
-    filter_pattern: Optional[str] = None
-) -> str:
-    """Read output from one or more sessions.
+async def read_sessions(request: ReadSessionsRequest, ctx: Context) -> str:
+    """Read output from one or more sessions."""
 
-    Args:
-        targets: List of target specifications (optional, uses active session if empty):
-            - session_id: Direct session ID (optional)
-            - name: Session name (optional)
-            - agent: Agent name (optional)
-            - team: Team name (reads all members) (optional)
-            - max_lines: Override default max lines (optional)
-        parallel: Read sessions in parallel (default: true)
-        filter_pattern: Regex pattern to filter output lines (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
-    results = []
-
-    async def read_from_session(session: ItermSession, max_lines: Optional[int]) -> Dict:
-        """Read output from a single session."""
-        output = await session.get_screen_contents(max_lines=max_lines)
-
-        # Apply filter if specified
-        if filter_pattern:
-            try:
-                pattern = re.compile(filter_pattern)
-                lines = output.split("\n")
-                filtered_lines = [l for l in lines if pattern.search(l)]
-                output = "\n".join(filtered_lines)
-            except re.error as regex_err:
-                logger.error(f"Invalid filter_pattern '{filter_pattern}': {regex_err}")
-
-        agent = agent_registry.get_agent_by_session(session.id)
-
-        return {
-            "session_id": session.id,
-            "name": session.name,
-            "agent": agent.name if agent else None,
-            "content": output,
-            "line_count": len(output.split("\n"))
-        }
-
     try:
-        # If no targets, use active session
-        if not targets:
-            targets = [{}]
-
-        tasks = []
-
-        for target in targets:
-            sessions = await resolve_session(
-                terminal, agent_registry,
-                session_id=target.get("session_id"),
-                name=target.get("name"),
-                agent=target.get("agent"),
-                team=target.get("team")
-            )
-
-            max_lines = target.get("max_lines")
-
-            for session in sessions:
-                if parallel:
-                    tasks.append(read_from_session(session, max_lines))
-                else:
-                    result = await read_from_session(session, max_lines)
-                    results.append(result)
-
-        # Execute parallel tasks
-        if parallel and tasks:
-            parallel_results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in parallel_results:
-                if isinstance(r, Exception):
-                    results.append({"error": str(r)})
-                else:
-                    results.append(r)
-
-        logger.info(f"Read output from {len(results)} sessions")
-
-        return json.dumps({
-            "outputs": results,
-            "total_sessions": len(results)
-        }, indent=2)
+        read_request = ensure_model(ReadSessionsRequest, request)
+        result = await execute_read_request(read_request, terminal, agent_registry, logger)
+        return result.model_dump_json(indent=2)
     except Exception as e:
         logger.error(f"Error in read_sessions: {e}")
         return f"Error: {e}"
 
 
-@mcp.tool()
-async def send_cascade_message(
-    ctx: Context,
-    broadcast: Optional[str] = None,
-    teams: Optional[Dict[str, str]] = None,
-    agents: Optional[Dict[str, str]] = None,
-    skip_duplicates: bool = True,
-    execute: bool = True
+async def _deliver_cascade(
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    cascade: CascadingMessage,
+    skip_duplicates: bool,
+    execute: bool,
+    logger: logging.Logger,
 ) -> str:
-    """Send cascading messages to agents/teams.
-
-    Messages cascade with increasing specificity:
-    1. Broadcast goes to ALL agents
-    2. Team messages override broadcast for team members
-    3. Agent messages override both for specific agents
-
-    Args:
-        broadcast: Message sent to ALL agents (optional)
-        teams: Team-specific messages {team_name: message} (optional)
-        agents: Agent-specific messages {agent_name: message} (optional)
-        skip_duplicates: Skip if message already sent (default: true)
-        execute: Press Enter after sending (default: true)
-    """
-    terminal = ctx.request_context.lifespan_context["terminal"]
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
+    """Send a cascading message and return serialized results."""
 
     try:
-        cascade = CascadingMessage(
-            broadcast=broadcast,
-            teams=teams or {},
-            agents=agents or {}
-        )
-
-        # Resolve cascade to message -> [agent_names]
         message_targets = agent_registry.resolve_cascade_targets(cascade)
 
         results = []
@@ -699,12 +1105,11 @@ async def send_cascade_message(
         skipped = 0
 
         for message, agent_names in message_targets.items():
-            # Filter duplicates
             if skip_duplicates:
                 agent_names = agent_registry.filter_unsent_recipients(message, agent_names)
 
             actually_delivered = []
-            # Get session IDs
+
             for agent_name in agent_names:
                 agent = agent_registry.get_agent(agent_name)
                 if not agent:
@@ -720,41 +1125,227 @@ async def send_cascade_message(
                     skipped += 1
                     continue
 
-                # Determine message type based on where this specific message came from
-                message_type = "broadcast"
-                if agent_name in (agents or {}) and (agents or {}).get(agent_name) == message:
-                    message_type = "agent"
-                elif any(agent.is_member_of(t) and (teams or {}).get(t) == message for t in (teams or {}).keys()):
-                    message_type = "team"
-
-                # Send message
-                if execute:
-                    await session.execute_command(message)
-                else:
-                    await session.send_text(message, execute=False)
-
-                results.append({
-                    "agent": agent_name,
-                    "session_id": session.id,
-                    "message_type": message_type,
-                    "delivered": True
-                })
+                await session.send_text(message, execute=execute)
+                agent_registry.record_message_sent(message, [agent_name])
                 delivered += 1
                 actually_delivered.append(agent_name)
 
-            # Record messages sent
-            if actually_delivered:
-                agent_registry.record_message_sent(message, actually_delivered)
+            if not actually_delivered:
+                skipped += len(agent_names)
 
-        logger.info(f"Cascade: delivered={delivered}, skipped={skipped}")
+            results.append({
+                "message": message,
+                "targets": agent_names,
+                "delivered": actually_delivered
+            })
+
+        logger.info(f"Delivered {delivered} cascading messages ({skipped} skipped)")
 
         return json.dumps({
             "results": results,
-            "delivered_count": delivered,
-            "skipped_count": skipped
+            "delivered": delivered,
+            "skipped": skipped
         }, indent=2)
     except Exception as e:
+        logger.error(f"Error sending cascading message: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def send_cascade_message(request: CascadeMessageRequest, ctx: Context) -> str:
+    """Send cascading messages to agents/teams."""
+
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        cascade_request = ensure_model(CascadeMessageRequest, request)
+        result = await execute_cascade_request(cascade_request, terminal, agent_registry, logger)
+        return result.model_dump_json(indent=2)
+    except Exception as e:
         logger.error(f"Error in send_cascade_message: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def select_panes_by_hierarchy(
+    ctx: Context,
+    targets: List[Dict[str, Optional[str]]],
+    set_active: bool = True,
+) -> str:
+    """Resolve panes by team/agent hierarchy and optionally focus the first.
+
+    Args:
+        targets: List of target dicts using SendTarget fields (team/agent)
+        set_active: Whether to set the first resolved session as active
+    """
+
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    results = []
+    resolved_sessions = []
+
+    for target in targets:
+        send_target = SendTarget(**target)
+        team = send_target.team
+        agent_name = send_target.agent
+
+        if agent_name:
+            agent = agent_registry.get_agent(agent_name)
+            if not agent:
+                results.append({"agent": agent_name, "team": team, "error": "unknown_agent"})
+                continue
+
+            if team and not agent.is_member_of(team):
+                results.append({"agent": agent_name, "team": team, "error": "agent_not_in_team"})
+                continue
+
+            session = await terminal.get_session_by_id(agent.session_id)
+            if not session:
+                results.append({"agent": agent_name, "team": team, "error": "session_not_found"})
+                continue
+
+            resolved_sessions.append(session)
+            results.append({
+                "agent": agent_name,
+                "team": team,
+                "session_id": session.id,
+                "session_name": session.name
+            })
+            continue
+
+        if team:
+            team_agents = agent_registry.list_agents(team=team)
+            if not team_agents:
+                results.append({"team": team, "error": "team_has_no_agents"})
+                continue
+
+            for agent in team_agents:
+                session = await terminal.get_session_by_id(agent.session_id)
+                if session:
+                    resolved_sessions.append(session)
+                    results.append({
+                        "agent": agent.name,
+                        "team": team,
+                        "session_id": session.id,
+                        "session_name": session.name
+                    })
+
+    if set_active and resolved_sessions:
+        agent_registry.active_session = resolved_sessions[0].id
+        logger.info(f"Active session set via hierarchy: {resolved_sessions[0].name}")
+
+    return json.dumps({
+        "resolved": results,
+        "active_session": resolved_sessions[0].id if set_active and resolved_sessions else None
+    }, indent=2)
+
+
+@mcp.tool()
+async def send_hierarchical_message(
+    ctx: Context,
+    targets: List[Dict[str, Optional[str]]],
+    broadcast: Optional[str] = None,
+    skip_duplicates: bool = True,
+    execute: bool = True,
+) -> str:
+    """Send cascading messages using hierarchical SendTarget specs."""
+
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    send_targets = [SendTarget(**t) for t in targets]
+
+    cascade = CascadingMessage(
+        broadcast=broadcast,
+        teams={},
+        agents={},
+    )
+
+    for target in send_targets:
+        if target.team and target.agent:
+            agent_obj = agent_registry.get_agent(target.agent)
+            if not agent_obj or not agent_obj.is_member_of(target.team):
+                logger.error(f"Agent '{target.agent}' is not a member of team '{target.team}'. Skipping.")
+                continue
+            cascade.agents[target.agent] = target.message or broadcast or ""
+        elif target.agent:
+            cascade.agents[target.agent] = target.message or broadcast or ""
+        elif target.team:
+            cascade.teams[target.team] = target.message or broadcast or ""
+
+    return await _deliver_cascade(
+        terminal=terminal,
+        agent_registry=agent_registry,
+        cascade=cascade,
+        skip_duplicates=skip_duplicates,
+        execute=execute,
+        logger=logger,
+    )
+
+
+# ============================================================================
+# ORCHESTRATION TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def orchestrate_playbook(request: OrchestrateRequest, ctx: Context) -> str:
+    """Execute a high-level playbook (layout + commands + cascade + reads)."""
+
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    layout_manager = ctx.request_context.lifespan_context["layout_manager"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        orchestration_request = ensure_model(OrchestrateRequest, request)
+        playbook = orchestration_request.playbook
+
+        response = OrchestrateResponse()
+
+        if playbook.layout:
+            response.layout = await execute_create_sessions(playbook.layout, terminal, layout_manager, agent_registry, logger)
+
+        command_results: List[PlaybookCommandResult] = []
+        for command in playbook.commands:
+            write_request = WriteToSessionsRequest(
+                messages=command.messages,
+                parallel=command.parallel,
+                skip_duplicates=command.skip_duplicates,
+            )
+            write_result = await execute_write_request(
+                write_request,
+                terminal,
+                agent_registry,
+                logger,
+                lock_manager=lock_manager,
+                notification_manager=notification_manager,
+            )
+            command_results.append(PlaybookCommandResult(name=command.name, write_result=write_result))
+
+        response.commands = command_results
+
+        if playbook.cascade:
+            response.cascade = await execute_cascade_request(playbook.cascade, terminal, agent_registry, logger)
+
+        if playbook.reads:
+            response.reads = await execute_read_request(playbook.reads, terminal, agent_registry, logger)
+
+        logger.info(
+            "Playbook completed: layout=%s, commands=%s, cascade=%s, reads=%s",
+            bool(response.layout),
+            len(response.commands),
+            bool(response.cascade),
+            bool(response.reads),
+        )
+
+        return response.model_dump_json(indent=2, exclude_none=True)
+    except Exception as e:
+        logger.error(f"Error orchestrating playbook: {e}")
         return f"Error: {e}"
 
 
@@ -763,29 +1354,16 @@ async def send_cascade_message(
 # ============================================================================
 
 @mcp.tool()
-async def send_control_character(
-    control_char: str,
-    ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None,
-    team: Optional[str] = None
-) -> str:
-    """Send a control character to session(s).
+async def send_control_character(control_char: str, target: SessionTarget, ctx: Context) -> str:
+    """Send a control character to session(s)."""
 
-    Args:
-        control_char: Control character ('c' for Ctrl+C, 'd' for Ctrl+D, etc.)
-        session_id: Target session ID (optional)
-        agent: Target agent name (optional)
-        name: Target session name (optional)
-        team: Target team (sends to all members) (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent, team)
+        target_model = ensure_model(SessionTarget, target)
+        sessions = await resolve_target_sessions(terminal, agent_registry, [target_model])
         if not sessions:
             return "No matching sessions found"
 
@@ -836,25 +1414,22 @@ async def send_special_key(
 
 
 @mcp.tool()
-async def check_session_status(
-    ctx: Context,
-    session_id: Optional[str] = None,
-    agent: Optional[str] = None,
-    name: Optional[str] = None
-) -> str:
-    """Check status of a session.
+async def check_session_status(request: SetActiveSessionRequest, ctx: Context) -> str:
+    """Check status of a session."""
 
-    Args:
-        session_id: Target session ID (optional)
-        agent: Target agent name (optional)
-        name: Target session name (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        sessions = await resolve_session(terminal, agent_registry, session_id, name, agent)
+        req = ensure_model(SetActiveSessionRequest, request)
+        sessions = await resolve_session(
+            terminal,
+            agent_registry,
+            session_id=req.session_id,
+            name=req.name,
+            agent=req.agent,
+        )
         if not sessions:
             return "No matching session found"
 
@@ -884,50 +1459,34 @@ async def check_session_status(
 # ============================================================================
 
 @mcp.tool()
-async def register_agent(
-    agent_name: str,
-    ctx: Context,
-    session_id: Optional[str] = None,
-    session_name: Optional[str] = None,
-    teams: Optional[List[str]] = None
-) -> str:
-    """Register an agent for a session.
+async def register_agent(request: RegisterAgentRequest, ctx: Context) -> str:
+    """Register an agent for a session."""
 
-    Args:
-        agent_name: Unique name for the agent
-        session_id: Session ID to associate (optional)
-        session_name: Session name to associate (optional)
-        teams: List of teams to join (optional)
-    """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Resolve session
-        session = None
-        if session_id:
-            session = await terminal.get_session_by_id(session_id)
-        elif session_name:
-            session = await terminal.get_session_by_name(session_name)
-
+        req = ensure_model(RegisterAgentRequest, request)
+        session = await terminal.get_session_by_id(req.session_id)
         if not session:
-            return "No matching session found. Provide session_id or session_name."
+            return "No matching session found. Provide a valid session_id."
 
-        # Register agent
         agent = agent_registry.register_agent(
-            name=agent_name,
+            name=req.name,
             session_id=session.id,
-            teams=teams or []
+            teams=req.teams,
+            metadata=req.metadata,
         )
 
-        logger.info(f"Registered agent '{agent_name}' for session {session.name}")
+        logger.info(f"Registered agent '{agent.name}' for session {session.name}")
 
         return json.dumps({
             "agent": agent.name,
             "session_id": agent.session_id,
             "session_name": session.name,
-            "teams": agent.teams
+            "teams": agent.teams,
+            "metadata": agent.metadata,
         }, indent=2)
     except Exception as e:
         logger.error(f"Error registering agent: {e}")
@@ -987,30 +1546,21 @@ async def remove_agent(
 
 
 @mcp.tool()
-async def create_team(
-    team_name: str,
-    ctx: Context,
-    description: str = "",
-    parent_team: Optional[str] = None
-) -> str:
-    """Create a new team.
+async def create_team(request: CreateTeamRequest, ctx: Context) -> str:
+    """Create a new team."""
 
-    Args:
-        team_name: Unique team name
-        description: Team description (optional)
-        parent_team: Parent team for hierarchy (optional)
-    """
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
+        req = ensure_model(CreateTeamRequest, request)
         team = agent_registry.create_team(
-            name=team_name,
-            description=description,
-            parent_team=parent_team
+            name=req.name,
+            description=req.description,
+            parent_team=req.parent_team,
         )
 
-        logger.info(f"Created team '{team_name}'")
+        logger.info(f"Created team '{team.name}'")
 
         return json.dumps({
             "name": team.name,
@@ -1124,6 +1674,189 @@ async def remove_agent_from_team(
 
 
 # ============================================================================
+# SESSION MODIFICATION TOOLS
+# ============================================================================
+
+async def apply_session_modification(
+    session: ItermSession,
+    modification: SessionModification,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+    focus_cooldown: Optional[FocusCooldownManager] = None,
+) -> ModificationResult:
+    """Apply modification settings to a single session."""
+    agent = agent_registry.get_agent_by_session(session.id)
+    agent_name = agent.name if agent else None
+    result = ModificationResult(
+        session_id=session.id,
+        session_name=session.name,
+        agent=agent_name,
+    )
+    changes = []
+
+    try:
+        # Handle set_active
+        if modification.set_active:
+            agent_registry.active_session = session.id
+            changes.append("set_active")
+
+        # Handle focus with cooldown check
+        if modification.focus:
+            if focus_cooldown:
+                allowed, blocking_agent, remaining = focus_cooldown.check_cooldown(
+                    session.id, agent_name
+                )
+                if not allowed:
+                    result.error = (
+                        f"Focus cooldown active: {remaining:.1f}s remaining. "
+                        f"Last focus by agent '{blocking_agent or 'unknown'}'. "
+                        f"Wait or use the same agent."
+                    )
+                    logger.warning(f"Focus blocked for {session.name}: cooldown {remaining:.1f}s")
+                    return result
+
+            await terminal.focus_session(session.id)
+            changes.append("focus")
+
+            # Record the focus event for cooldown
+            if focus_cooldown:
+                focus_cooldown.record_focus(session.id, agent_name)
+                logger.debug(f"Recorded focus event for {session.name} by {agent_name}")
+
+        # Reset colors first if requested
+        if modification.reset:
+            await session.reset_colors()
+            changes.append("reset_colors")
+
+        # Apply background color
+        if modification.background_color:
+            c = modification.background_color
+            await session.set_background_color(c.red, c.green, c.blue, c.alpha)
+            changes.append(f"background_color=RGB({c.red},{c.green},{c.blue})")
+
+        # Apply tab color
+        if modification.tab_color:
+            c = modification.tab_color
+            enabled = modification.tab_color_enabled if modification.tab_color_enabled is not None else True
+            await session.set_tab_color(c.red, c.green, c.blue, enabled)
+            changes.append(f"tab_color=RGB({c.red},{c.green},{c.blue})")
+        elif modification.tab_color_enabled is not None:
+            # Just enable/disable without changing color
+            await session.set_tab_color(0, 0, 0, modification.tab_color_enabled)
+            changes.append(f"tab_color_enabled={modification.tab_color_enabled}")
+
+        # Apply cursor color
+        if modification.cursor_color:
+            c = modification.cursor_color
+            await session.set_cursor_color(c.red, c.green, c.blue)
+            changes.append(f"cursor_color=RGB({c.red},{c.green},{c.blue})")
+
+        # Apply badge
+        if modification.badge is not None:
+            await session.set_badge(modification.badge)
+            changes.append(f"badge='{modification.badge}'")
+
+        result.success = True
+        result.changes = changes
+        logger.info(f"Applied modifications to {session.name}: {', '.join(changes)}")
+
+    except Exception as e:
+        result.error = str(e)
+        logger.error(f"Error applying modifications to {session.name}: {e}")
+
+    return result
+
+
+@mcp.tool()
+async def modify_sessions(
+    request: ModifySessionsRequest,
+    ctx: Context
+) -> str:
+    """Modify multiple terminal sessions (appearance, focus, active state).
+
+    This consolidated tool handles all session modifications in a single call:
+    - Visual appearance: background color, tab color, cursor color, badge
+    - Session state: set as active session, bring to foreground (focus)
+
+    Each modification entry specifies a target session (by agent, name, or session_id)
+    and the properties to modify.
+
+    Example request:
+    {
+        "modifications": [
+            {
+                "agent": "claude-1",
+                "focus": true,
+                "set_active": true,
+                "tab_color": {"red": 100, "green": 200, "blue": 255},
+                "badge": "🤖 Claude-1"
+            },
+            {
+                "agent": "claude-2",
+                "background_color": {"red": 40, "green": 30, "blue": 30},
+                "tab_color": {"red": 255, "green": 150, "blue": 100}
+            },
+            {
+                "agent": "claude-3",
+                "reset": true
+            }
+        ]
+    }
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+    focus_cooldown = ctx.request_context.lifespan_context.get("focus_cooldown")
+
+    try:
+        req = ensure_model(ModifySessionsRequest, request)
+        results: List[ModificationResult] = []
+
+        for modification in req.modifications:
+            # Resolve the target session
+            sessions = await resolve_session(
+                terminal,
+                agent_registry,
+                session_id=modification.session_id,
+                name=modification.name,
+                agent=modification.agent,
+            )
+
+            if not sessions:
+                results.append(ModificationResult(
+                    session_id="",
+                    session_name=None,
+                    agent=modification.agent,
+                    success=False,
+                    error=f"No session found for target: agent={modification.agent}, name={modification.name}, id={modification.session_id}"
+                ))
+                continue
+
+            session = sessions[0]
+            result = await apply_session_modification(
+                session, modification, terminal, agent_registry, logger, focus_cooldown
+            )
+            results.append(result)
+
+        success_count = sum(1 for r in results if r.success)
+        error_count = sum(1 for r in results if not r.success)
+
+        response = ModifySessionsResponse(
+            results=results,
+            success_count=success_count,
+            error_count=error_count,
+        )
+
+        logger.info(f"Modified sessions: {success_count} succeeded, {error_count} failed")
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error in modify_sessions: {e}")
+        return f"Error: {e}"
+
+
+# ============================================================================
 # MONITORING TOOLS
 # ============================================================================
 
@@ -1204,60 +1937,9 @@ async def stop_monitoring_session(
         return f"Error: {e}"
 
 
-@mcp.tool()
-async def show_dashboard(
-    ctx: Context,
-    mode: str = "tui",
-    port: int = 7002,
-    duration_seconds: int = 180,
-) -> str:
-    """Display or host the telemetry dashboard.
-
-    Args:
-        mode: "tui" to return a text dashboard, "web" to start a local HTTP server
-        port: Port for the HTTP dashboard
-        duration_seconds: How long to keep the HTTP dashboard alive
-    """
-
-    terminal = ctx.request_context.lifespan_context["terminal"]
-    telemetry: TelemetryEmitter = ctx.request_context.lifespan_context["telemetry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    await terminal.get_sessions()
-    state = telemetry.dashboard_state(terminal)
-
-    if mode.lower() == "web":
-        try:
-            message = await _start_telemetry_server(port=port, duration=duration_seconds)
-            return (
-                f"{message}. Use telemetry://dashboard for JSON or open the port in a browser."
-            )
-        except Exception as e:
-            logger.error(f"Failed to start telemetry dashboard: {e}")
-            return f"Error starting dashboard: {e}"
-
-    return telemetry.format_tui(state)
-
-
 # ============================================================================
 # RESOURCES
 # ============================================================================
-
-@mcp.resource("telemetry://dashboard")
-async def telemetry_dashboard() -> str:
-    """Return aggregated telemetry useful for dashboards."""
-
-    if _terminal is None or _logger is None or _telemetry is None:
-        raise RuntimeError("Server not initialized. Please wait for initialization to complete.")
-
-    try:
-        await _terminal.get_sessions()
-        state = _telemetry.dashboard_state(_terminal)
-        return json.dumps(state, indent=2)
-    except Exception as e:
-        _logger.error(f"Error generating telemetry dashboard: {e}")
-        return f"Error: {e}"
-
 
 @mcp.resource("terminal://{session_id}/output")
 async def get_terminal_output(session_id: str) -> str:
@@ -1438,6 +2120,825 @@ Watch for:
 
 Coordinate responses as needed using write_to_sessions or send_cascade_message.
 """
+
+
+# ============================================================================
+# NOTIFICATION TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def get_notifications(request: GetNotificationsRequest, ctx: Context) -> str:
+    """Get recent agent notifications.
+
+    Returns a list of notifications about agent status changes, errors,
+    completions, and other events. Use this to stay aware of what's happening
+    across all managed agents.
+    """
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        req = ensure_model(GetNotificationsRequest, request)
+        notifications = await notification_manager.get(
+            limit=req.limit,
+            level=req.level,
+            agent=req.agent,
+            since=req.since,
+        )
+
+        response = GetNotificationsResponse(
+            notifications=notifications,
+            total_count=len(notifications),
+            has_more=len(notifications) == req.limit,
+        )
+
+        logger.info(f"Retrieved {len(notifications)} notifications")
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting notifications: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def get_agent_status_summary(ctx: Context) -> str:
+    """Get a compact status summary of all agents.
+
+    Returns a one-line-per-agent summary showing the most recent
+    notification for each agent. Great for quick status checks.
+    """
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Get latest notification per agent
+        latest = await notification_manager.get_latest_per_agent()
+
+        # Also include agents with no notifications
+        all_agents = agent_registry.list_agents()
+        for agent in all_agents:
+            if agent.name not in latest:
+                # Create a placeholder notification
+                latest[agent.name] = AgentNotification(
+                    agent=agent.name,
+                    timestamp=datetime.now(),
+                    level="info",
+                    summary="No activity recorded",
+                )
+
+        notifications = list(latest.values())
+        formatted = notification_manager.format_compact(notifications)
+
+        logger.info(f"Generated status summary for {len(notifications)} agents")
+        return formatted
+
+    except Exception as e:
+        logger.error(f"Error generating status summary: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def notify(
+    agent: str,
+    level: str,
+    summary: str,
+    context: Optional[str] = None,
+    action_hint: Optional[str] = None,
+    ctx: Context = None,
+) -> str:
+    """Manually add a notification for an agent.
+
+    Use this to record significant events like task completion,
+    errors encountered, or when an agent needs attention.
+
+    Args:
+        agent: The agent name
+        level: One of: info, warning, error, success, blocked
+        summary: Brief one-line summary (max 100 chars)
+        context: Optional additional context
+        action_hint: Optional suggested next action
+    """
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        await notification_manager.add_simple(
+            agent=agent,
+            level=level,
+            summary=summary,
+            context=context,
+            action_hint=action_hint,
+        )
+        logger.info(f"Added notification for {agent}: [{level}] {summary}")
+        return f"Notification added for {agent}"
+
+    except Exception as e:
+        logger.error(f"Error adding notification: {e}")
+        return f"Error: {e}"
+
+
+# ============================================================================
+# WAIT FOR AGENT TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def wait_for_agent(request: WaitForAgentRequest, ctx: Context) -> str:
+    """Wait for an agent to complete or reach idle state.
+
+    This allows an orchestrator to wait for a subagent to finish its current
+    task. If the wait times out, returns a progress summary so you can decide
+    whether to wait longer or take action.
+
+    Args:
+        request: Contains agent name, timeout, and output options
+
+    Returns:
+        WaitResult with completion status, elapsed time, and optional output/summary
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        req = ensure_model(WaitForAgentRequest, request)
+
+        # Find the agent
+        agent = agent_registry.get_agent(req.agent)
+        if not agent:
+            return WaitResult(
+                agent=req.agent,
+                completed=False,
+                timed_out=False,
+                elapsed_seconds=0,
+                status="unknown",
+                summary=f"Agent '{req.agent}' not found",
+                can_continue_waiting=False,
+            ).model_dump_json(indent=2)
+
+        # Get the session
+        session = await terminal.get_session_by_id(agent.session_id)
+        if not session:
+            return WaitResult(
+                agent=req.agent,
+                completed=False,
+                timed_out=False,
+                elapsed_seconds=0,
+                status="unknown",
+                summary=f"Session for agent '{req.agent}' not found",
+                can_continue_waiting=False,
+            ).model_dump_json(indent=2)
+
+        logger.info(f"Waiting up to {req.wait_up_to}s for agent {req.agent}")
+
+        # Capture initial output for comparison
+        initial_output = await session.get_screen_contents()
+
+        # Poll for completion
+        start_time = time.time()
+        poll_interval = 0.5  # Check every 500ms
+        last_output = initial_output
+
+        while True:
+            elapsed = time.time() - start_time
+
+            # Check if timed out
+            if elapsed >= req.wait_up_to:
+                # Timed out - generate summary
+                current_output = await session.get_screen_contents()
+
+                summary = None
+                if req.summary_on_timeout:
+                    # Generate a simple summary based on output changes
+                    if current_output != initial_output:
+                        lines = current_output.strip().split('\n')
+                        last_lines = lines[-3:] if len(lines) > 3 else lines
+                        summary = f"Still running. Last output: {' | '.join(last_lines)}"
+                    else:
+                        summary = "No output change detected during wait period"
+
+                # Add notification
+                await notification_manager.add_simple(
+                    agent=req.agent,
+                    level="info",
+                    summary=f"Wait timed out after {int(elapsed)}s",
+                    context=summary,
+                )
+
+                result = WaitResult(
+                    agent=req.agent,
+                    completed=False,
+                    timed_out=True,
+                    elapsed_seconds=elapsed,
+                    status="running",
+                    output=current_output if req.return_output else None,
+                    summary=summary,
+                    can_continue_waiting=True,
+                )
+                logger.info(f"Wait for {req.agent} timed out after {elapsed:.1f}s")
+                return result.model_dump_json(indent=2)
+
+            # Check if processing has stopped (idle)
+            is_processing = getattr(session, 'is_processing', False)
+            if not is_processing:
+                # Check if output has stabilized
+                current_output = await session.get_screen_contents()
+                if current_output == last_output:
+                    # Agent appears idle
+                    await notification_manager.add_simple(
+                        agent=req.agent,
+                        level="success",
+                        summary=f"Completed after {int(elapsed)}s",
+                    )
+
+                    result = WaitResult(
+                        agent=req.agent,
+                        completed=True,
+                        timed_out=False,
+                        elapsed_seconds=elapsed,
+                        status="idle",
+                        output=current_output if req.return_output else None,
+                        summary="Agent completed successfully",
+                        can_continue_waiting=False,
+                    )
+                    logger.info(f"Agent {req.agent} completed after {elapsed:.1f}s")
+                    return result.model_dump_json(indent=2)
+
+                last_output = current_output
+
+            await asyncio.sleep(poll_interval)
+
+    except Exception as e:
+        logger.error(f"Error waiting for agent: {e}")
+        return WaitResult(
+            agent=request.agent if hasattr(request, 'agent') else "unknown",
+            completed=False,
+            timed_out=False,
+            elapsed_seconds=0,
+            status="error",
+            summary=str(e),
+            can_continue_waiting=False,
+        ).model_dump_json(indent=2)
+
+
+# ============================================================================
+# FEEDBACK SYSTEM TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def submit_feedback(
+    ctx: Context,
+    title: str,
+    description: str,
+    category: str = "enhancement",
+    agent_name: Optional[str] = None,
+    session_id: Optional[str] = None,
+    reproduction_steps: Optional[List[str]] = None,
+    suggested_improvement: Optional[str] = None,
+    error_messages: Optional[List[str]] = None,
+) -> str:
+    """Submit feedback about the iTerm MCP system.
+
+    This is the manual /feedback command. Use when you have suggestions,
+    found bugs, or want to request improvements to the iterm-mcp.
+
+    Args:
+        title: Short summary of the feedback
+        description: Detailed description of the issue or suggestion
+        category: One of: bug, enhancement, ux, performance, docs
+        agent_name: Name of the agent submitting (auto-detected if not provided)
+        session_id: Session ID (auto-detected from active session if not provided)
+        reproduction_steps: Steps to reproduce (for bugs)
+        suggested_improvement: What you think should be improved
+        error_messages: Any error messages encountered
+    """
+    feedback_registry = ctx.request_context.lifespan_context["feedback_registry"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Get agent info
+        if not agent_name and session_id:
+            agent = agent_registry.get_agent_by_session(session_id)
+            if agent:
+                agent_name = agent.name
+
+        if not session_id:
+            session_id = agent_registry.active_session or "unknown"
+
+        if not agent_name:
+            agent = agent_registry.get_agent_by_session(session_id)
+            agent_name = agent.name if agent else "unknown-agent"
+
+        # Collect context
+        collector = FeedbackCollector()
+        context = await collector.capture_context(
+            project_path=os.getcwd(),
+            recent_tool_calls=[],  # Would need hook integration for real data
+            recent_errors=error_messages or [],
+        )
+
+        # Parse category
+        try:
+            cat = FeedbackCategory(category.lower())
+        except ValueError:
+            cat = FeedbackCategory.ENHANCEMENT
+
+        # Create feedback entry
+        entry = FeedbackEntry(
+            agent_id=agent_name,
+            agent_name=agent_name,
+            session_id=session_id,
+            trigger_type=FeedbackTriggerType.MANUAL,
+            context=context,
+            category=cat,
+            title=title,
+            description=description,
+            reproduction_steps=reproduction_steps,
+            suggested_improvement=suggested_improvement,
+            error_messages=error_messages,
+        )
+
+        # Save to registry (sync method, no await needed)
+        feedback_registry.add(entry)
+
+        # Notify
+        await notification_manager.add_simple(
+            agent=agent_name,
+            level="success",
+            summary=f"Feedback submitted: {title[:50]}",
+            context=f"Feedback ID: {entry.id}",
+        )
+
+        logger.info(f"Feedback submitted: {entry.id} by {agent_name}")
+        return json.dumps({
+            "status": "submitted",
+            "feedback_id": entry.id,
+            "title": title,
+            "category": cat.value,
+            "message": "Thank you for your feedback! It has been recorded for review."
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error submitting feedback: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def check_feedback_triggers(
+    ctx: Context,
+    agent_name: str,
+    session_id: str,
+    error_message: Optional[str] = None,
+    tool_call_name: Optional[str] = None,
+    output_text: Optional[str] = None,
+) -> str:
+    """Record events and check if feedback triggers should fire.
+
+    Call this to record errors, tool calls, or check for pattern matches
+    that might trigger feedback collection.
+
+    Args:
+        agent_name: Name of the agent
+        session_id: Session ID
+        error_message: Error message to record (triggers error threshold)
+        tool_call_name: Name of tool called (triggers periodic counter)
+        output_text: Text to scan for feedback patterns
+    """
+    hook_manager = ctx.request_context.lifespan_context["feedback_hook_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        triggered = []
+        stats = hook_manager.get_stats(agent_name)
+
+        # Record error and check threshold - record_error returns trigger type if threshold reached
+        if error_message:
+            trigger_type = hook_manager.record_error(agent_name, error_message)
+            if trigger_type == FeedbackTriggerType.ERROR_THRESHOLD:
+                triggered.append({
+                    "trigger": "error_threshold",
+                    "reason": f"Error threshold reached ({stats['error_threshold']} errors)",
+                    "error": error_message,
+                })
+
+        # Record tool call and check periodic - record_tool_call returns trigger type if threshold reached
+        if tool_call_name:
+            trigger_type = hook_manager.record_tool_call(agent_name)
+            if trigger_type == FeedbackTriggerType.PERIODIC:
+                triggered.append({
+                    "trigger": "periodic",
+                    "reason": f"Periodic check ({stats['tool_call_threshold']} tool calls)",
+                })
+
+        # Check for pattern matches - check_pattern returns trigger type if pattern found
+        if output_text:
+            trigger_type = hook_manager.check_pattern(agent_name, output_text)
+            if trigger_type == FeedbackTriggerType.PATTERN_DETECTED:
+                triggered.append({
+                    "trigger": "pattern",
+                    "reason": "Feedback pattern detected in output",
+                })
+
+        logger.info(f"Trigger check for {agent_name}: {len(triggered)} triggers fired")
+        return json.dumps({
+            "agent": agent_name,
+            "triggers_fired": triggered,
+            "should_collect_feedback": len(triggered) > 0,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error checking triggers: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def query_feedback(
+    ctx: Context,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    limit: int = 20,
+) -> str:
+    """Query the feedback registry.
+
+    Args:
+        status: Filter by status (pending, triaged, in_progress, resolved, testing, closed)
+        category: Filter by category (bug, enhancement, ux, performance, docs)
+        agent_id: Filter by agent who submitted
+        limit: Max number of results
+    """
+    feedback_registry = ctx.request_context.lifespan_context["feedback_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Parse filters
+        status_filter = None
+        if status:
+            try:
+                status_filter = FeedbackStatus(status.lower())
+            except ValueError:
+                pass
+
+        category_filter = None
+        if category:
+            try:
+                category_filter = FeedbackCategory(category.lower())
+            except ValueError:
+                pass
+
+        # Query
+        entries = await feedback_registry.query(
+            status=status_filter,
+            category=category_filter,
+            agent_id=agent_id,
+            limit=limit,
+        )
+
+        # Format results
+        results = []
+        for entry in entries:
+            results.append({
+                "id": entry.id,
+                "title": entry.title,
+                "category": entry.category.value,
+                "status": entry.status.value,
+                "agent": entry.agent_name,
+                "created_at": entry.created_at.isoformat(),
+                "github_issue_url": entry.github_issue_url,
+            })
+
+        logger.info(f"Query returned {len(results)} feedback entries")
+        return json.dumps({
+            "count": len(results),
+            "entries": results,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error querying feedback: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def fork_for_feedback(
+    ctx: Context,
+    feedback_id: str,
+    session_id: str,
+) -> str:
+    """Fork the current session to a git worktree for safe feedback submission.
+
+    Creates an isolated worktree and forks the Claude conversation there,
+    allowing the agent to provide detailed feedback without affecting
+    the main codebase.
+
+    Args:
+        feedback_id: The feedback ID to associate with the fork
+        session_id: The session ID to fork from
+    """
+    forker = ctx.request_context.lifespan_context["feedback_forker"]
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        agent = agent_registry.get_agent_by_session(session_id)
+        agent_name = agent.name if agent else "unknown"
+
+        # Create worktree
+        worktree_path = await forker.create_worktree(feedback_id)
+
+        # Get fork command (the actual forking is done by executing this command)
+        fork_command = forker.get_fork_command(session_id, worktree_path)
+
+        await notification_manager.add_simple(
+            agent=agent_name,
+            level="info",
+            summary=f"Forked for feedback: {feedback_id}",
+            context=f"Worktree: {worktree_path}",
+            action_hint="Continue in the forked session to provide feedback",
+        )
+
+        logger.info(f"Created worktree for session {session_id} at {worktree_path}")
+        return json.dumps({
+            "status": "worktree_created",
+            "feedback_id": feedback_id,
+            "worktree_path": str(worktree_path),
+            "fork_command": fork_command,
+            "message": "Worktree created. Execute the fork_command to continue in an isolated environment.",
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error forking for feedback: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def triage_feedback_to_github(
+    ctx: Context,
+    feedback_id: str,
+    labels: Optional[List[str]] = None,
+    assignee: Optional[str] = None,
+) -> str:
+    """Create a GitHub issue from feedback.
+
+    Triages the feedback into a GitHub issue with proper labels and context.
+
+    Args:
+        feedback_id: The feedback ID to triage
+        labels: Additional labels for the issue
+        assignee: GitHub username to assign
+    """
+    feedback_registry = ctx.request_context.lifespan_context["feedback_registry"]
+    github_integration = ctx.request_context.lifespan_context["github_integration"]
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Get the feedback entry (sync method, no await needed)
+        entry = feedback_registry.get(feedback_id)
+        if not entry:
+            return json.dumps({"error": f"Feedback {feedback_id} not found"}, indent=2)
+
+        # Create GitHub issue
+        issue_url = await github_integration.create_issue(
+            feedback=entry,
+            labels=labels,
+            assignee=assignee,
+        )
+
+        if issue_url:
+            # Update entry with issue URL (sync method, no await needed)
+            feedback_registry.update(
+                entry.id,
+                github_issue_url=issue_url,
+                status=FeedbackStatus.TRIAGED,
+            )
+
+            # Notify the agent
+            await notification_manager.add_simple(
+                agent=entry.agent_name,
+                level="success",
+                summary=f"Feedback triaged to GitHub",
+                context=issue_url,
+                action_hint="Check the GitHub issue for updates",
+            )
+
+            logger.info(f"Triaged feedback {feedback_id} to {issue_url}")
+            return json.dumps({
+                "status": "triaged",
+                "feedback_id": feedback_id,
+                "github_issue_url": issue_url,
+            }, indent=2)
+        else:
+            return json.dumps({
+                "status": "failed",
+                "error": "Failed to create GitHub issue. Check gh CLI is authenticated.",
+            }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error triaging feedback: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def notify_feedback_update(
+    ctx: Context,
+    feedback_id: str,
+    update_type: str,
+    message: str,
+    pr_url: Optional[str] = None,
+) -> str:
+    """Notify agents about feedback status updates.
+
+    Use this to notify the original agent when their feedback has been
+    addressed, a PR is ready for testing, etc.
+
+    Args:
+        feedback_id: The feedback ID
+        update_type: One of: acknowledged, in_progress, pr_opened, ready_for_testing, resolved
+        message: Human-readable update message
+        pr_url: URL to the PR if applicable
+    """
+    feedback_registry = ctx.request_context.lifespan_context["feedback_registry"]
+    notification_manager = ctx.request_context.lifespan_context["notification_manager"]
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Get the feedback entry (sync method, no await needed)
+        entry = feedback_registry.get(feedback_id)
+        if not entry:
+            return json.dumps({"error": f"Feedback {feedback_id} not found"}, indent=2)
+
+        # Update entry status based on update_type
+        status_map = {
+            "acknowledged": FeedbackStatus.TRIAGED,
+            "in_progress": FeedbackStatus.IN_PROGRESS,
+            "pr_opened": FeedbackStatus.IN_PROGRESS,
+            "ready_for_testing": FeedbackStatus.TESTING,
+            "resolved": FeedbackStatus.RESOLVED,
+        }
+
+        # Build updates dict
+        updates = {}
+        if update_type in status_map:
+            updates["status"] = status_map[update_type]
+
+        if pr_url:
+            updates["github_pr_url"] = pr_url
+
+        # Update entry (sync method, no await needed)
+        updated_entry = feedback_registry.update(entry.id, **updates)
+        if updated_entry:
+            entry = updated_entry
+
+        # Notify the agent
+        level = "success" if update_type == "ready_for_testing" else "info"
+        action_hint = None
+        if update_type == "ready_for_testing":
+            action_hint = f"Please test the fix: {pr_url}" if pr_url else "Please test the fix"
+
+        await notification_manager.add_simple(
+            agent=entry.agent_name,
+            level=level,
+            summary=f"Feedback update: {update_type}",
+            context=message,
+            action_hint=action_hint,
+        )
+
+        # Try to send a direct message to the agent's session if available
+        agent = agent_registry.get_agent(entry.agent_name)
+        if agent:
+            session = await terminal.get_session_by_id(agent.session_id)
+            if session:
+                # Don't execute, just display the notification
+                notification_text = f"\n[Feedback {feedback_id}] {update_type}: {message}"
+                if pr_url:
+                    notification_text += f"\nPR: {pr_url}"
+                # Log but don't send to terminal (could be disruptive)
+                logger.info(f"Would notify agent {entry.agent_name}: {notification_text}")
+
+        logger.info(f"Notified about feedback {feedback_id}: {update_type}")
+        return json.dumps({
+            "status": "notified",
+            "feedback_id": feedback_id,
+            "agent": entry.agent_name,
+            "update_type": update_type,
+            "new_status": entry.status.value,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error notifying about feedback: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def get_feedback_config(
+    ctx: Context,
+    update: bool = False,
+    error_threshold_count: Optional[int] = None,
+    periodic_tool_call_count: Optional[int] = None,
+    add_pattern: Optional[str] = None,
+    remove_pattern: Optional[str] = None,
+) -> str:
+    """Get or update feedback trigger configuration.
+
+    Args:
+        update: If True, apply the provided configuration changes
+        error_threshold_count: New error threshold (e.g., 3 = trigger after 3 errors)
+        periodic_tool_call_count: New periodic interval (e.g., 100 = trigger every 100 tool calls)
+        add_pattern: Regex pattern to add to pattern detection
+        remove_pattern: Regex pattern to remove from pattern detection
+    """
+    hook_manager = ctx.request_context.lifespan_context["feedback_hook_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        if update:
+            # Apply updates
+            if error_threshold_count is not None:
+                hook_manager.config.error_threshold.count = error_threshold_count
+            if periodic_tool_call_count is not None:
+                hook_manager.config.periodic.tool_call_count = periodic_tool_call_count
+            if add_pattern:
+                hook_manager.config.pattern.patterns.append(add_pattern)
+            if remove_pattern and remove_pattern in hook_manager.config.pattern.patterns:
+                hook_manager.config.pattern.patterns.remove(remove_pattern)
+
+            # Save config
+            await hook_manager.save_config()
+            logger.info("Feedback config updated")
+
+        # Return current config
+        config = hook_manager.config
+        return json.dumps({
+            "enabled": config.enabled,
+            "error_threshold": {
+                "enabled": config.error_threshold.enabled,
+                "count": config.error_threshold.count,
+            },
+            "periodic": {
+                "enabled": config.periodic.enabled,
+                "tool_call_count": config.periodic.tool_call_count,
+            },
+            "pattern": {
+                "enabled": config.pattern.enabled,
+                "patterns": config.pattern.patterns,
+            },
+            "github": {
+                "repo": config.github.repo,
+                "default_labels": config.github.default_labels,
+            },
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error with feedback config: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# TELEMETRY TOOL AND RESOURCE
+# ============================================================================
+
+@mcp.tool()
+async def start_telemetry_dashboard(
+    ctx: Context,
+    port: int = 9999,
+    duration_seconds: int = 300,
+) -> str:
+    """Start a lightweight web server that streams telemetry JSON for external dashboards.
+
+    Args:
+        port: Port to run the telemetry server on (default: 9999)
+        duration_seconds: How long to keep the server running (default: 300)
+    """
+    telemetry: TelemetryEmitter = ctx.request_context.lifespan_context["telemetry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        message = await _start_telemetry_server(port=port, duration=duration_seconds)
+        logger.info(message)
+        return json.dumps({"status": "started", "message": message}, indent=2)
+    except Exception as e:
+        logger.error(f"Error starting telemetry server: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.resource("telemetry://dashboard")
+async def telemetry_dashboard() -> str:
+    """Get the current telemetry dashboard state as JSON."""
+    if _terminal is None or _logger is None or _telemetry is None:
+        return json.dumps({"error": "Telemetry not initialized"}, indent=2)
+
+    try:
+        state = _telemetry.dashboard_state(_terminal)
+        return json.dumps(state, indent=2)
+    except Exception as e:
+        _logger.error(f"Error getting telemetry dashboard: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
 
 
 # ============================================================================

@@ -53,9 +53,14 @@ class TestBasicFunctionality(unittest.TestCase):
                 await coro()
             finally:
                 await self.async_teardown()
-        
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(test_wrapper())
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(test_wrapper())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
     
     def test_create_window(self):
         """Test creating a window and setting its name."""

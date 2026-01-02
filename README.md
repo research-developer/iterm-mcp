@@ -12,7 +12,7 @@ A Python implementation for controlling iTerm2 terminal sessions with support fo
 ✅ **gRPC Migration Complete** - Full gRPC server/client implementation with 17 RPC methods  
 ✅ **Multi-Pane Orchestration** - Parallel session operations with agent/team targeting  
 ✅ **Agent Registry** - Complete agent and team management with cascading messages  
-✅ **Test Coverage** - 88 passing tests with 23.86% code coverage  
+✅ **Test Coverage** - 98 passing tests with 27.77% code coverage  
 ✅ **CI/CD** - Automated testing with coverage reporting
 
 See [EPIC_STATUS.md](EPIC_STATUS.md) for detailed implementation status.
@@ -52,21 +52,25 @@ This will install the package with all required dependencies, including the MCP 
 ```
 iterm-mcp/
 ├── pyproject.toml                # Python packaging configuration
-└── iterm_mcp_python/             # Main package
-    ├── __init__.py               # Package initialization
-    ├── core/                     # Core functionality
-    │   ├── __init__.py
-    │   ├── session.py            # iTerm session management
-    │   ├── terminal.py           # Terminal window/tab management
-    │   └── layouts.py            # Predefined layouts
-    ├── server/                   # Server implementations
-    │   ├── __init__.py
-    │   ├── main.py               # Entry point with option selection
-    │   ├── mcp_server.py         # Legacy MCP server implementation
-    │   └── fastmcp_server.py     # New FastMCP implementation
-    └── utils/                    # Utility functions
-        ├── __init__.py
-        └── logging.py            # Logging utilities
+├── core/                         # Core functionality
+│   ├── __init__.py
+│   ├── session.py                # iTerm session management
+│   ├── terminal.py               # Terminal window/tab management
+│   ├── layouts.py                # Predefined layouts
+│   ├── agents.py                 # Agent/team registry
+│   └── models.py                 # Pydantic request/response models
+├── iterm_mcpy/                   # Server implementations
+│   ├── __init__.py
+│   ├── fastmcp_server.py         # FastMCP implementation (recommended)
+│   ├── grpc_server.py            # gRPC server implementation
+│   ├── grpc_client.py            # gRPC client for programmatic access
+│   └── iterm_mcp_pb2*.py         # Generated protobuf code
+├── protos/                       # Protocol buffer definitions
+│   └── iterm_mcp.proto
+├── utils/                        # Utility functions
+│   ├── __init__.py
+│   └── logging.py                # Logging utilities
+└── tests/                        # Test suite
 ```
 
 ## Development Setup
@@ -294,39 +298,137 @@ async def my_advanced_script():
 asyncio.run(my_advanced_script())
 ```
 
+#### Hierarchical team orchestration (CEO -> Team Leads -> ICs)
+
+The layout manager and MCP tools now understand hierarchical pane specs that include
+team/agent metadata. Pane titles are derived automatically (e.g., `Team Leads :: TL-Backend`),
+and the MCP servers will register the agents and teams for you.
+
+```python
+# Create a 2x2 grid with explicit team/agent hierarchy
+session_map = await layout_manager.create_layout(
+    layout_type=LayoutType.QUAD,
+    pane_hierarchy=[
+        {"team": "Executive", "agent": "CEO"},
+        {"team": "Team Leads", "agent": "TL-Frontend"},
+        {"team": "Team Leads", "agent": "TL-Backend"},
+        {"team": "ICs", "agent": "IC-Oncall"},
+    ],
+)
+
+# When using the FastMCP or gRPC CreateSessions APIs the same hierarchy is
+# auto-registered in AgentRegistry:
+# create_sessions(layout="quad", session_configs=[...])
+
+# Target panes by hierarchy and send cascading messages
+await select_panes_by_hierarchy([
+    {"team": "Team Leads", "agent": "TL-Frontend"}
+])
+
+await send_hierarchical_message(
+    targets=[
+        {"team": "Team Leads", "message": "Share updates for the CEO."},
+        {"team": "Team Leads", "agent": "TL-Backend", "message": "Ship the API fixes."},
+        {"team": "ICs", "agent": "IC-Oncall", "message": "Monitor logs for regressions."},
+    ],
+    broadcast="CEO broadcast: align on launch goals.",
+)
+```
+
 ## MCP Tools and Resources
 
 The FastMCP implementation provides the following:
 
-### Tools
-- `list_sessions` - List all available terminal sessions
-- `focus_session` - Focus on a specific terminal session
-- `create_layout` - Create a new terminal layout with named sessions
-- `write_to_terminal` - Write a command to a terminal session (with option to type without executing)
-- `read_terminal_output` - Read output from a terminal session
-- `send_control_character` - Send a control character to a terminal session (Ctrl+C, Ctrl+D, etc.)
-- `send_special_key` - Send a special key to a terminal session (Enter, Tab, Escape, Arrow keys, etc.)
+### Session Management Tools
+
+- `list_sessions` - List all available terminal sessions (with optional `agents_only` filter)
+- `set_active_session` - Set the active session for subsequent operations (with optional `focus` to bring to foreground)
+- `create_sessions` - Create multiple sessions with layout and agent registration
 - `check_session_status` - Check if a session is currently processing a command
-- `get_session_by_persistent_id` - Get a session by its persistent ID
-- `set_session_max_lines` - Set the maximum number of lines to retrieve for a session
-- `start_monitoring_session` - Start real-time monitoring for a terminal session
-- `stop_monitoring_session` - Stop real-time monitoring for a terminal session
-- `list_persistent_sessions` - List all persistent sessions available for reconnection
+
+### Command Execution Tools
+
+- `write_to_sessions` - Write to multiple sessions in parallel with targeting
+- `read_sessions` - Read from multiple sessions in parallel with filtering
+- `send_control_character` - Send a control character (Ctrl+C, Ctrl+D, etc.)
+- `send_special_key` - Send a special key (Enter, Tab, Escape, Arrow keys, etc.)
+
+### Agent & Team Management
+
+- `register_agent` - Register a named agent bound to a session
+- `list_agents` - List all registered agents (optionally filtered by team)
+- `remove_agent` - Remove an agent registration
+- `create_team` - Create a new team for grouping agents
+- `list_teams` - List all teams
+- `remove_team` - Remove a team
+- `assign_agent_to_team` - Add an agent to a team
+- `remove_agent_from_team` - Remove an agent from a team
+
+### Orchestration Tools
+
+- `orchestrate_playbook` - Execute a high-level playbook (layout + commands + cascade + reads)
+- `send_cascade_message` - Send priority-based cascading messages to agents/teams
+- `select_panes_by_hierarchy` - Resolve panes by team/agent hierarchy
+- `send_hierarchical_message` - Send cascading messages using hierarchical specs
+
+### Session Modification Tools
+
+- `modify_sessions` - Modify multiple sessions at once (appearance, focus, active state)
+
+The modification tool allows:
+
+- **set_active** - Set session as the active session for subsequent operations
+- **focus** - Bring session to the foreground in iTerm
+- **background_color** - RGB values for the session background
+- **tab_color** - RGB values for the iTerm tab indicator
+- **cursor_color** - RGB values for the cursor
+- **badge** - Text badge displayed in the session (supports emoji)
+- **reset** - Reset all colors to defaults
+
+Example:
+
+```json
+{
+  "modifications": [
+    {
+      "agent": "claude-1",
+      "focus": true,
+      "set_active": true,
+      "tab_color": {"red": 100, "green": 200, "blue": 255},
+      "badge": "🤖 Claude-1"
+    },
+    {
+      "agent": "claude-2",
+      "background_color": {"red": 40, "green": 30, "blue": 30},
+      "tab_color": {"red": 255, "green": 150, "blue": 100}
+    }
+  ]
+}
+```
+
+### Monitoring Tools
+
+- `start_monitoring_session` - Start real-time monitoring for a session
+- `stop_monitoring_session` - Stop real-time monitoring for a session
 
 ### Resources
+
 - `terminal://{session_id}/output` - Get the output from a terminal session
 - `terminal://{session_id}/info` - Get information about a terminal session
 - `terminal://sessions` - Get a list of all terminal sessions
+- `agents://all` - Get a list of all registered agents
+- `teams://all` - Get a list of all teams
 
 ### Prompts
-- `monitor_terminal` - Prompt for monitoring a terminal session
-- `execute_command` - Prompt for executing a command and analyzing the output
 
-## Parallel Multi-Agent Orchestration
+- `orchestrate_agents` - Prompt for orchestrating multiple agents
+- `monitor_team` - Prompt for monitoring a team of agents
+
+## Multi-Agent Orchestration
 
 The iTerm MCP server supports coordinating multiple Claude Code instances through named agents, teams, and parallel session operations.
 
-### Agent & Team Management
+### Agent & Team Concepts
 
 Agents bind a name to an iTerm session, enabling targeted communication. Teams group agents for broadcast operations.
 
@@ -343,21 +445,29 @@ create_team(name="backend", description="Backend developers")
 list_agents(team="frontend")  # Returns alice and bob
 ```
 
-### New MCP Tools for Parallel Operations
+### Playbook Orchestration
 
-- `register_agent` - Register a named agent bound to a session
-- `list_agents` - List all registered agents (optionally filtered by team)
-- `remove_agent` - Remove an agent registration
-- `create_team` - Create a new team for grouping agents
-- `list_teams` - List all teams
-- `remove_team` - Remove a team
-- `assign_agent_to_team` - Add an agent to a team
-- `remove_agent_from_team` - Remove an agent from a team
-- `set_active_session` - Set active session by ID, name, or agent
-- `write_to_sessions` - Write to multiple sessions in parallel
-- `read_sessions` - Read from multiple sessions in parallel
-- `create_sessions` - Create multiple sessions with layout in one call
-- `send_cascade_message` - Send priority-based cascading messages
+FastMCP now exposes an `orchestrate_playbook` tool (and matching `OrchestratePlaybook` gRPC method) so you can define multi-team workflows once and execute them with a single request:
+
+1. **Create a layout** with `CreateSessionsRequest` (pane names, optional agent/team assignment, initial commands).
+2. **Run command blocks** defined as `PlaybookCommand` entries (parallel flags + `SessionMessage` targets).
+3. **Fan out cascades** via `CascadeMessageRequest` to broadcast, team, or agent recipients with deduplication.
+4. **Monitor results** using a `ReadSessionsRequest` to collect outputs across teams.
+
+Example payload:
+
+```json
+{
+  "playbook": {
+    "layout": {"sessions": [{"name": "Ops"}, {"name": "QA"}], "layout": "VERTICAL_SPLIT"},
+    "commands": [
+      {"name": "bootstrap", "messages": [{"content": "echo ready", "targets": [{"name": "Ops"}]}]}
+    ],
+    "cascade": {"broadcast": "Deploying new build"},
+    "reads": {"targets": [{"team": "qa"}], "parallel": true}
+  }
+}
+```
 
 ### Parallel Session Operations
 
@@ -454,11 +564,56 @@ Agents and teams are persisted to JSONL files in `~/.iterm_mcp_logs/`:
 
 ## Testing
 
-Run the tests with:
+The project includes a comprehensive test suite with 98+ passing tests covering:
+- Core session and terminal management
+- Agent and team orchestration
+- gRPC server and client functionality
+- Command output tracking
+- Model validation
+- Logging infrastructure
 
+### Running Tests
+
+Run all tests (Linux/macOS):
 ```bash
-python -m unittest discover tests
+python -m pytest tests/ -v
 ```
+
+Run tests with coverage:
+```bash
+python -m pytest tests/ --cov=core --cov=iterm_mcpy --cov=utils --cov-report=term-missing
+```
+
+Run specific test files:
+```bash
+python -m pytest tests/test_models.py -v
+python -m pytest tests/test_agent_registry.py -v
+```
+
+### Test Categories
+
+**Unit Tests** (run on all platforms):
+- `test_models.py` - Pydantic model validation
+- `test_agent_registry.py` - Agent/team management
+- `test_command_output_tracking.py` - Command tracking logic
+- `test_grpc_smoke.py` - gRPC service smoke tests
+- `test_grpc_client.py` - gRPC client tests
+
+**Integration Tests** (require macOS + iTerm2):
+- `test_basic_functionality.py` - Core session operations
+- `test_advanced_features.py` - Monitoring, layouts, etc.
+- `test_line_limits.py` - Output truncation
+- `test_logging.py` - Logging infrastructure
+- `test_persistent_session.py` - Session persistence
+
+### Development
+
+Install development dependencies:
+```bash
+pip install -e ".[dev]"
+```
+
+This includes pytest, pytest-cov, black, mypy, and isort for testing and code quality.
 
 ## Logging and Monitoring
 
