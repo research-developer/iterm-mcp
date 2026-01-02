@@ -7,8 +7,9 @@ import os
 import re
 import sys
 import uuid
+from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Pattern, Union, Any
+from typing import Any, Dict, List, Optional, Pattern, Union
 
 
 class ItermSessionLogger:
@@ -45,6 +46,13 @@ class ItermSessionLogger:
         self.session_name = session_name
         self.persistent_id = persistent_id
         self.max_snapshot_lines = max_snapshot_lines
+
+        # Telemetry counters
+        self.command_count = 0
+        self.output_line_count = 0
+        self.recent_errors: deque[str] = deque(maxlen=20)
+        self.last_command_at: Optional[str] = None
+        self.last_output_at: Optional[str] = None
         
         # Set up logging directory
         self.log_dir = log_dir or os.path.expanduser("~/.iterm_mcp_logs")
@@ -114,6 +122,9 @@ class ItermSessionLogger:
         # Mark the current position in latest_output as the last command
         self._last_command_index = len(self.latest_output)
 
+        self.command_count += 1
+        self.last_command_at = datetime.datetime.utcnow().isoformat()
+
         self.logger.info(f"COMMAND: {command}")
     
     def add_output_filter(self, pattern: str) -> None:
@@ -164,6 +175,9 @@ class ItermSessionLogger:
         # Store in latest output cache (up to max_snapshot_lines)
         lines = output.split('\n')
         self.latest_output.extend(lines)
+
+        self.output_line_count += len(lines)
+        self.last_output_at = datetime.datetime.utcnow().isoformat()
         
         # If we have more lines than max_snapshot_lines, move extras to overflow
         if len(self.latest_output) > self.max_snapshot_lines:
@@ -198,6 +212,12 @@ class ItermSessionLogger:
                 else:
                     # Debug log showing filtered out content
                     self.logger.debug(f"FILTERED: {line}")
+
+    def log_error(self, message: str) -> None:
+        """Capture an error for telemetry while logging it."""
+
+        self.recent_errors.appendleft(message)
+        self.logger.error(message)
     
     def log_control_character(self, character: str) -> None:
         """Log a control character sent to the session.
@@ -576,3 +596,29 @@ class ItermLogManager:
             logger.max_snapshot_lines = max_lines
             return True
         return False
+
+    def record_session_error(self, session_id: str, message: str) -> None:
+        """Record an error against a session logger when available."""
+
+        logger = self.session_loggers.get(session_id)
+        if logger:
+            logger.log_error(message)
+
+    def get_session_telemetry(self) -> Dict[str, Dict[str, Any]]:
+        """Return lightweight telemetry snapshots for all managed sessions."""
+
+        telemetry: Dict[str, Dict[str, Any]] = {}
+
+        for session_id, logger in self.session_loggers.items():
+            telemetry[session_id] = {
+                "session_id": session_id,
+                "session_name": logger.session_name,
+                "persistent_id": logger.persistent_id,
+                "command_count": logger.command_count,
+                "output_line_count": logger.output_line_count,
+                "recent_errors": list(logger.recent_errors),
+                "last_command_at": logger.last_command_at,
+                "last_output_at": logger.last_output_at,
+            }
+
+        return telemetry

@@ -21,6 +21,7 @@ from core.layouts import LayoutManager, LayoutType
 from core.session import ItermSession
 from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage, SendTarget
+from utils.telemetry import TelemetryEmitter
 from core.tags import SessionTagLockManager, FocusCooldownManager
 from core.feedback import (
     FeedbackCategory,
@@ -76,6 +77,8 @@ from core.models import (
 _terminal: Optional[ItermTerminal] = None
 _logger: Optional[logging.Logger] = None
 _agent_registry: Optional[AgentRegistry] = None
+_telemetry: Optional[TelemetryEmitter] = None
+_telemetry_server_task: Optional[asyncio.Task] = None
 _notification_manager: Optional["NotificationManager"] = None
 _tag_lock_manager: Optional[SessionTagLockManager] = None
 _focus_cooldown: Optional[FocusCooldownManager] = None
@@ -243,6 +246,14 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         agent_registry = AgentRegistry(lock_manager=lock_manager)
         logger.info("Agent registry initialized successfully")
 
+        # Initialize telemetry emitter
+        logger.info("Initializing telemetry emitter...")
+        telemetry = TelemetryEmitter(
+            log_manager=getattr(terminal, "log_manager", None),
+            agent_registry=agent_registry,
+        )
+        logger.info("Telemetry emitter initialized successfully")
+
         # Initialize notification manager
         logger.info("Initializing notification manager...")
         notification_manager = NotificationManager()
@@ -262,10 +273,11 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         logger.info("Feedback system initialized successfully")
 
         # Set global references for resources
-        global _terminal, _logger, _agent_registry, _notification_manager
+        global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
         _logger = logger
         _agent_registry = agent_registry
+        _telemetry = telemetry
         _notification_manager = notification_manager
         global _tag_lock_manager, _focus_cooldown
         _tag_lock_manager = lock_manager
@@ -282,6 +294,7 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "terminal": terminal,
             "layout_manager": layout_manager,
             "agent_registry": agent_registry,
+            "telemetry": telemetry,
             "notification_manager": notification_manager,
             "tag_lock_manager": lock_manager,
             "focus_cooldown": focus_cooldown,
@@ -383,6 +396,51 @@ def check_condition(content: str, condition: Optional[str]) -> bool:
         return bool(re.search(condition, content))
     except re.error:
         return False
+
+
+async def _start_telemetry_server(port: int, duration: int = 300) -> str:
+    """Start a lightweight HTTP server that streams telemetry JSON."""
+
+    if _telemetry is None or _terminal is None:
+        raise RuntimeError("Telemetry not initialized")
+
+    global _telemetry_server_task
+
+    if _telemetry_server_task:
+        _telemetry_server_task.cancel()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await _terminal.get_sessions()
+            payload = _telemetry.dashboard_state(_terminal)
+            body = json.dumps(payload, indent=2)
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body.encode())}\r\n"
+                "Connection: close\r\n\r\n"
+                f"{body}"
+            )
+            writer.write(response.encode())
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def serve() -> None:
+        server = await asyncio.start_server(handle, "0.0.0.0", port)
+        try:
+            async with server:
+                await asyncio.wait_for(server.serve_forever(), timeout=duration)
+        except asyncio.TimeoutError:
+            # Normal shutdown after duration
+            pass
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    _telemetry_server_task = asyncio.create_task(serve())
+    return f"Telemetry web dashboard running at http://localhost:{port} for {duration}s"
 
 
 async def notify_lock_request(
@@ -2838,6 +2896,48 @@ async def get_feedback_config(
 
     except Exception as e:
         logger.error(f"Error with feedback config: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# TELEMETRY TOOL AND RESOURCE
+# ============================================================================
+
+@mcp.tool()
+async def start_telemetry_dashboard(
+    ctx: Context,
+    port: int = 9999,
+    duration_seconds: int = 300,
+) -> str:
+    """Start a lightweight web server that streams telemetry JSON for external dashboards.
+
+    Args:
+        port: Port to run the telemetry server on (default: 9999)
+        duration_seconds: How long to keep the server running (default: 300)
+    """
+    telemetry: TelemetryEmitter = ctx.request_context.lifespan_context["telemetry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        message = await _start_telemetry_server(port=port, duration=duration_seconds)
+        logger.info(message)
+        return json.dumps({"status": "started", "message": message}, indent=2)
+    except Exception as e:
+        logger.error(f"Error starting telemetry server: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.resource("telemetry://dashboard")
+async def telemetry_dashboard() -> str:
+    """Get the current telemetry dashboard state as JSON."""
+    if _terminal is None or _logger is None or _telemetry is None:
+        return json.dumps({"error": "Telemetry not initialized"}, indent=2)
+
+    try:
+        state = _telemetry.dashboard_state(_terminal)
+        return json.dumps(state, indent=2)
+    except Exception as e:
+        _logger.error(f"Error getting telemetry dashboard: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
 

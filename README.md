@@ -29,6 +29,7 @@ See [EPIC_STATUS.md](EPIC_STATUS.md) for detailed implementation status.
 - Multiple session creation and parallel command execution
 - Background process execution and status tracking
 - Control character support (Ctrl+C, etc.)
+- Lightweight telemetry with MCP resource + optional dashboard for pane and team health (see [docs/telemetry.md](docs/telemetry.md))
 
 ## Requirements
 
