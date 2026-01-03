@@ -1,11 +1,22 @@
 """Session tagging and locking utilities."""
 
 import time
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 
 # Default cooldown period in seconds
 DEFAULT_FOCUS_COOLDOWN_SECONDS = 5.0
+
+
+@dataclass
+class LockInfo:
+    """Information about a session lock."""
+
+    owner: str
+    locked_at: datetime = field(default_factory=datetime.now)
+    pending_requests: Set[str] = field(default_factory=set)
 
 
 class FocusCooldownManager:
@@ -106,7 +117,7 @@ class SessionTagLockManager:
 
     def __init__(self) -> None:
         self._tags: Dict[str, Set[str]] = {}
-        self._locks: Dict[str, str] = {}
+        self._locks: Dict[str, LockInfo] = {}
 
     # ---------------------- Tag management ---------------------- #
     @staticmethod
@@ -148,21 +159,61 @@ class SessionTagLockManager:
         """Get tags for a session."""
         return sorted(self._tags.get(session_id, set()))
 
+    def has_tag(self, session_id: str, tag: str) -> bool:
+        """Check if a session has a specific tag."""
+        return tag.strip() in self._tags.get(session_id, set())
+
+    def has_any_tags(self, session_id: str, tags: List[str]) -> bool:
+        """Check if a session has any of the specified tags (OR match)."""
+        session_tags = self._tags.get(session_id, set())
+        check_tags = self._normalize_tags(tags)
+        return bool(session_tags & check_tags)
+
+    def has_all_tags(self, session_id: str, tags: List[str]) -> bool:
+        """Check if a session has all of the specified tags (AND match)."""
+        session_tags = self._tags.get(session_id, set())
+        check_tags = self._normalize_tags(tags)
+        return check_tags <= session_tags
+
+    def sessions_with_tag(self, tag: str) -> List[str]:
+        """Get all session IDs that have a specific tag."""
+        tag = tag.strip()
+        return [sid for sid, tags in self._tags.items() if tag in tags]
+
+    def sessions_with_tags(
+        self, tags: List[str], match_all: bool = False
+    ) -> List[str]:
+        """Get all session IDs that match the specified tags.
+
+        Args:
+            tags: List of tags to match
+            match_all: If True, session must have ALL tags. If False, ANY tag matches.
+
+        Returns:
+            List of session IDs that match the criteria
+        """
+        if match_all:
+            return [sid for sid in self._tags if self.has_all_tags(sid, tags)]
+        else:
+            return [sid for sid in self._tags if self.has_any_tags(sid, tags)]
+
     # ---------------------- Lock management --------------------- #
     def lock_session(self, session_id: str, agent: str) -> Tuple[bool, Optional[str]]:
         """Lock a session for an agent. Returns (acquired, current_owner)."""
-        owner = self._locks.get(session_id)
-        if owner is None or owner == agent:
-            self._locks[session_id] = agent
+        lock_info = self._locks.get(session_id)
+        if lock_info is None:
+            self._locks[session_id] = LockInfo(owner=agent)
             return True, agent
-        return False, owner
+        if lock_info.owner == agent:
+            return True, agent
+        return False, lock_info.owner
 
     def unlock_session(self, session_id: str, agent: Optional[str] = None) -> bool:
         """Unlock a session if unlocked or owned by the provided agent."""
-        owner = self._locks.get(session_id)
-        if owner is None:
+        lock_info = self._locks.get(session_id)
+        if lock_info is None:
             return True
-        if agent is None or agent == owner:
+        if agent is None or agent == lock_info.owner:
             self._locks.pop(session_id, None)
             return True
         return False
@@ -173,27 +224,82 @@ class SessionTagLockManager:
 
     def lock_owner(self, session_id: str) -> Optional[str]:
         """Get lock owner for a session."""
+        lock_info = self._locks.get(session_id)
+        return lock_info.owner if lock_info else None
+
+    def get_lock_info(self, session_id: str) -> Optional[LockInfo]:
+        """Get full lock info for a session."""
         return self._locks.get(session_id)
 
-    def release_locks_by_agent(self, agent: str) -> None:
-        """Release all locks held by an agent (e.g., on termination)."""
-        to_release = [sid for sid, owner in self._locks.items() if owner == agent]
+    def get_locked_at(self, session_id: str) -> Optional[datetime]:
+        """Get the timestamp when a session was locked."""
+        lock_info = self._locks.get(session_id)
+        return lock_info.locked_at if lock_info else None
+
+    def add_access_request(self, session_id: str, requester: str) -> bool:
+        """Add a pending access request from an agent.
+
+        Returns True if the request was added (session is locked by another agent).
+        """
+        lock_info = self._locks.get(session_id)
+        if lock_info is None or lock_info.owner == requester:
+            return False
+        lock_info.pending_requests.add(requester)
+        return True
+
+    def remove_access_request(self, session_id: str, requester: str) -> bool:
+        """Remove a pending access request."""
+        lock_info = self._locks.get(session_id)
+        if lock_info and requester in lock_info.pending_requests:
+            lock_info.pending_requests.discard(requester)
+            return True
+        return False
+
+    def get_pending_requests(self, session_id: str) -> List[str]:
+        """Get list of agents waiting for access to a session."""
+        lock_info = self._locks.get(session_id)
+        return sorted(lock_info.pending_requests) if lock_info else []
+
+    def get_pending_request_count(self, session_id: str) -> int:
+        """Get count of pending access requests for a session."""
+        lock_info = self._locks.get(session_id)
+        return len(lock_info.pending_requests) if lock_info else 0
+
+    def release_locks_by_agent(self, agent: str) -> List[str]:
+        """Release all locks held by an agent (e.g., on termination).
+
+        Returns list of session IDs that were unlocked.
+        """
+        to_release = [sid for sid, lock in self._locks.items() if lock.owner == agent]
         for sid in to_release:
             self._locks.pop(sid, None)
+        return to_release
+
+    def get_locks_by_agent(self, agent: str) -> List[str]:
+        """Get all session IDs locked by a specific agent."""
+        return [sid for sid, lock in self._locks.items() if lock.owner == agent]
+
+    def get_all_locks(self) -> Dict[str, str]:
+        """Get all locks as a dict of session_id -> owner."""
+        return {sid: lock.owner for sid, lock in self._locks.items()}
 
     def check_permission(self, session_id: str, requester: Optional[str]) -> Tuple[bool, Optional[str]]:
         """Return (allowed, owner) for a write attempt."""
-        owner = self._locks.get(session_id)
-        if owner is None:
+        lock_info = self._locks.get(session_id)
+        if lock_info is None:
             return True, None
-        if requester and requester == owner:
-            return True, owner
-        return False, owner
+        if requester and requester == lock_info.owner:
+            return True, lock_info.owner
+        return False, lock_info.owner
 
     # ---------------------- Combined info ----------------------- #
-    def describe(self, session_id: str) -> Dict[str, Union[List[str], Optional[str]]]:
-        """Return tags and lock owner for a session."""
+    def describe(self, session_id: str) -> Dict[str, Union[List[str], Optional[str], bool, int]]:
+        """Return full tags and lock info for a session."""
+        lock_info = self._locks.get(session_id)
         return {
             "tags": self.get_tags(session_id),
-            "locked_by": self.lock_owner(session_id),
+            "locked": lock_info is not None,
+            "locked_by": lock_info.owner if lock_info else None,
+            "locked_at": lock_info.locked_at.isoformat() if lock_info else None,
+            "pending_access_requests": len(lock_info.pending_requests) if lock_info else 0,
         }
