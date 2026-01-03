@@ -829,6 +829,135 @@ Sessions maintain persistent identities across restarts and reconnection:
 - State is preserved even after chat or connection interruptions
 - Session output history is available across reconnections
 
+## OpenTelemetry Integration
+
+The iTerm MCP server includes optional OpenTelemetry integration for production-grade observability, enabling tracing of agent operations, message delivery, and command execution.
+
+### Installation
+
+Install with OpenTelemetry support:
+
+```bash
+pip install -e ".[otel]"
+```
+
+This installs:
+- `opentelemetry-api` - Core tracing API
+- `opentelemetry-sdk` - Tracing SDK
+- `opentelemetry-exporter-otlp` - OTLP exporter for backends like Jaeger
+- `opentelemetry-semantic-conventions` - Standard attribute names
+
+### Configuration
+
+Configure via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `true` | Enable/disable tracing |
+| `OTEL_SERVICE_NAME` | `iterm-mcp` | Service name in traces |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use insecure (HTTP) connection to collector |
+| `OTEL_TRACES_EXPORTER` | `otlp` | Exporter type (`otlp`, `console`, `none`) |
+| `OTEL_CONSOLE_EXPORTER` | `false` | Enable console exporter for debugging |
+| `OTEL_ENVIRONMENT` | `development` | Deployment environment tag |
+
+### Traced Operations
+
+The following operations are automatically traced:
+
+**Session Operations:**
+- `session.send_text` - Text sent to sessions
+- `session.execute_command` - Command execution
+- `session.get_screen_contents` - Screen content retrieval
+- `session.send_control_character` - Control character sends
+- `session.send_special_key` - Special key sends
+
+**Agent/Team Operations:**
+- `agent_registry.register_agent` - Agent registration
+- `agent_registry.remove_agent` - Agent removal
+- `agent_registry.create_team` - Team creation
+- `agent_registry.remove_team` - Team removal
+- `agent_registry.resolve_cascade_targets` - Cascade message resolution
+
+**RPC/Service Operations:**
+- `execute_create_sessions` - Create and initialize new sessions
+- `execute_write_request` - Write data or commands to sessions
+- `execute_read_request` - Read data or screen contents from sessions
+- `execute_cascade_request` - Execute cascade operations across agents/teams
+
+Each span includes relevant attributes like `agent.name`, `session.id`, `team.name`, and operation-specific metadata.
+
+### Connecting to Observability Backends
+
+#### Jaeger
+
+Run Jaeger with OTLP support:
+
+```bash
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  jaegertracing/all-in-one:latest
+```
+
+Then start the server:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 python -m iterm_mcpy.fastmcp_server
+```
+
+View traces at http://localhost:16686
+
+#### Grafana Tempo
+
+Configure the OTLP endpoint to your Tempo instance:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317 python -m iterm_mcpy.fastmcp_server
+```
+
+#### Console Debugging
+
+For local debugging without a backend:
+
+```bash
+OTEL_CONSOLE_EXPORTER=true python -m iterm_mcpy.fastmcp_server
+```
+
+This prints spans to stdout.
+
+### Programmatic Usage
+
+Use the tracing utilities in your own code:
+
+```python
+from utils.otel import (
+    init_tracing,
+    trace_operation,
+    add_span_attributes,
+    add_span_event,
+    create_span,
+)
+
+# Initialize tracing at startup
+init_tracing()
+
+# Use decorator for automatic tracing
+@trace_operation("my_operation")
+async def my_function(agent: str, session_id: str):
+    add_span_attributes(custom_attr="value")
+    # ... do work ...
+    add_span_event("checkpoint_reached", {"step": 1})
+
+# Or use context manager for manual spans
+with create_span("custom_span", attributes={"key": "value"}):
+    # ... traced code ...
+```
+
+### Graceful Fallback
+
+If OpenTelemetry is not installed, the server uses no-op implementations that have zero overhead. This allows the same code to run with or without observability enabled.
+
 ## Relationship to Claude Code MCP
 
 This project provides **multi-agent orchestration infrastructure** that complements tools like [@steipete/claude-code-mcp](https://github.com/steipete/claude-code-mcp):
