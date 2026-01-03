@@ -871,12 +871,13 @@ def _format_compact_session(session_info: SessionInfo) -> str:
     name = session_info.name.ljust(12)
     agent = (session_info.agent or "").ljust(12)
 
-    # Lock status with emoji
+    # Lock status with emoji (truncate long agent names to 20 chars)
     if session_info.locked and session_info.locked_by:
-        lock_status = f"🔒{session_info.locked_by}"
+        owner = session_info.locked_by[:20]
+        lock_status = f"🔒{owner}"
     else:
         lock_status = "🔓"
-    lock_status = lock_status.ljust(14)
+    lock_status = lock_status.ljust(24)
 
     # Tags in brackets
     if session_info.tags:
@@ -939,6 +940,12 @@ async def list_sessions(
         all_filter_tags.append(tag)
     if tags:
         all_filter_tags.extend(tags)
+
+    # Validate lock_manager availability when tag/lock filters are used
+    requires_lock_manager = all_filter_tags or locked is not None or locked_by is not None
+    if requires_lock_manager and lock_manager is None:
+        logger.warning("Tag/lock filtering requested but tag_lock_manager is not available")
+        return "Error: Tag and lock filtering requires the tag_lock_manager to be initialized"
 
     for session in sessions:
         agent_obj = agent_registry.get_agent_by_session(session.id)
@@ -1138,8 +1145,9 @@ async def list_my_locks(
                     session = await terminal.get_session_by_id(session_id)
                     if session:
                         session_name = session.name
-                except Exception:
-                    pass
+                except Exception as e:
+                    if logger:
+                        logger.debug(f"Could not get session name for {session_id}: {e}")
 
             locks.append({
                 "session_id": session_id,

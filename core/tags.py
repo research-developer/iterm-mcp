@@ -1,8 +1,12 @@
-"""Session tagging and locking utilities."""
+"""Session tagging and locking utilities.
+
+Note: SessionTagLockManager is NOT thread-safe. If concurrent access from
+multiple threads is expected, external synchronization should be used.
+"""
 
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 
@@ -10,12 +14,21 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 DEFAULT_FOCUS_COOLDOWN_SECONDS = 5.0
 
 
+def _utc_now() -> datetime:
+    """Return the current UTC time as a timezone-aware datetime."""
+    return datetime.now(timezone.utc)
+
+
 @dataclass
 class LockInfo:
-    """Information about a session lock."""
+    """Information about a session lock.
+
+    Note: The pending_requests set is not thread-safe. Concurrent modifications
+    from multiple threads may lead to race conditions.
+    """
 
     owner: str
-    locked_at: datetime = field(default_factory=datetime.now)
+    locked_at: datetime = field(default_factory=_utc_now)
     pending_requests: Set[str] = field(default_factory=set)
 
 

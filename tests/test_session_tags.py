@@ -569,5 +569,121 @@ class TestDescribeSession(unittest.TestCase):
         self.assertEqual(info["pending_access_requests"], 0)
 
 
+class TestListMyLocks(unittest.TestCase):
+    """Tests for get_locks_by_agent functionality (list_my_locks tool support)."""
+
+    def setUp(self):
+        self.manager = SessionTagLockManager()
+
+    def test_no_locks_by_agent(self):
+        """Agent with no locks returns empty list."""
+        result = self.manager.get_locks_by_agent("agent-a")
+        self.assertEqual(result, [])
+
+    def test_single_lock_by_agent(self):
+        """Agent with one lock returns that session."""
+        self.manager.lock_session("s1", "agent-a")
+        result = self.manager.get_locks_by_agent("agent-a")
+        self.assertEqual(result, ["s1"])
+
+    def test_multiple_locks_by_agent(self):
+        """Agent with multiple locks returns all sessions."""
+        self.manager.lock_session("s1", "agent-a")
+        self.manager.lock_session("s2", "agent-a")
+        self.manager.lock_session("s3", "agent-a")
+        result = self.manager.get_locks_by_agent("agent-a")
+        self.assertEqual(sorted(result), ["s1", "s2", "s3"])
+
+    def test_locks_by_different_agents(self):
+        """Each agent only sees their own locks."""
+        self.manager.lock_session("s1", "agent-a")
+        self.manager.lock_session("s2", "agent-b")
+        self.manager.lock_session("s3", "agent-a")
+
+        result_a = self.manager.get_locks_by_agent("agent-a")
+        result_b = self.manager.get_locks_by_agent("agent-b")
+
+        self.assertEqual(sorted(result_a), ["s1", "s3"])
+        self.assertEqual(result_b, ["s2"])
+
+    def test_lock_info_for_my_locks(self):
+        """Can get full lock info for each locked session."""
+        self.manager.lock_session("s1", "agent-a")
+        self.manager.add_access_request("s1", "agent-b")
+
+        locks = self.manager.get_locks_by_agent("agent-a")
+        for session_id in locks:
+            lock_info = self.manager.get_lock_info(session_id)
+            self.assertIsNotNone(lock_info)
+            self.assertEqual(lock_info.owner, "agent-a")
+            self.assertIsNotNone(lock_info.locked_at)
+
+    def test_get_all_locks(self):
+        """get_all_locks returns dict of session_id -> owner."""
+        self.manager.lock_session("s1", "agent-a")
+        self.manager.lock_session("s2", "agent-b")
+
+        all_locks = self.manager.get_all_locks()
+        self.assertEqual(all_locks, {"s1": "agent-a", "s2": "agent-b"})
+
+
+class TestListSessionsFiltering(unittest.TestCase):
+    """Integration tests for list_sessions filtering scenarios."""
+
+    def setUp(self):
+        self.manager = SessionTagLockManager()
+        # Set up a realistic scenario
+        self.manager.set_tags("s1", ["production", "critical"])
+        self.manager.set_tags("s2", ["staging"])
+        self.manager.set_tags("s3", ["production"])
+        self.manager.set_tags("s4", ["dev", "testing"])
+        self.manager.lock_session("s1", "agent-a")
+        self.manager.lock_session("s3", "agent-b")
+
+    def test_filter_by_single_tag(self):
+        """Filter sessions by a single tag."""
+        # Sessions with 'production' tag
+        result = self.manager.sessions_with_tag("production")
+        self.assertEqual(sorted(result), ["s1", "s3"])
+
+    def test_filter_by_multiple_tags_any(self):
+        """Filter sessions with any of the specified tags."""
+        result = self.manager.sessions_with_tags(["staging", "dev"], match_all=False)
+        self.assertEqual(sorted(result), ["s2", "s4"])
+
+    def test_filter_by_multiple_tags_all(self):
+        """Filter sessions with all of the specified tags."""
+        result = self.manager.sessions_with_tags(["production", "critical"], match_all=True)
+        self.assertEqual(result, ["s1"])
+
+    def test_filter_by_locked_status(self):
+        """Filter by locked status."""
+        locked_sessions = [sid for sid, _ in self.manager.get_all_locks().items()]
+        self.assertEqual(sorted(locked_sessions), ["s1", "s3"])
+
+    def test_filter_by_lock_owner(self):
+        """Filter sessions locked by a specific agent."""
+        result = self.manager.get_locks_by_agent("agent-a")
+        self.assertEqual(result, ["s1"])
+
+    def test_combined_tag_and_lock_filter(self):
+        """Combine tag and lock filtering."""
+        # Sessions with 'production' tag that are locked
+        production_sessions = set(self.manager.sessions_with_tag("production"))
+        locked_sessions = set(self.manager.get_all_locks().keys())
+        result = production_sessions & locked_sessions
+        self.assertEqual(result, {"s1", "s3"})
+
+    def test_empty_result_for_nonexistent_tag(self):
+        """Filter by tag that doesn't exist returns empty."""
+        result = self.manager.sessions_with_tag("nonexistent")
+        self.assertEqual(result, [])
+
+    def test_empty_result_for_nonexistent_lock_owner(self):
+        """Filter by agent that owns no locks returns empty."""
+        result = self.manager.get_locks_by_agent("nonexistent-agent")
+        self.assertEqual(result, [])
+
+
 if __name__ == "__main__":
     unittest.main()
