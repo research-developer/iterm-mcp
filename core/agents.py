@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Set, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from .models import SessionRole
+
 if TYPE_CHECKING:
     from .tags import SessionTagLockManager
 
@@ -22,10 +24,15 @@ class Agent(BaseModel):
     teams: List[str] = Field(default_factory=list, description="Teams this agent belongs to")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, str] = Field(default_factory=dict, description="Optional metadata")
+    role: Optional[SessionRole] = Field(default=None, description="Role assigned to this agent")
 
     def is_member_of(self, team: str) -> bool:
         """Check if agent is a member of the specified team."""
         return team in self.teams
+
+    def has_role(self, role: SessionRole) -> bool:
+        """Check if agent has the specified role."""
+        return self.role == role
 
 
 class Team(BaseModel):
@@ -158,7 +165,8 @@ class AgentRegistry:
         name: str,
         session_id: str,
         teams: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, str]] = None
+        metadata: Optional[Dict[str, str]] = None,
+        role: Optional[SessionRole] = None,
     ) -> Agent:
         """Register a new agent or update existing one.
 
@@ -167,6 +175,7 @@ class AgentRegistry:
             session_id: iTerm session ID
             teams: Optional list of team names
             metadata: Optional metadata dict
+            role: Optional role for this agent
 
         Returns:
             The created/updated Agent
@@ -175,7 +184,8 @@ class AgentRegistry:
             name=name,
             session_id=session_id,
             teams=teams or [],
-            metadata=metadata or {}
+            metadata=metadata or {},
+            role=role,
         )
         self._agents[name] = agent
         self._save_agents()
@@ -225,6 +235,19 @@ class AgentRegistry:
             self._save_agents()
             return True
         return False
+
+    def set_agent_role(self, agent_name: str, role: Optional[SessionRole]) -> bool:
+        """Set or clear the role for an agent. Returns True if successful."""
+        agent = self._agents.get(agent_name)
+        if agent:
+            agent.role = role
+            self._save_agents()
+            return True
+        return False
+
+    def get_agents_by_role(self, role: SessionRole) -> List[Agent]:
+        """Get all agents with a specific role."""
+        return [a for a in self._agents.values() if a.role == role]
 
     # ==================== Team Management ====================
 
