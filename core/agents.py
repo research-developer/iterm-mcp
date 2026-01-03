@@ -439,3 +439,141 @@ class AgentRegistry:
             if agent:
                 session_ids.append(agent.session_id)
         return session_ids
+
+    # ==================== State Persistence ====================
+
+    def save_state(self) -> Dict:
+        """Serialize registry state to a JSON-compatible dict.
+
+        Returns a complete snapshot of the registry state including
+        agents, teams, active session, and recent message history.
+        This can be used for checkpointing, crash recovery, or debugging.
+
+        Returns:
+            Dict containing serializable registry state
+        """
+        # Serialize agents
+        agents_state = {}
+        for name, agent in self._agents.items():
+            agents_state[name] = {
+                "name": agent.name,
+                "session_id": agent.session_id,
+                "teams": agent.teams,
+                "created_at": agent.created_at.isoformat(),
+                "metadata": agent.metadata
+            }
+
+        # Serialize teams
+        teams_state = {}
+        for name, team in self._teams.items():
+            teams_state[name] = {
+                "name": team.name,
+                "description": team.description,
+                "parent_team": team.parent_team,
+                "created_at": team.created_at.isoformat()
+            }
+
+        # Serialize recent message history (for deduplication state)
+        message_history = []
+        for record in list(self._message_history)[-100:]:  # Limit to last 100
+            message_history.append({
+                "content_hash": record.content_hash,
+                "recipients": record.recipients,
+                "timestamp": record.timestamp.isoformat()
+            })
+
+        return {
+            "agents": agents_state,
+            "teams": teams_state,
+            "active_session": self._active_session,
+            "message_history": message_history,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+
+    def load_state(self, state: Dict) -> None:
+        """Restore registry state from a saved state dict.
+
+        This replaces the current registry state with the state from
+        the checkpoint. Useful for crash recovery or session resumption.
+
+        Args:
+            state: Previously saved state dict from save_state()
+        """
+        # Clear current state
+        self._agents.clear()
+        self._teams.clear()
+        self._message_history.clear()
+
+        # Restore agents
+        agents_data = state.get("agents", {})
+        for name, agent_data in agents_data.items():
+            # Parse created_at if it's a string
+            created_at = agent_data.get("created_at")
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            elif created_at is None:
+                created_at = datetime.now(timezone.utc)
+
+            agent = Agent(
+                name=agent_data["name"],
+                session_id=agent_data["session_id"],
+                teams=agent_data.get("teams", []),
+                created_at=created_at,
+                metadata=agent_data.get("metadata", {})
+            )
+            self._agents[name] = agent
+
+        # Restore teams
+        teams_data = state.get("teams", {})
+        for name, team_data in teams_data.items():
+            created_at = team_data.get("created_at")
+            if isinstance(created_at, str):
+                created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            elif created_at is None:
+                created_at = datetime.now(timezone.utc)
+
+            team = Team(
+                name=team_data["name"],
+                description=team_data.get("description", ""),
+                parent_team=team_data.get("parent_team"),
+                created_at=created_at
+            )
+            self._teams[name] = team
+
+        # Restore active session
+        self._active_session = state.get("active_session")
+
+        # Restore message history
+        message_history = state.get("message_history", [])
+        for record_data in message_history:
+            timestamp = record_data.get("timestamp")
+            if isinstance(timestamp, str):
+                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            elif timestamp is None:
+                timestamp = datetime.now(timezone.utc)
+
+            record = MessageRecord(
+                content_hash=record_data["content_hash"],
+                recipients=record_data["recipients"],
+                timestamp=timestamp
+            )
+            self._message_history.append(record)
+
+        # Persist restored state to files
+        self._save_agents()
+        self._save_teams()
+
+    def get_state_summary(self) -> Dict:
+        """Get a brief summary of registry state for logging/debugging.
+
+        Returns:
+            Dict with key registry state info
+        """
+        return {
+            "agent_count": len(self._agents),
+            "team_count": len(self._teams),
+            "active_session": self._active_session,
+            "message_history_count": len(self._message_history),
+            "agents": list(self._agents.keys()),
+            "teams": list(self._teams.keys())
+        }
