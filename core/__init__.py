@@ -113,13 +113,23 @@ from .messaging import (
 
 # Type checking imports for IDE support
 if TYPE_CHECKING:
-    from .session import ItermSession
+    from .session import (
+        ItermSession,
+        ExpectResult,
+        ExpectTimeout,
+        ExpectError,
+        ExpectTimeoutError,
+    )
     from .terminal import ItermTerminal
     from .layouts import LayoutManager, LayoutType
 
 # Lazy loading for iterm2-dependent modules
 _lazy_modules = {
     'ItermSession': '.session',
+    'ExpectResult': '.session',
+    'ExpectTimeout': '.session',
+    'ExpectError': '.session',
+    'ExpectTimeoutError': '.session',
     'ItermTerminal': '.terminal',
     'LayoutManager': '.layouts',
     'LayoutType': '.layouts',
@@ -146,6 +156,11 @@ __all__ = [
     'ItermTerminal',
     'LayoutManager',
     'LayoutType',
+    # Expect-style pattern matching
+    'ExpectResult',
+    'ExpectTimeout',
+    'ExpectError',
+    'ExpectTimeoutError',
     # Agent management
     'Agent',
     'Team',
