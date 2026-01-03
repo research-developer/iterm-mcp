@@ -8,10 +8,8 @@ Tests cover:
 - Message serialization/deserialization
 """
 
-import asyncio
 import pytest
 from datetime import datetime, timezone
-from typing import Optional
 
 from core.messaging import (
     # Base types
@@ -21,21 +19,18 @@ from core.messaging import (
     TerminalCommand,
     TerminalOutput,
     TerminalReadRequest,
-    TerminalReadResponse,
     ControlCharacterMessage,
     SpecialKeyMessage,
     # Session messages
     SessionStatusRequest,
     SessionStatusResponse,
     SessionListRequest,
-    SessionListResponse,
     FocusSessionMessage,
     # Agent orchestration messages
     BroadcastNotification,
     AgentTaskRequest,
     AgentTaskResponse,
     WaitForAgentMessage,
-    WaitForAgentResponse,
     ErrorMessage,
     # Routing
     MessageRouter,
@@ -508,10 +503,11 @@ class TestMessageRouter:
         assert response1 is not None
         assert call_count == 1
 
-        # Second send of same content should be skipped
+        # Second send of same content should be skipped due to deduplication
         response2 = await router.send(cmd)
         assert response2 is None
-        assert call_count == 1  # Handler not called again
+        # Verify handler was NOT called again (would be 2 if dedup failed)
+        assert call_count == 1
 
     @pytest.mark.asyncio
     async def test_send_multi(self):

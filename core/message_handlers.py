@@ -12,7 +12,6 @@ import time
 from typing import Optional, TYPE_CHECKING
 
 from .messaging import (
-    message_handler,
     topic_handler,
     TerminalCommand,
     TerminalOutput,
@@ -26,11 +25,8 @@ from .messaging import (
     SessionListResponse,
     FocusSessionMessage,
     BroadcastNotification,
-    AgentTaskRequest,
-    AgentTaskResponse,
     WaitForAgentMessage,
     WaitForAgentResponse,
-    ErrorMessage,
 )
 from .models import SessionTarget, ReadTarget
 
@@ -77,11 +73,23 @@ class TerminalMessageHandlers:
     async def resolve_session(self, target: SessionTarget) -> Optional[str]:
         """Resolve a SessionTarget to a session ID.
 
+        Resolution order:
+        1. Direct session_id (if provided)
+        2. By session name
+        3. By agent name
+        4. By team name (returns first agent's session in the team,
+           sorted by agent registry order - typically registration order)
+
         Args:
             target: The session target specification
 
         Returns:
             Session ID if found, None otherwise
+
+        Note:
+            When resolving by team, returns the first agent's session.
+            For more control over which agent is selected, use explicit
+            agent targeting instead.
         """
         # Direct session ID
         if target.session_id:
@@ -99,7 +107,7 @@ class TerminalMessageHandlers:
             if agent:
                 return agent.session_id
 
-        # By team (returns first member)
+        # By team (returns first member's session for simplicity)
         if target.team:
             agents = self.agent_registry.list_agents(team=target.team)
             if agents:
@@ -143,14 +151,13 @@ class TerminalMessageHandlers:
             # Send the command
             await session.send_text(message.command, execute=message.execute)
 
-            # If waiting for completion, poll for output
-            output = ""
+            # Brief delay for command output when waiting for completion
+            # Note: 0.5s is a reasonable default; callers needing different
+            # timing should implement custom polling logic
             if message.wait_for_completion and message.execute:
-                await asyncio.sleep(0.5)  # Brief delay for command to start
-                output = await session.get_screen_contents()
-            else:
-                output = await session.get_screen_contents()
+                await asyncio.sleep(0.5)
 
+            output = await session.get_screen_contents()
             duration = time.time() - start_time
 
             return TerminalOutput(
@@ -496,7 +503,11 @@ class TerminalMessageHandlers:
                 correlation_id=message.message_id,
             )
 
-        # Poll for completion
+        # Poll for completion with fixed interval
+        # Note: 0.5s polling interval balances responsiveness with CPU usage.
+        # For high-frequency polling needs, consider implementing a custom
+        # wait mechanism with configurable intervals.
+        poll_interval = 0.5
         while True:
             elapsed = time.time() - start_time
             if elapsed >= message.timeout:
@@ -529,7 +540,7 @@ class TerminalMessageHandlers:
                     correlation_id=message.message_id,
                 )
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(poll_interval)
 
     def register_all(self, router: "MessageRouter") -> None:
         """Register all handlers with a message router.

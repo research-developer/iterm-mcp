@@ -37,8 +37,9 @@ Example usage:
 
 import asyncio
 import hashlib
+import json
 import uuid
-from abc import ABC
+from collections import OrderedDict
 from datetime import datetime, timezone
 from enum import Enum
 from typing import (
@@ -46,13 +47,10 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
-    Generic,
     List,
     Optional,
-    Set,
     Type,
     TypeVar,
-    Union,
 )
 
 from pydantic import BaseModel, Field
@@ -124,17 +122,16 @@ class AgentMessage(BaseModel):
         return self.message_id
 
     def content_hash(self) -> str:
-        """Create a hash of message content for deduplication."""
-        # Exclude timestamp and message_id from hash for content-based dedup
-        data = self.model_dump(exclude={"timestamp", "message_id"})
-        content = str(sorted(data.items()))
-        return hashlib.sha256(content.encode()).hexdigest()
+        """Create a hash of message content for deduplication.
 
-    model_config = {
-        "json_encoders": {
-            datetime: lambda v: v.isoformat(),
-        },
-    }
+        Uses JSON serialization with sorted keys to ensure consistent
+        hashing for nested dictionaries and complex data structures.
+        """
+        # Exclude timestamp and message_id from hash for content-based dedup
+        data = self.model_dump(exclude={"timestamp", "message_id"}, mode="json")
+        # Use json.dumps with sort_keys for consistent serialization of nested structures
+        content = json.dumps(data, sort_keys=True, default=str)
+        return hashlib.sha256(content.encode()).hexdigest()
 
 
 # ============================================================================
@@ -596,7 +593,8 @@ class MessageRouter:
             max_history: Maximum messages to track for deduplication
         """
         self._deduplicate = deduplicate
-        self._message_history: Set[str] = set()
+        # Use OrderedDict for FIFO eviction - keys are content hashes, values are True
+        self._message_history: OrderedDict[str, bool] = OrderedDict()
         self._max_history = max_history
         self._pending_responses: Dict[str, asyncio.Future] = {}
         self._lock = asyncio.Lock()
@@ -610,28 +608,32 @@ class MessageRouter:
 
         Args:
             message: The message to send
-            timeout: Optional timeout for waiting on response
+            timeout: Optional timeout in seconds for waiting on response.
+                Reserved for future use with async response patterns.
+                Currently handlers are invoked synchronously.
 
         Returns:
             Response message if a handler returns one, None otherwise
 
         Raises:
             ValueError: If no handlers are registered for the message type
-            TimeoutError: If timeout is exceeded waiting for response
+
+        Note:
+            The timeout parameter is reserved for future async response
+            patterns where handlers may return futures. Currently all
+            handlers are awaited directly.
         """
         # Check for deduplication
         if self._deduplicate:
             content_hash = message.content_hash()
             if content_hash in self._message_history:
                 return None  # Duplicate, skip
-            self._message_history.add(content_hash)
+            self._message_history[content_hash] = True
 
-            # Limit history size
-            if len(self._message_history) > self._max_history:
-                # Remove oldest entries (approximately)
-                excess = len(self._message_history) - self._max_history
-                for _ in range(excess):
-                    self._message_history.pop()
+            # Limit history size using FIFO eviction (oldest first)
+            while len(self._message_history) > self._max_history:
+                # popitem(last=False) removes the oldest (first-inserted) item
+                self._message_history.popitem(last=False)
 
         # Get handlers for this message type
         handlers = get_handlers(type(message))
@@ -681,10 +683,16 @@ class MessageRouter:
 
         Args:
             message: The message to send
-            timeout: Optional timeout
+            timeout: Optional timeout in seconds. Reserved for future use
+                with async response patterns. Currently handlers are
+                invoked synchronously.
 
         Returns:
             List of all responses from handlers
+
+        Note:
+            The timeout parameter is reserved for future async response
+            patterns where handlers may return futures.
         """
         handlers = get_handlers(type(message))
 
@@ -746,9 +754,10 @@ class MessageRouter:
             try:
                 await handler(notification)
                 delivered += 1
-            except Exception:
-                # Log but don't fail on notification errors
-                pass
+            except Exception as e:
+                # Log but don't fail on notification errors - pub/sub should be best-effort
+                import logging
+                logging.getLogger(__name__).debug(f"Topic handler error: {e}")
 
         return delivered
 
@@ -771,8 +780,10 @@ class MessageRouter:
             try:
                 await handler(notification)
                 delivered += 1
-            except Exception:
-                pass
+            except Exception as e:
+                # Log but don't fail on notification errors - pub/sub should be best-effort
+                import logging
+                logging.getLogger(__name__).debug(f"Broadcast handler error: {e}")
 
         return delivered
 
@@ -926,8 +937,11 @@ def deserialize_message(data: Dict[str, Any]) -> AgentMessage:
 
     Raises:
         ValueError: If message type is unknown
+
+    Note:
+        This function does not modify the input dict.
     """
-    type_name = data.pop("_type", None)
+    type_name = data.get("_type")
     if type_name is None:
         raise ValueError("Message data must include '_type' field")
 
@@ -935,7 +949,9 @@ def deserialize_message(data: Dict[str, Any]) -> AgentMessage:
     if message_class is None:
         raise ValueError(f"Unknown message type: {type_name}")
 
-    return message_class(**data)
+    # Create a copy without _type to avoid passing unknown field to Pydantic
+    message_data = {k: v for k, v in data.items() if k != "_type"}
+    return message_class(**message_data)
 
 
 def serialize_message(message: AgentMessage) -> Dict[str, Any]:
