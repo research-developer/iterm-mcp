@@ -40,40 +40,41 @@ The orchestrator role has the highest priority (1) and full permissions. Use thi
 #### DevOps
 For infrastructure and deployment tasks.
 
-**Default Tools:** `deploy`, `kubectl`, `docker`, `terraform`, `ansible`
+**Default Tools:** `docker`, `kubectl`, `terraform`, `ansible`, `aws`, `gcloud`, `az`
 **Restricted Tools:** None by default
 
 #### Builder
 For compilation and build tasks.
 
-**Default Tools:** `make`, `npm`, `cargo`, `gradle`, `cmake`
+**Default Tools:** `npm`, `yarn`, `pip`, `cargo`, `go`, `make`, `docker`, `git`
 **Restricted Tools:** None by default
 
 #### Debugger
 For debugging and troubleshooting.
 
-**Default Tools:** `gdb`, `lldb`, `strace`, `valgrind`
+**Default Tools:** `gdb`, `lldb`, `strace`, `dtrace`, `tail`, `grep`, `awk`, `jq`
 **Restricted Tools:** None by default
 
 #### Researcher
 For information gathering and research.
 
-**Default Tools:** `curl`, `wget`, `grep`, `find`
-**Restricted Tools:** Write operations by default
+**Default Tools:** `curl`, `wget`, `git`, `grep`, `find`, `cat`, `less`
+**Restricted Tools:** `rm`, `docker`, `kubectl`
 
 #### Tester
 For testing and QA.
 
-**Default Tools:** `pytest`, `jest`, `mocha`, `cypress`
+**Default Tools:** `pytest`, `jest`, `mocha`, `cargo`, `go`, `npm`, `make`
 **Restricted Tools:** None by default
 
 #### Monitor
-Read-only role for observation.
+Monitoring role for system observation and diagnostics.
 
 **Capabilities:**
-- Can only read session output
-- Cannot execute commands
-- Cannot modify session state
+- Can view session output and system logs
+- Can run read-only monitoring commands (`tail`, `grep`, `ps`, `top`, `htop`)
+- Has access to container/cluster inspection tools (`docker`, `kubectl`) for status checks
+- Cannot run destructive commands (`rm`, `kill`, `pkill` are restricted)
 
 ## MCP Tools
 

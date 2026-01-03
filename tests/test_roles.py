@@ -13,7 +13,6 @@ from core.models import (
 )
 from core.roles import (
     RoleManager,
-    SessionRoleAssignment,
     RolePermissionError,
 )
 from core.agents import Agent, AgentRegistry
@@ -112,7 +111,7 @@ class TestDefaultRoleConfigs(unittest.TestCase):
             self.assertIn(role, DEFAULT_ROLE_CONFIGS)
             config = DEFAULT_ROLE_CONFIGS[role]
             self.assertEqual(config.role, role)
-            self.assertTrue(len(config.description) > 0)
+            self.assertGreater(len(config.description), 0)
 
     def test_orchestrator_has_spawn_capability(self):
         """Test that orchestrator can spawn agents."""

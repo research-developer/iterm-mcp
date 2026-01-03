@@ -3,7 +3,7 @@
 import re
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Literal, Optional, Set, Union
+from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Supported AI agent CLI types
@@ -81,8 +81,8 @@ DEFAULT_ROLE_CONFIGS: Dict[SessionRole, RoleConfig] = {
         role=SessionRole.DEVOPS,
         description="DevOps engineer handling infrastructure, deployments, and system operations",
         available_tools=["docker", "kubectl", "terraform", "ansible", "aws", "gcloud", "az"],
-        can_spawn_agents=True,
-        can_modify_roles=True,
+        can_spawn_agents=False,
+        can_modify_roles=False,
         priority=2,
     ),
     SessionRole.BUILDER: RoleConfig(

@@ -77,7 +77,7 @@ from core.models import (
     RoleConfig,
     DEFAULT_ROLE_CONFIGS,
 )
-from core.roles import RoleManager, RolePermissionError
+from core.roles import RoleManager
 
 # Global references for resources (set during lifespan)
 _terminal: Optional[ItermTerminal] = None
@@ -2993,12 +2993,24 @@ async def assign_session_role(
     Args:
         session_id: The iTerm session ID to assign the role to
         role: The role name (devops, builder, debugger, researcher, tester, orchestrator, monitor, custom)
-        assigned_by: Optional agent name that is assigning this role
+        assigned_by: Optional agent name that is assigning this role (must have can_modify_roles permission)
     """
     role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    agent_registry: AgentRegistry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
+        # Permission check: if assigned_by is provided, verify they have can_modify_roles
+        if assigned_by:
+            caller_agent = agent_registry.get_agent(assigned_by)
+            if caller_agent:
+                caller_session_id = caller_agent.session_id
+                if not role_manager.can_modify_roles(caller_session_id):
+                    return json.dumps({
+                        "error": f"Agent '{assigned_by}' does not have permission to modify roles. "
+                                 "Only sessions with can_modify_roles=True (e.g., orchestrator) can assign roles."
+                    }, indent=2)
+
         # Convert string to SessionRole enum
         try:
             session_role = SessionRole(role.lower())
@@ -3057,16 +3069,30 @@ async def get_session_role(
 async def remove_session_role(
     ctx: Context,
     session_id: str,
+    removed_by: Optional[str] = None,
 ) -> str:
     """Remove the role assignment from a session.
 
     Args:
         session_id: The iTerm session ID to remove the role from
+        removed_by: Optional agent name that is removing this role (must have can_modify_roles permission)
     """
     role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    agent_registry: AgentRegistry = ctx.request_context.lifespan_context["agent_registry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
+        # Permission check: if removed_by is provided, verify they have can_modify_roles
+        if removed_by:
+            caller_agent = agent_registry.get_agent(removed_by)
+            if caller_agent:
+                caller_session_id = caller_agent.session_id
+                if not role_manager.can_modify_roles(caller_session_id):
+                    return json.dumps({
+                        "error": f"Agent '{removed_by}' does not have permission to modify roles. "
+                                 "Only sessions with can_modify_roles=True (e.g., orchestrator) can remove roles."
+                    }, indent=2)
+
         removed = role_manager.remove_role(session_id)
         if removed:
             logger.info(f"Removed role from session {session_id}")

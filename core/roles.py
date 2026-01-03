@@ -408,22 +408,29 @@ class RoleManager:
     # ==================== Utility Methods ====================
 
     def get_available_tools(self, session_id: str) -> Set[str]:
-        """Get the set of available tools for a session.
+        """Get the set of explicitly available tools for a session.
 
         Args:
             session_id: The iTerm session ID
 
         Returns:
-            Set of tool names. Empty set means all tools available.
+            Set of tool names that are explicitly available for this session.
+
+            Note:
+                - An empty set has a special meaning: *all tools are available*,
+                  subject to any restrictions returned by ``get_restricted_tools``.
+                - This applies both when the session has no role assignment and when
+                  the assigned role's ``available_tools`` list is empty.
+                - Use ``is_tool_allowed()`` to check if a specific tool is permitted.
         """
         assignment = self._session_roles.get(session_id)
         if not assignment:
-            return set()  # Empty = all tools
+            return set()  # Empty = all tools (subject to restricted_tools)
 
         config = assignment.role_config
         available = set(config.available_tools)
 
-        # Remove restricted tools
+        # Remove restricted tools from the explicitly available set
         available -= set(config.restricted_tools)
 
         return available
