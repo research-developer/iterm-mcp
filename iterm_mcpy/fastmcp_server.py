@@ -87,8 +87,6 @@ from core.models import (
 )
 from core.manager import (
     SessionRole,
-    TaskStatus,
-    TaskResult,
     TaskStep,
     TaskPlan,
     DelegationStrategy,
@@ -3023,7 +3021,7 @@ async def _execute_task_on_worker(
     if not agent:
         return None, False, f"Worker agent '{worker}' not found"
 
-    session = terminal.get_session_by_id(agent.session_id)
+    session = await terminal.get_session_by_id(agent.session_id)
     if not session:
         return None, False, f"Session for worker '{worker}' not found"
 
@@ -3031,11 +3029,18 @@ async def _execute_task_on_worker(
         # Send the command
         await session.send_text(task + "\n")
 
-        # Wait for completion (simple approach - wait for prompt)
-        if timeout_seconds:
-            await asyncio.sleep(min(timeout_seconds, 2))
-        else:
-            await asyncio.sleep(1)
+        # Wait for command to complete with proper timeout
+        # Use a polling approach to check for command completion
+        wait_time = timeout_seconds if timeout_seconds else 30
+        poll_interval = 0.5
+        elapsed = 0.0
+
+        while elapsed < wait_time:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            # Check if session is no longer processing (command completed)
+            if hasattr(session, 'is_processing') and not session.is_processing:
+                break
 
         # Read output
         output = await session.get_screen_contents(max_lines=100)

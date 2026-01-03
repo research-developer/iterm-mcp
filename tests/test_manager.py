@@ -1,11 +1,8 @@
 """Tests for hierarchical task delegation with manager agents."""
 
 import asyncio
-import re
-import shutil
-import tempfile
 import unittest
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 from core.manager import (
     SessionRole,
@@ -19,7 +16,6 @@ from core.manager import (
     ManagerRegistry,
     create_regex_validator,
     create_success_validator,
-    ValidationCallback,
 )
 
 
@@ -472,7 +468,7 @@ class TestManagerAgentAsync(unittest.TestCase):
             result = await self.manager.execute_on_worker("builder-1", "npm run build")
 
             self.assertFalse(result.success)
-            self.assertIn("not integrated", result.error)
+            self.assertIn("No execution callback configured", result.error)
 
         asyncio.run(run_test())
 
@@ -640,6 +636,7 @@ class TestManagerAgentOrchestration(unittest.TestCase):
             executed_ids = [r.task_id for r in result.results]
             self.assertIn("step-1", executed_ids)
             self.assertIn("step-2", executed_ids)
+            self.assertNotIn("step-3", executed_ids)
 
         asyncio.run(run_test())
 

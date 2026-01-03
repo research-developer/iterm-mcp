@@ -16,11 +16,9 @@ agents for building, testing, and deployment.
 """
 
 import asyncio
-import iterm2
-from typing import Any, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from core.terminal import ItermTerminal
-from core.layouts import LayoutManager, LayoutType
 from core.agents import AgentRegistry
 from core.manager import (
     ManagerAgent,
@@ -29,14 +27,13 @@ from core.manager import (
     TaskStep,
     TaskPlan,
     DelegationStrategy,
-    TaskStatus,
 )
 
 
 async def mock_execute_task(
     terminal: ItermTerminal,
     agent_registry: AgentRegistry,
-) -> callable:
+) -> Callable:
     """Create an execution callback for the manager.
 
     This callback sends commands to agents via their iTerm sessions
@@ -303,8 +300,8 @@ async def example_manager_registry():
 
     registry = ManagerRegistry()
 
-    # Create specialized managers
-    build_manager = registry.create_manager(
+    # Create specialized managers (prefixed with _ as they are used indirectly via registry)
+    _build_manager = registry.create_manager(
         name="build-orchestrator",
         workers=["builder-1", "builder-2"],
         worker_roles={
@@ -313,7 +310,7 @@ async def example_manager_registry():
         }
     )
 
-    test_manager = registry.create_manager(
+    _test_manager = registry.create_manager(
         name="test-orchestrator",
         workers=["tester-1", "tester-2"],
         worker_roles={
@@ -322,7 +319,7 @@ async def example_manager_registry():
         }
     )
 
-    deploy_manager = registry.create_manager(
+    _deploy_manager = registry.create_manager(
         name="deploy-orchestrator",
         workers=["deployer"],
         worker_roles={

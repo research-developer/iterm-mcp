@@ -14,7 +14,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -244,17 +244,17 @@ class DelegationStrategy(str, Enum):
 # ============================================================================
 
 # Validation callback: takes TaskResult, returns (passed: bool, message: str)
-ValidationCallback = Callable[[TaskResult], tuple[bool, Optional[str]]]
+ValidationCallback = Callable[["TaskResult"], Tuple[bool, Optional[str]]]
 
 # Async validation callback
-AsyncValidationCallback = Callable[[TaskResult], "asyncio.coroutine[tuple[bool, Optional[str]]]"]
+AsyncValidationCallback = Callable[["TaskResult"], Awaitable[Tuple[bool, Optional[str]]]]
 
 
 def create_regex_validator(pattern: str) -> ValidationCallback:
     """Create a validation callback from a regex pattern."""
     compiled = re.compile(pattern)
 
-    def validator(result: TaskResult) -> tuple[bool, Optional[str]]:
+    def validator(result: "TaskResult") -> Tuple[bool, Optional[str]]:
         if result.output is None:
             return False, "No output to validate"
         if compiled.search(result.output):
@@ -266,7 +266,7 @@ def create_regex_validator(pattern: str) -> ValidationCallback:
 
 def create_success_validator() -> ValidationCallback:
     """Create a validation callback that checks task success status."""
-    def validator(result: TaskResult) -> tuple[bool, Optional[str]]:
+    def validator(result: "TaskResult") -> Tuple[bool, Optional[str]]:
         if result.success:
             return True, "Task completed successfully"
         return False, f"Task failed: {result.error or 'unknown error'}"
@@ -447,14 +447,21 @@ class ManagerAgent:
         try:
             if self._execute_callback:
                 # Use the provided callback to execute on the worker
-                output, success, error = await self._execute_callback(worker, task, timeout_seconds)
+                # Wrap with asyncio.wait_for for timeout enforcement
+                if timeout_seconds is not None:
+                    output, success, error = await asyncio.wait_for(
+                        self._execute_callback(worker, task, timeout_seconds),
+                        timeout=timeout_seconds,
+                    )
+                else:
+                    output, success, error = await self._execute_callback(worker, task, timeout_seconds)
                 result.mark_completed(success=success, output=output, error=error)
             else:
                 # No callback configured - this is a stub for testing
                 logger.warning(f"No execute callback configured for manager {self.name}")
                 result.mark_completed(
                     success=False,
-                    error="Manager not integrated with agent registry"
+                    error="No execution callback configured for this manager"
                 )
         except asyncio.TimeoutError:
             result.mark_completed(
@@ -471,7 +478,7 @@ class ManagerAgent:
         self,
         result: TaskResult,
         validation: Optional[Union[str, ValidationCallback]] = None,
-    ) -> tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str]]:
         """Validate a task result.
 
         Args:
@@ -496,7 +503,12 @@ class ManagerAgent:
         else:
             validator = validation
 
-        passed, message = validator(result)
+        # Support both sync and async validators
+        validation_result = validator(result)
+        if asyncio.iscoroutine(validation_result):
+            passed, message = await validation_result
+        else:
+            passed, message = validation_result
         result.mark_validation_result(passed, message)
         return passed, message
 
@@ -521,9 +533,9 @@ class ManagerAgent:
             TaskResult with execution and validation details
         """
         excluded_workers: List[str] = []
-        last_result: Optional[TaskResult] = None
+        result: Optional[TaskResult] = None
 
-        for attempt in range(retry_count + 1):
+        for attempt in range(max(1, retry_count + 1)):
             # Select worker
             worker = await self.select_worker(required_role, exclude=excluded_workers)
             if not worker:
@@ -554,10 +566,20 @@ class ManagerAgent:
 
             # Mark this worker as tried
             excluded_workers.append(worker)
-            last_result = result
             logger.info(f"Retrying task {task} (attempt {attempt + 2}/{retry_count + 1})")
 
-        return last_result or result
+        # Should never reach here, but handle gracefully
+        if result is not None:
+            return result
+        # Fallback: return a failed result if somehow no attempts were made
+        return TaskResult(
+            task_id=self._generate_task_id(),
+            task=task,
+            worker="none",
+            status=TaskStatus.FAILED,
+            success=False,
+            error="No execution attempts were made"
+        )
 
     async def orchestrate(
         self,
@@ -696,12 +718,16 @@ class ManagerAgent:
             ).total_seconds()
 
         # Determine overall success
-        plan_result.success = (
-            not plan_result.stopped_early and
-            all(r.success or plan.get_step(r.task_id).optional
-                for r in plan_result.results
-                if plan.get_step(r.task_id) is not None)
-        )
+        plan_result.success = not plan_result.stopped_early
+        if plan_result.success:
+            for r in plan_result.results:
+                step = plan.get_step(r.task_id)
+                if step is None:
+                    # Skip results that do not correspond to a plan step
+                    continue
+                if not (r.success or step.optional):
+                    plan_result.success = False
+                    break
 
         return plan_result
 
