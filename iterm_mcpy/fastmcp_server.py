@@ -43,6 +43,7 @@ from core.feedback import (
     FeedbackForker,
     GitHubIntegration,
 )
+from core.memory import SQLiteMemoryStore
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -98,6 +99,7 @@ _feedback_hook_manager: Optional[FeedbackHookManager] = None
 _feedback_forker: Optional[FeedbackForker] = None
 _github_integration: Optional[GitHubIntegration] = None
 _profile_manager: Optional[ProfileManager] = None
+_memory_store: Optional[SQLiteMemoryStore] = None
 
 
 # ============================================================================
@@ -296,6 +298,11 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         profile_manager = get_profile_manager(logger)
         logger.info(f"Profile manager initialized with {len(profile_manager.list_team_profiles())} team profiles")
 
+        # Initialize memory store
+        logger.info("Initializing memory store...")
+        memory_store = SQLiteMemoryStore()
+        logger.info("Memory store initialized successfully (SQLite with FTS5)")
+
         # Set global references for resources
         global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
@@ -313,6 +320,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         _github_integration = github_integration
         global _profile_manager
         _profile_manager = profile_manager
+        global _memory_store
+        _memory_store = memory_store
 
         # Yield the initialized components
         yield {
@@ -329,6 +338,7 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "feedback_forker": feedback_forker,
             "github_integration": github_integration,
             "profile_manager": profile_manager,
+            "memory_store": memory_store,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -3274,6 +3284,414 @@ async def telemetry_dashboard() -> str:
         return json.dumps(state, indent=2)
     except Exception as e:
         _logger.error(f"Error getting telemetry dashboard: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# MEMORY STORE TOOLS
+# ============================================================================
+
+# Pattern for safe namespace and key characters
+# Allows alphanumeric, underscore, hyphen, and dot
+_SAFE_MEMORY_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+
+
+def _validate_namespace(namespace: List[str]) -> None:
+    """Validate namespace parts contain only safe characters.
+
+    Args:
+        namespace: List of namespace parts
+
+    Raises:
+        ValueError: If any part contains invalid characters
+    """
+    if not namespace:
+        return  # Empty namespace is valid (root)
+
+    for part in namespace:
+        if not part:
+            raise ValueError("Namespace parts cannot be empty strings")
+        if not _SAFE_MEMORY_PATTERN.match(part):
+            raise ValueError(
+                f"Invalid namespace part '{part}': only alphanumeric, underscore, hyphen, and dot allowed"
+            )
+
+
+def _validate_key(key: str) -> None:
+    """Validate key contains only safe characters.
+
+    Args:
+        key: The memory key
+
+    Raises:
+        ValueError: If key contains invalid characters
+    """
+    if not key:
+        raise ValueError("Key cannot be empty")
+    if not _SAFE_MEMORY_PATTERN.match(key):
+        raise ValueError(
+            f"Invalid key '{key}': only alphanumeric, underscore, hyphen, and dot allowed"
+        )
+
+
+@mcp.tool()
+async def memory_store(
+    ctx: Context,
+    namespace: List[str],
+    key: str,
+    value: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Store a value in the cross-agent memory store.
+
+    Enables agents to share context, learn from past interactions, and maintain
+    long-term knowledge. Uses namespace-based organization to prevent cross-project
+    contamination.
+
+    Args:
+        namespace: Hierarchical namespace (e.g., ["project-x", "build-agent", "memories"])
+        key: Unique key within the namespace
+        value: JSON-serializable value to store (string, dict, list, etc.)
+        metadata: Optional metadata tags (e.g., {"source": "build", "type": "error"})
+
+    Returns:
+        JSON confirmation with stored memory details
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        # Validate inputs
+        _validate_namespace(namespace)
+        _validate_key(key)
+
+        # Convert namespace list to tuple for the store
+        ns_tuple = tuple(namespace)
+        await memory_store_instance.store(ns_tuple, key, value, metadata)
+        logger.info(f"Stored memory: {'/'.join(namespace)}/{key}")
+
+        return json.dumps({
+            "status": "stored",
+            "namespace": namespace,
+            "key": key,
+            "metadata": metadata or {}
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error storing memory: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_retrieve(
+    ctx: Context,
+    namespace: List[str],
+    key: str,
+) -> str:
+    """Retrieve a specific memory by namespace and key.
+
+    Args:
+        namespace: Hierarchical namespace (e.g., ["project-x", "build-agent"])
+        key: The key to retrieve
+
+    Returns:
+        JSON with the memory value and metadata, or null if not found
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        # Validate inputs
+        _validate_namespace(namespace)
+        _validate_key(key)
+
+        ns_tuple = tuple(namespace)
+        memory = await memory_store_instance.retrieve(ns_tuple, key)
+
+        if memory:
+            logger.info(f"Retrieved memory: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "found": True,
+                "key": memory.key,
+                "value": memory.value,
+                "timestamp": memory.timestamp.isoformat(),
+                "metadata": memory.metadata,
+                "namespace": list(memory.namespace)
+            }, indent=2)
+        else:
+            logger.info(f"Memory not found: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "found": False,
+                "namespace": namespace,
+                "key": key
+            }, indent=2)
+    except Exception as e:
+        logger.error(f"Error retrieving memory: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_search(
+    ctx: Context,
+    namespace: List[str],
+    query: str,
+    limit: int = 10,
+) -> str:
+    """Search for memories matching a query using full-text search.
+
+    Uses FTS5 full-text search for efficient semantic matching across
+    keys, values, and metadata within the specified namespace.
+
+    Args:
+        namespace: Namespace prefix to search within (can be partial for broader search)
+        query: Search query string (e.g., "npm build errors", "deployment config")
+        limit: Maximum number of results to return (default: 10)
+
+    Returns:
+        JSON array of matching memories with relevance scores
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        # Validate namespace (query doesn't need validation - it's for search)
+        _validate_namespace(namespace)
+
+        ns_tuple = tuple(namespace)
+        results = await memory_store_instance.search(ns_tuple, query, limit)
+        logger.info(f"Memory search '{query}' in {'/'.join(namespace)}: {len(results)} results")
+
+        return json.dumps({
+            "query": query,
+            "namespace": namespace,
+            "count": len(results),
+            "results": [
+                {
+                    "key": r.memory.key,
+                    "value": r.memory.value,
+                    "score": r.score,
+                    "match_context": r.match_context,
+                    "timestamp": r.memory.timestamp.isoformat(),
+                    "metadata": r.memory.metadata,
+                    "namespace": list(r.memory.namespace)
+                }
+                for r in results
+            ]
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching memories: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_list_keys(
+    ctx: Context,
+    namespace: List[str],
+) -> str:
+    """List all keys in a namespace.
+
+    Args:
+        namespace: Hierarchical namespace to list keys from
+
+    Returns:
+        JSON array of keys in the namespace
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        _validate_namespace(namespace)
+        ns_tuple = tuple(namespace)
+        keys = await memory_store_instance.list_keys(ns_tuple)
+        logger.info(f"Listed {len(keys)} keys in namespace {'/'.join(namespace)}")
+
+        return json.dumps({
+            "namespace": namespace,
+            "count": len(keys),
+            "keys": keys
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing memory keys: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_delete(
+    ctx: Context,
+    namespace: List[str],
+    key: str,
+) -> str:
+    """Delete a memory by namespace and key.
+
+    Args:
+        namespace: Hierarchical namespace
+        key: The key to delete
+
+    Returns:
+        JSON confirmation of deletion
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        _validate_namespace(namespace)
+        _validate_key(key)
+        ns_tuple = tuple(namespace)
+        deleted = await memory_store_instance.delete(ns_tuple, key)
+
+        if deleted:
+            logger.info(f"Deleted memory: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "deleted": True,
+                "namespace": namespace,
+                "key": key
+            }, indent=2)
+        else:
+            logger.info(f"Memory not found for deletion: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "deleted": False,
+                "namespace": namespace,
+                "key": key,
+                "message": "Memory not found"
+            }, indent=2)
+    except Exception as e:
+        logger.error(f"Error deleting memory: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_list_namespaces(
+    ctx: Context,
+    prefix: Optional[List[str]] = None,
+) -> str:
+    """List all namespaces in the memory store.
+
+    Args:
+        prefix: Optional namespace prefix to filter by
+
+    Returns:
+        JSON array of namespace tuples
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        if prefix:
+            _validate_namespace(prefix)
+        prefix_tuple = tuple(prefix) if prefix else None
+        namespaces = await memory_store_instance.list_namespaces(prefix_tuple)
+        logger.info(f"Listed {len(namespaces)} namespaces")
+
+        return json.dumps({
+            "prefix": prefix,
+            "count": len(namespaces),
+            "namespaces": [list(ns) for ns in namespaces]
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing namespaces: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_clear_namespace(
+    ctx: Context,
+    namespace: List[str],
+    confirm: bool = False,
+) -> str:
+    """Clear all memories in a namespace.
+
+    WARNING: This permanently deletes all memories in the specified namespace.
+    You must set confirm=True to actually perform the deletion.
+
+    Args:
+        namespace: Hierarchical namespace to clear
+        confirm: Must be True to confirm deletion (safety measure)
+
+    Returns:
+        JSON with count of deleted memories
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        _validate_namespace(namespace)
+
+        if not confirm:
+            return json.dumps({
+                "error": "Confirmation required",
+                "message": "Set confirm=True to clear namespace. This permanently deletes all memories.",
+                "namespace": namespace
+            }, indent=2)
+
+        ns_tuple = tuple(namespace)
+        count = await memory_store_instance.clear_namespace(ns_tuple)
+        logger.info(f"Cleared namespace {'/'.join(namespace)}: {count} memories deleted")
+
+        return json.dumps({
+            "cleared": True,
+            "namespace": namespace,
+            "deleted_count": count
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error clearing namespace: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_stats(
+    ctx: Context,
+) -> str:
+    """Get statistics about the memory store.
+
+    Returns:
+        JSON with memory store statistics (total memories, namespaces, etc.)
+    """
+    memory_store = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        stats = await memory_store.get_stats()
+        logger.info("Retrieved memory store stats")
+        return json.dumps(stats, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting memory stats: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.resource("memory://stats")
+async def memory_stats_resource() -> str:
+    """Get memory store statistics as a resource."""
+    if _memory_store is None or _logger is None:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        stats = await _memory_store.get_stats()
+        return json.dumps(stats, indent=2)
+    except Exception as e:
+        _logger.error(f"Error getting memory stats resource: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
 
