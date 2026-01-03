@@ -14,8 +14,6 @@ import asyncio
 import json
 import os
 import sqlite3
-import time
-from abc import abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple, Union, runtime_checkable
@@ -378,6 +376,46 @@ class FileMemoryStore:
                 return count
             return 0
 
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get statistics about the memory store.
+
+        Returns:
+            Dictionary with stats (total memories, namespaces, etc.)
+        """
+        async with self._lock:
+            total_memories = sum(len(memories) for memories in self._data.values())
+            total_namespaces = len(self._data)
+
+            top_namespaces = sorted(
+                [{"namespace": ns, "count": len(memories)}
+                 for ns, memories in self._data.items()],
+                key=lambda x: x["count"],
+                reverse=True
+            )[:10]
+
+            return {
+                "total_memories": total_memories,
+                "total_namespaces": total_namespaces,
+                "top_namespaces": top_namespaces,
+                "file_path": str(self.file_path)
+            }
+
+    async def close(self) -> None:
+        """Close the memory store and release any resources.
+
+        For FileMemoryStore, this saves any pending changes.
+        """
+        async with self._lock:
+            self._save()
+
+    async def __aenter__(self) -> "FileMemoryStore":
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit."""
+        await self.close()
+
 
 class SQLiteMemoryStore:
     """SQLite-based memory store with FTS5 full-text search.
@@ -390,10 +428,14 @@ class SQLiteMemoryStore:
         """Initialize the SQLite memory store.
 
         Args:
-            db_path: Path to the SQLite database. Defaults to ~/.iterm-mcp/memories.db
+            db_path: Path to the SQLite database. Defaults to
+                     ITERM_MCP_MEMORY_DB_PATH env var or ~/.iterm-mcp/memories.db
         """
         if db_path is None:
-            db_path = os.path.expanduser("~/.iterm-mcp/memories.db")
+            db_path = os.environ.get(
+                "ITERM_MCP_MEMORY_DB_PATH",
+                os.path.expanduser("~/.iterm-mcp/memories.db")
+            )
 
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -434,12 +476,14 @@ class SQLiteMemoryStore:
 
             # Check if we need to recreate FTS5 (if schema changed)
             needs_recreate = False
+            expected_columns = {'key', 'value_text', 'metadata_text', 'namespace'}
             if fts_exists:
-                # Check column count to detect schema mismatch
+                # Check column names to detect schema mismatch
                 cursor.execute("PRAGMA table_info(memories_fts)")
                 columns = cursor.fetchall()
-                # We expect 4 columns: key, value_text, metadata_text, namespace
-                if len(columns) != 4:
+                # Column name is at index 1 in PRAGMA table_info result
+                actual_columns = {col[1] for col in columns}
+                if actual_columns != expected_columns:
                     needs_recreate = True
 
             if needs_recreate:
@@ -565,7 +609,11 @@ class SQLiteMemoryStore:
         query: str,
         limit: int = 10
     ) -> List[MemorySearchResult]:
-        """Search for memories using FTS5 full-text search."""
+        """Search for memories using FTS5 full-text search.
+
+        Falls back to LIKE-based search if FTS5 query fails (e.g., due to
+        special characters that can't be properly escaped).
+        """
         async with self._lock:
             ns_prefix = self._namespace_key(namespace)
             results: List[MemorySearchResult] = []
@@ -573,47 +621,75 @@ class SQLiteMemoryStore:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
 
-                # Use FTS5 search with BM25 ranking
-                # Escape special FTS5 characters (double quotes)
-                escaped_query = query.replace('"', '""')
+                try:
+                    # Use FTS5 search with BM25 ranking
+                    # Escape special FTS5 characters (double quotes)
+                    escaped_query = query.replace('"', '""')
 
-                # Search in FTS table and join with main table for full data
-                # Filter by namespace using SQL WHERE clause (not in FTS5 MATCH)
-                # to avoid issues with special characters like / in namespace
-                cursor.execute("""
-                    SELECT
-                        m.namespace,
-                        m.key,
-                        m.value,
-                        m.timestamp,
-                        m.metadata,
-                        bm25(memories_fts) as score,
-                        snippet(memories_fts, 1, '<b>', '</b>', '...', 32) as match_context
-                    FROM memories_fts
-                    JOIN memories m ON memories_fts.rowid = m.id
-                    WHERE memories_fts MATCH ?
-                    AND m.namespace LIKE ?
-                    ORDER BY bm25(memories_fts)
-                    LIMIT ?
-                """, (f'"{escaped_query}"', f'{ns_prefix}%', limit))
+                    # Search in FTS table and join with main table for full data
+                    # Filter by namespace using SQL WHERE clause (not in FTS5 MATCH)
+                    # to avoid issues with special characters like / in namespace
+                    cursor.execute("""
+                        SELECT
+                            m.namespace,
+                            m.key,
+                            m.value,
+                            m.timestamp,
+                            m.metadata,
+                            bm25(memories_fts) as score,
+                            snippet(memories_fts, 1, '<b>', '</b>', '...', 32) as match_context
+                        FROM memories_fts
+                        JOIN memories m ON memories_fts.rowid = m.id
+                        WHERE memories_fts MATCH ?
+                        AND m.namespace LIKE ?
+                        ORDER BY bm25(memories_fts)
+                        LIMIT ?
+                    """, (f'"{escaped_query}"', f'{ns_prefix}%', limit))
 
-                for row in cursor.fetchall():
-                    memory = Memory(
-                        key=row[1],
-                        value=json.loads(row[2]),
-                        timestamp=datetime.fromisoformat(row[3]),
-                        metadata=json.loads(row[4]),
-                        namespace=self._parse_namespace(row[0])
-                    )
-                    # Convert BM25 score (negative, lower is better) to 0-1 range
-                    bm25_score = row[5]
-                    normalized_score = 1.0 / (1.0 + abs(bm25_score))
+                    for row in cursor.fetchall():
+                        memory = Memory(
+                            key=row[1],
+                            value=json.loads(row[2]),
+                            timestamp=datetime.fromisoformat(row[3]),
+                            metadata=json.loads(row[4]),
+                            namespace=self._parse_namespace(row[0])
+                        )
+                        # Convert BM25 score (negative, lower is better) to 0-1 range
+                        bm25_score = row[5]
+                        normalized_score = 1.0 / (1.0 + abs(bm25_score))
 
-                    results.append(MemorySearchResult(
-                        memory=memory,
-                        score=normalized_score,
-                        match_context=row[6]
-                    ))
+                        results.append(MemorySearchResult(
+                            memory=memory,
+                            score=normalized_score,
+                            match_context=row[6]
+                        ))
+
+                except sqlite3.OperationalError:
+                    # FTS5 query failed, fall back to LIKE-based search
+                    like_pattern = f'%{query}%'
+                    cursor.execute("""
+                        SELECT namespace, key, value, timestamp, metadata
+                        FROM memories
+                        WHERE namespace LIKE ?
+                        AND (key LIKE ? OR value LIKE ? OR metadata LIKE ?)
+                        ORDER BY timestamp DESC
+                        LIMIT ?
+                    """, (f'{ns_prefix}%', like_pattern, like_pattern, like_pattern, limit))
+
+                    for row in cursor.fetchall():
+                        memory = Memory(
+                            key=row[1],
+                            value=json.loads(row[2]),
+                            timestamp=datetime.fromisoformat(row[3]),
+                            metadata=json.loads(row[4]),
+                            namespace=self._parse_namespace(row[0])
+                        )
+                        # LIKE search doesn't have relevance scoring, use 0.5
+                        results.append(MemorySearchResult(
+                            memory=memory,
+                            score=0.5,
+                            match_context=None
+                        ))
 
             return results
 
@@ -736,6 +812,25 @@ class SQLiteMemoryStore:
                     "top_namespaces": top_namespaces,
                     "db_path": str(self.db_path)
                 }
+
+    async def close(self) -> None:
+        """Close the memory store and release any resources.
+
+        Note: SQLite connections are opened and closed per-operation using
+        context managers, so this method is mainly for consistency with
+        other store implementations and for explicit cleanup signaling.
+        """
+        # SQLite connections are managed per-operation, no persistent
+        # connection to close. This method exists for API consistency.
+        pass
+
+    async def __aenter__(self) -> "SQLiteMemoryStore":
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Async context manager exit."""
+        await self.close()
 
 
 # Factory function to get the appropriate store

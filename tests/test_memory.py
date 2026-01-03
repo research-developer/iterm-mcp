@@ -1,17 +1,14 @@
 """Tests for the cross-agent memory store implementations."""
 
 import asyncio
-import json
 import os
 import shutil
 import tempfile
 import unittest
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 
 from core.memory import (
     Memory,
-    MemorySearchResult,
     FileMemoryStore,
     SQLiteMemoryStore,
     get_memory_store,
