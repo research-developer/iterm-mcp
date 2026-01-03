@@ -2,15 +2,104 @@
 
 import asyncio
 import base64
+import logging
 import os
 import re
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple, Union, Callable, Literal
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Literal
 
 import iterm2
 
 from utils.logging import ItermSessionLogger
+from utils.otel import trace_operation, add_span_attributes, add_span_event
+
+
+# Logger for session module
+_logger = logging.getLogger("iterm-mcp-session")
+
+
+@dataclass
+class ExpectResult:
+    """Result from an expect() operation.
+
+    Attributes:
+        matched_pattern: The pattern string, regex, or ExpectTimeout that matched
+        match_index: Index of the matching pattern in the patterns list
+        output: Full output captured up to and including the match
+        matched_text: The specific text that matched the pattern
+        before: Text before the match
+        match: The regex match object (if pattern was regex)
+    """
+    matched_pattern: Union[str, re.Pattern, "ExpectTimeout"]
+    match_index: int
+    output: str
+    matched_text: str
+    before: str = ""
+    match: Optional[re.Match] = None
+
+    def __repr__(self) -> str:
+        if isinstance(self.matched_pattern, re.Pattern):
+            pattern_str = self.matched_pattern.pattern
+        elif hasattr(self.matched_pattern, 'seconds'):
+            # ExpectTimeout case
+            pattern_str = repr(self.matched_pattern)
+        else:
+            pattern_str = self.matched_pattern
+        return (
+            f"ExpectResult(pattern={pattern_str!r}, index={self.match_index}, "
+            f"matched_text={self.matched_text!r})"
+        )
+
+
+class ExpectTimeout:
+    """Marker class for timeout in expect() pattern lists.
+
+    Use this in the patterns list to specify a timeout that returns
+    a specific index instead of raising an exception.
+
+    Example:
+        result = await session.expect([
+            r'success',
+            r'error',
+            ExpectTimeout(30)  # Returns match_index=2 on timeout
+        ])
+    """
+    def __init__(self, seconds: int = 30):
+        """Initialize an ExpectTimeout marker.
+
+        Args:
+            seconds: Timeout duration in seconds
+        """
+        self.seconds = seconds
+
+    def __repr__(self) -> str:
+        return f"ExpectTimeout({self.seconds})"
+
+
+class ExpectError(Exception):
+    """Base exception for expect operations."""
+    pass
+
+
+class ExpectTimeoutError(ExpectError):
+    """Raised when expect() times out without matching any pattern.
+
+    This is only raised when no ExpectTimeout marker is in the patterns list.
+    """
+    def __init__(self, timeout: float, patterns: List[Union[str, re.Pattern, "ExpectTimeout"]], output: str):
+        self.timeout = timeout
+        self.patterns = patterns
+        self.output = output
+        pattern_strs = [
+            p.pattern if isinstance(p, re.Pattern) else str(p)
+            for p in patterns if not isinstance(p, ExpectTimeout)
+        ]
+        super().__init__(
+            f"Timeout after {timeout}s waiting for patterns: {pattern_strs}"
+        )
 
 # Characters that can cause shell parsing issues when typed directly
 # These require base64 encoding to safely execute
@@ -143,15 +232,13 @@ class ItermSession:
                 return self.session.is_processing
             else:
                 # If it doesn't exist, log a warning and return a default value
-                import logging
-                logging.getLogger("iterm-mcp-session").warning(
+                _logger.warning(
                     f"Session {self.id} ({self._name}) does not have is_processing attribute"
                 )
                 return False
         except Exception as e:
             # Handle any exceptions that might occur
-            import logging
-            logging.getLogger("iterm-mcp-session").error(
+            _logger.error(
                 f"Error checking is_processing for session {self.id} ({self._name}): {str(e)}"
             )
             return False
@@ -178,6 +265,7 @@ class ItermSession:
         if self.logger:
             self.logger.log_session_renamed(name)
     
+    @trace_operation("session.send_text")
     async def send_text(self, text: str, execute: bool = True) -> None:
         """Send text to the session.
 
@@ -185,6 +273,13 @@ class ItermSession:
             text: The text to send
             execute: Whether to execute the text as a command by sending Enter
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            text_length=len(text),
+            execute=execute,
+        )
+
         # Strip any trailing newlines/carriage returns to avoid double execution
         clean_text = text.rstrip("\r\n")
 
@@ -198,11 +293,14 @@ class ItermSession:
             delay = calculate_text_delay(clean_text)
             await asyncio.sleep(delay)
             await self.session.async_send_text("\r")
-        
+
         # Log the command
         if self.logger:
             self.logger.log_command(clean_text)
 
+        add_span_event("text_sent", {"text_length": len(clean_text), "executed": execute})
+
+    @trace_operation("session.execute_command")
     async def execute_command(
         self,
         command: str,
@@ -227,6 +325,13 @@ class ItermSession:
             Only use encoding when absolutely necessary (e.g., binary data or
             control characters in the command).
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            command_length=len(command),
+            use_encoding=str(use_encoding),
+        )
+
         # Strip any trailing newlines/carriage returns from input
         clean_command = command.rstrip("\r\n")
 
@@ -265,66 +370,100 @@ class ItermSession:
         if self.logger:
             self.logger.log_command(clean_command)
 
+        add_span_event("command_executed", {
+            "command_length": len(clean_command),
+            "encoded": should_encode,
+        })
+
+    @trace_operation("session.get_screen_contents")
     async def get_screen_contents(self, max_lines: Optional[int] = None) -> str:
         """Get the contents of the session's screen.
-        
+
         Args:
             max_lines: Maximum number of lines to retrieve (defaults to session's max_lines)
-            
+
         Returns:
             The text contents of the screen
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            requested_max_lines=max_lines if max_lines is not None else self._max_lines,
+        )
+
         contents = await self.session.async_get_screen_contents()
         lines = []
-        
+
         # Use instance default if not specified
         if max_lines is None:
             max_lines = self._max_lines
-            
+
         max_lines = min(max_lines, contents.number_of_lines)
-        
+
         for i in range(max_lines):
             line = contents.line(i)
             line_text = line.string
             if line_text:
                 lines.append(line_text)
-        
+
         output = "\n".join(lines)
-        
+
         # Log the output
         if self.logger:
             self.logger.log_output(output)
-        
+
+        add_span_event("screen_contents_retrieved", {
+            "lines_retrieved": len(lines),
+            "total_lines_available": contents.number_of_lines,
+            "output_length": len(output),
+        })
+
         return output
     
+    @trace_operation("session.send_control_character")
     async def send_control_character(self, character: str) -> None:
         """Send a control character to the session.
-        
+
         Args:
             character: The character (e.g., "c" for Ctrl+C)
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            control_character=character.upper() if character.isalpha() else character,
+        )
+
         if len(character) != 1 or not character.isalpha():
             raise ValueError("Control character must be a single letter")
-            
+
         # Convert to uppercase and then to control code
         character = character.upper()
         code = ord(character) - 64
         control_sequence = chr(code)
-        
+
         await self.session.async_send_text(control_sequence)
-        
+
         # Log the control character
         if self.logger:
             self.logger.log_control_character(character)
+
+        add_span_event("control_character_sent", {"character": character})
     
+    @trace_operation("session.send_special_key")
     async def send_special_key(self, key: str) -> None:
         """Send a special key to the session.
-        
+
         Args:
             key: The special key name ('enter', 'return', 'tab', 'escape', etc.)
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            special_key=key.lower(),
+        )
+
         key = key.lower()
-        
+
         # Map special key names to their character sequences
         key_map = {
             'enter': '\r',
@@ -342,16 +481,18 @@ class ItermSession:
             'home': '\x1b[H',
             'end': '\x1b[F'
         }
-        
+
         if key not in key_map:
             raise ValueError(f"Unknown special key: {key}. Supported keys: {', '.join(key_map.keys())}")
-        
+
         sequence = key_map[key]
         await self.session.async_send_text(sequence)
-        
+
         # Log the special key
         if self.logger:
             self.logger.log_custom_event("SPECIAL_KEY", f"Sent special key: {key}")
+
+        add_span_event("special_key_sent", {"key": key})
     
     async def clear_screen(self) -> None:
         """Clear the screen."""
@@ -373,16 +514,14 @@ class ItermSession:
         """
         if self._monitoring:
             return
-            
+
         # Initialize monitoring state, but only set to True once we confirm task is running
-        import logging
-        logger = logging.getLogger("iterm-mcp-session")
-        logger.info(f"Setting up monitoring for session {self.id} ({self._name})")
+        _logger.info(f"Setting up monitoring for session {self.id} ({self._name})")
         
         async def monitor_screen_polling():
             """Polling-based screen monitoring as a fallback approach."""
             try:
-                logger.info(f"Starting polling-based screen monitoring for session {self.id}")
+                _logger.info(f"Starting polling-based screen monitoring for session {self.id}")
                 
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_STARTED", "Polling-based screen monitoring started")
@@ -408,7 +547,7 @@ class ItermSession:
                                     task = asyncio.create_task(callback(current_content))
                                     callback_tasks.append(task)
                                 except Exception as callback_error:
-                                    logger.error(f"Error in callback: {str(callback_error)}")
+                                    _logger.error(f"Error in callback: {str(callback_error)}")
                             
                             # Wait for all callbacks to complete
                             if callback_tasks:
@@ -425,18 +564,18 @@ class ItermSession:
                         if "SESSION_NOT_FOUND" in str(poll_error):
                             if self._monitoring:
                                 # Only log at debug level since this is expected during cleanup
-                                logger.debug(f"Session no longer available during monitoring (likely closed): {self.id}")
+                                _logger.debug(f"Session no longer available during monitoring (likely closed): {self.id}")
                                 # Signal to exit the monitoring loop
                                 self._monitoring = False
                                 return
                         else:
                             # Log any other errors as actual errors
-                            logger.error(f"Error in polling loop: {str(poll_error)}")
+                            _logger.error(f"Error in polling loop: {str(poll_error)}")
                         await asyncio.sleep(update_interval)
             except asyncio.CancelledError:
-                logger.info(f"Polling monitor task cancelled for session {self.id}")
+                _logger.info(f"Polling monitor task cancelled for session {self.id}")
             except Exception as e:
-                logger.error(f"Fatal error in polling monitor: {str(e)}")
+                _logger.error(f"Fatal error in polling monitor: {str(e)}")
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_ERROR", f"Error in screen monitoring: {str(e)}")
             finally:
@@ -457,9 +596,9 @@ class ItermSession:
         # Wait for the monitoring to be properly initialized before returning
         try:
             await asyncio.wait_for(monitoring_initialized.wait(), timeout=3.0)
-            logger.info(f"Monitoring successfully started for session {self.id}")
+            _logger.info(f"Monitoring successfully started for session {self.id}")
         except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for monitoring to initialize for session {self.id}")
+            _logger.error(f"Timeout waiting for monitoring to initialize for session {self.id}")
             # If initialization times out, clean up
             self._monitoring = False
             if not self._monitor_task.done():
@@ -469,14 +608,11 @@ class ItermSession:
         
     async def stop_monitoring(self) -> None:
         """Stop monitoring the screen for changes and ensure callbacks are completed."""
-        import logging
-        logger = logging.getLogger("iterm-mcp-session")
-        
         if not self._monitoring or not self._monitor_task:
-            logger.info(f"Monitoring already stopped for session {self.id}")
+            _logger.info(f"Monitoring already stopped for session {self.id}")
             return
-        
-        logger.info(f"Stopping monitoring for session {self.id}")
+
+        _logger.info(f"Stopping monitoring for session {self.id}")
         # Set monitoring flag to False first to signal the loop to exit
         self._monitoring = False
         
@@ -487,7 +623,7 @@ class ItermSession:
                 await asyncio.sleep(0.2)
                 # Cancel if still running after grace period
                 if not self._monitor_task.done():
-                    logger.info(f"Cancelling monitor task for session {self.id}")
+                    _logger.info(f"Cancelling monitor task for session {self.id}")
                     self._monitor_task.cancel()
                     # Wait for cancellation to complete
                     try:
@@ -495,11 +631,11 @@ class ItermSession:
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         pass
             except Exception as e:
-                logger.error(f"Error stopping monitoring for session {self.id}: {str(e)}")
-        
+                _logger.error(f"Error stopping monitoring for session {self.id}: {str(e)}")
+
         # Cleanup
         self._monitor_task = None
-        logger.info(f"Monitoring stopped for session {self.id}")
+        _logger.info(f"Monitoring stopped for session {self.id}")
         
     def add_monitor_callback(self, callback: Callable[[str], None]) -> None:
         """Add a callback to be called when the screen changes.
@@ -610,3 +746,500 @@ class ItermSession:
 
         if self.logger:
             self.logger.log_custom_event("RESET_COLORS", "Colors reset to profile defaults")
+
+    # ==================== State Persistence ====================
+
+    async def save_state(self) -> Dict[str, Any]:
+        """Serialize session state to a JSON-compatible dict.
+
+        Returns a snapshot of the session's current state that can be
+        used for checkpointing, crash recovery, or debugging.
+
+        Returns:
+            Dict containing serializable session state
+        """
+        # Capture current screen content if available
+        last_output = None
+        try:
+            last_output = await self.get_screen_contents(max_lines=100)
+        except Exception:
+            pass  # Screen content may not be available
+
+        # Get last command from logger if available (currently not exposed)
+        last_command = None
+
+        state = {
+            "session_id": self.id,
+            "persistent_id": self._persistent_id,
+            "name": self._name,
+            "max_lines": self._max_lines,
+            "is_monitoring": self._monitoring,
+            "last_screen_update": self._last_screen_update,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_command": last_command,
+            "last_output": last_output,
+            "metadata": {}
+        }
+
+        # Add logger telemetry if available
+        if self.logger:
+            state["metadata"]["command_count"] = getattr(self.logger, 'command_count', 0)
+            state["metadata"]["output_line_count"] = getattr(self.logger, 'output_line_count', 0)
+
+        return state
+
+    def load_state(self, state: Dict[str, Any]) -> None:
+        """Restore session configuration from a saved state dict.
+
+        Note: This restores configuration state only. The underlying
+        iTerm2 session object and live monitoring state cannot be
+        restored from a checkpoint - those require reconnection.
+
+        Args:
+            state: Previously saved state dict from save_state()
+        """
+        # Restore configurable properties
+        if "name" in state:
+            self._name = state["name"]
+
+        if "max_lines" in state:
+            self._max_lines = state["max_lines"]
+
+        if "last_screen_update" in state:
+            self._last_screen_update = state["last_screen_update"]
+
+        # Note: We don't restore is_monitoring because monitoring
+        # requires active tasks that can't be serialized
+
+        # Note: persistent_id and session_id are set during session
+        # creation and shouldn't be overwritten from checkpoint
+
+    def get_state_summary(self) -> Dict[str, Any]:
+        """Get a brief summary of session state for logging/debugging.
+
+        Returns:
+            Dict with key session state info
+        """
+        return {
+            "session_id": self.id,
+            "persistent_id": self._persistent_id,
+            "name": self._name,
+            "max_lines": self._max_lines,
+            "is_monitoring": self.is_monitoring,
+            "last_update": self._last_screen_update
+        }
+
+    # =========================================================================
+    # Expect-Style Pattern Matching
+    # =========================================================================
+
+    async def expect(
+        self,
+        patterns: List[Union[str, re.Pattern, ExpectTimeout]],
+        timeout: int = 30,
+        poll_interval: float = 0.1,
+        search_window_lines: Optional[int] = None
+    ) -> ExpectResult:
+        """Wait for one of the patterns to appear in terminal output.
+
+        This method polls the terminal screen and checks for pattern matches.
+        It's inspired by pexpect's expect() function but adapted for iTerm2's
+        async screen access.
+
+        Args:
+            patterns: List of patterns to match. Each can be:
+                - A string (treated as a regex pattern)
+                - A compiled re.Pattern object
+                - An ExpectTimeout marker (specifies timeout behavior)
+            timeout: Maximum wait time in seconds (default 30).
+                     Overridden by ExpectTimeout in patterns list.
+            poll_interval: How often to check for new output (default 0.1s)
+            search_window_lines: Number of lines to search (default: session max_lines)
+
+        Returns:
+            ExpectResult with match details including:
+                - matched_pattern: The pattern that matched
+                - match_index: Index of the matching pattern
+                - output: Full output up to the match
+                - matched_text: The specific text that matched
+                - before: Text before the match
+                - match: The regex match object
+
+        Raises:
+            ExpectTimeoutError: If timeout expires and no ExpectTimeout marker
+                               is in the patterns list
+            ValueError: If patterns list is empty or contains only ExpectTimeout
+
+        Example:
+            # Wait for shell prompt or error
+            result = await session.expect([
+                r'\$\s*$',             # Shell prompt (bash)
+                r'>\s*$',              # Shell prompt (zsh)
+                r'error:',             # Error detected
+                ExpectTimeout(30)      # Timeout (returns index 3)
+            ])
+
+            if result.match_index == 0 or result.match_index == 1:
+                print("Command completed successfully")
+            elif result.match_index == 2:
+                print(f"Error detected: {result.matched_text}")
+            elif result.match_index == 3:
+                print("Timeout waiting for response")
+        """
+        # Validate and process patterns
+        if not patterns:
+            raise ValueError("patterns list cannot be empty")
+
+        # Separate patterns from timeout marker
+        regex_patterns: List[Tuple[int, re.Pattern]] = []
+        timeout_marker: Optional[Tuple[int, ExpectTimeout]] = None
+
+        for i, pattern in enumerate(patterns):
+            if isinstance(pattern, ExpectTimeout):
+                if timeout_marker is not None:
+                    _logger.warning("Multiple ExpectTimeout markers; using first one")
+                else:
+                    timeout_marker = (i, pattern)
+                    timeout = pattern.seconds  # Override timeout
+            elif isinstance(pattern, re.Pattern):
+                regex_patterns.append((i, pattern))
+            elif isinstance(pattern, str):
+                try:
+                    compiled = re.compile(pattern)
+                    regex_patterns.append((i, compiled))
+                except re.error as e:
+                    raise ValueError(f"Invalid regex pattern at index {i}: {e}")
+            else:
+                raise ValueError(
+                    f"Invalid pattern type at index {i}: {type(pattern).__name__}. "
+                    f"Expected str, re.Pattern, or ExpectTimeout"
+                )
+
+        if not regex_patterns:
+            raise ValueError("patterns list must contain at least one regex pattern")
+
+        # Determine search window
+        if search_window_lines is None:
+            search_window_lines = self._max_lines
+
+        # Track start time and accumulated output
+        start_time = time.time()
+        last_output = ""
+        accumulated_output = ""
+
+        _logger.debug(
+            f"expect() started: {len(regex_patterns)} patterns, "
+            f"timeout={timeout}s, poll={poll_interval}s"
+        )
+
+        if self.logger:
+            pattern_strs = [
+                p.pattern if isinstance(p, re.Pattern) else str(p)
+                for p in patterns if not isinstance(p, ExpectTimeout)
+            ]
+            self.logger.log_custom_event(
+                "EXPECT_START",
+                f"Waiting for patterns: {pattern_strs}"
+            )
+
+        try:
+            while True:
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    if timeout_marker is not None:
+                        # Return timeout result with marker index
+                        idx, marker = timeout_marker
+                        _logger.debug(f"expect() timeout, returning marker at index {idx}")
+                        if self.logger:
+                            self.logger.log_custom_event(
+                                "EXPECT_TIMEOUT",
+                                f"Timeout after {elapsed:.1f}s"
+                            )
+                        return ExpectResult(
+                            matched_pattern=marker,
+                            match_index=idx,
+                            output=accumulated_output,
+                            matched_text="",
+                            before=accumulated_output,
+                            match=None
+                        )
+                    else:
+                        # Raise timeout error
+                        if self.logger:
+                            self.logger.log_custom_event(
+                                "EXPECT_TIMEOUT_ERROR",
+                                f"Timeout after {elapsed:.1f}s"
+                            )
+                        raise ExpectTimeoutError(
+                            timeout=timeout,
+                            patterns=patterns,
+                            output=accumulated_output
+                        )
+
+                # Get current screen contents
+                try:
+                    current_output = await self.get_screen_contents(
+                        max_lines=search_window_lines
+                    )
+                except Exception as e:
+                    if "SESSION_NOT_FOUND" in str(e):
+                        _logger.error("Session closed during expect()")
+                        raise ExpectError(f"Session closed during expect(): {e}")
+                    raise
+
+                # Check for new content
+                if current_output != last_output:
+                    accumulated_output = current_output
+                    last_output = current_output
+
+                    # Check each pattern against the current output
+                    for idx, pattern in regex_patterns:
+                        match = pattern.search(current_output)
+                        if match:
+                            matched_text = match.group(0)
+                            before_text = current_output[:match.start()]
+
+                            _logger.debug(
+                                f"expect() matched pattern {idx}: {pattern.pattern!r}"
+                            )
+                            if self.logger:
+                                self.logger.log_custom_event(
+                                    "EXPECT_MATCH",
+                                    f"Pattern matched: {pattern.pattern!r}"
+                                )
+
+                            return ExpectResult(
+                                matched_pattern=pattern,
+                                match_index=idx,
+                                output=current_output,
+                                matched_text=matched_text,
+                                before=before_text,
+                                match=match
+                            )
+
+                # Wait before next poll (don't overshoot timeout)
+                remaining = timeout - (time.time() - start_time)
+                await asyncio.sleep(min(poll_interval, max(0.01, remaining)))
+
+        except asyncio.CancelledError:
+            _logger.debug("expect() cancelled")
+            if self.logger:
+                self.logger.log_custom_event("EXPECT_CANCELLED", "Operation cancelled")
+            raise
+
+    async def wait_for_prompt(
+        self,
+        timeout: int = 30,
+        custom_prompts: Optional[List[str]] = None
+    ) -> bool:
+        """Wait for a shell prompt to appear, indicating command completion.
+
+        This is a convenience wrapper around expect() for the common case
+        of waiting for a command to complete.
+
+        Args:
+            timeout: Maximum wait time in seconds (default 30)
+            custom_prompts: Additional prompt patterns to match. These are
+                           added to the default set of common shell prompts.
+
+        Returns:
+            True if a prompt was detected, False on timeout
+
+        Example:
+            # Execute command and wait for completion
+            await session.send_text("ls -la")
+            if await session.wait_for_prompt(timeout=10):
+                output = await session.get_screen_contents()
+                print("Command completed:", output)
+            else:
+                print("Command timed out")
+        """
+        # Common shell prompt patterns
+        default_prompts = [
+            r'\$\s*$',           # Bash prompt ending with $
+            r'>\s*$',            # Zsh/fish prompt ending with >
+            r'#\s*$',            # Root prompt ending with #
+            r'%\s*$',            # Zsh default ending with %
+            r'\]\s*$',           # Prompt ending with ]
+            r'❯\s*$',            # Starship/fancy prompt
+            r'➜\s*$',            # Oh-my-zsh arrow
+            r'\)\s*$',           # Prompt ending with )
+        ]
+
+        patterns = default_prompts.copy()
+        if custom_prompts:
+            patterns.extend(custom_prompts)
+
+        # Add timeout marker at the end
+        patterns.append(ExpectTimeout(timeout))
+
+        result = await self.expect(patterns, timeout=timeout)
+
+        # If we matched the timeout marker, return False
+        return result.match_index < len(patterns) - 1
+
+    async def wait_for_patterns(
+        self,
+        success_patterns: List[str],
+        error_patterns: Optional[List[str]] = None,
+        timeout: int = 30
+    ) -> Tuple[bool, ExpectResult]:
+        """Wait for success or error patterns in output.
+
+        A convenience method for the common case of waiting for a command
+        to succeed or fail.
+
+        Args:
+            success_patterns: Patterns indicating success
+            error_patterns: Patterns indicating failure (optional)
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            Tuple of (is_success, ExpectResult):
+                - is_success: True if a success pattern matched, False otherwise
+                - result: The full ExpectResult for detailed inspection
+
+        Example:
+            # Wait for git command to succeed or fail
+            await session.send_text("git push origin main")
+            is_success, result = await session.wait_for_patterns(
+                success_patterns=[r'Everything up-to-date', r'->\s+main'],
+                error_patterns=[r'error:', r'fatal:', r'rejected'],
+                timeout=60
+            )
+
+            if is_success:
+                print("Push succeeded!")
+            else:
+                print(f"Push failed: {result.matched_text}")
+        """
+        # Build combined pattern list
+        patterns: List[Union[str, ExpectTimeout]] = []
+        success_count = len(success_patterns)
+
+        # Add success patterns first
+        patterns.extend(success_patterns)
+
+        # Add error patterns
+        if error_patterns:
+            patterns.extend(error_patterns)
+
+        # Add timeout marker
+        patterns.append(ExpectTimeout(timeout))
+
+        result = await self.expect(patterns, timeout=timeout)
+
+        # Determine if it was a success pattern
+        is_success = result.match_index < success_count
+
+        return (is_success, result)
+
+    async def send_and_expect(
+        self,
+        text: str,
+        patterns: List[Union[str, re.Pattern, ExpectTimeout]],
+        timeout: int = 30,
+        execute: bool = True
+    ) -> ExpectResult:
+        """Send text and wait for expected output patterns.
+
+        Combines send_text() and expect() for convenience.
+
+        Args:
+            text: Text to send to the terminal
+            patterns: Patterns to wait for (see expect() for format)
+            timeout: Maximum wait time for patterns (default 30s)
+            execute: Whether to press Enter after sending (default True)
+
+        Returns:
+            ExpectResult from the expect() call
+
+        Example:
+            # Send command and wait for prompt
+            result = await session.send_and_expect(
+                "echo 'Hello World'",
+                [r'Hello World', r'error:', ExpectTimeout(10)]
+            )
+
+            if result.match_index == 0:
+                print("Command succeeded!")
+        """
+        await self.send_text(text, execute=execute)
+        return await self.expect(patterns, timeout=timeout)
+
+    async def interact_until(
+        self,
+        prompt_pattern: str,
+        responses: Dict[str, str],
+        timeout: int = 30,
+        max_iterations: int = 100
+    ) -> List[ExpectResult]:
+        """Handle interactive prompts automatically.
+
+        Useful for scripts that ask multiple questions, like installation
+        wizards or configuration tools.
+
+        Args:
+            prompt_pattern: Pattern indicating the interaction is complete
+            responses: Dict mapping prompt patterns to responses
+            timeout: Timeout per prompt (default 30s)
+            max_iterations: Maximum number of prompts to handle (default 100)
+
+        Returns:
+            List of ExpectResult from each interaction
+
+        Example:
+            # Handle npm init interactively
+            results = await session.interact_until(
+                prompt_pattern=r'Is this OK\?',
+                responses={
+                    r'package name:': 'my-package',
+                    r'version:': '1.0.0',
+                    r'description:': 'My awesome package',
+                    r'entry point:': 'index.js',
+                    r'test command:': 'npm test',
+                    r'git repository:': '',
+                    r'keywords:': '',
+                    r'author:': 'Me',
+                    r'license:': 'MIT',
+                }
+            )
+        """
+        results: List[ExpectResult] = []
+
+        # Build pattern list: prompt_pattern + all response patterns + timeout
+        # Track remaining response patterns (remove after answering to prevent re-matching)
+        remaining_responses = dict(responses)  # Copy to avoid mutating input
+
+        for iteration in range(max_iterations):
+            # Build current pattern list with remaining response patterns
+            current_patterns: List[Union[str, ExpectTimeout]] = [prompt_pattern]
+            response_pattern_list = list(remaining_responses.keys())
+            current_patterns.extend(response_pattern_list)
+            current_patterns.append(ExpectTimeout(timeout))
+
+            result = await self.expect(current_patterns, timeout=timeout)
+            results.append(result)
+
+            # Check if we hit the final prompt
+            if result.match_index == 0:
+                _logger.debug(f"interact_until completed after {iteration + 1} iterations")
+                break
+
+            # Check if we timed out
+            if isinstance(result.matched_pattern, ExpectTimeout):
+                _logger.warning(f"interact_until timed out at iteration {iteration + 1}")
+                break
+
+            # Find the matching response pattern and send response
+            if result.match_index > 0 and result.match_index <= len(response_pattern_list):
+                pattern = response_pattern_list[result.match_index - 1]
+                response = remaining_responses[pattern]
+                await self.send_text(response, execute=True)
+                # Remove answered pattern to prevent re-matching
+                del remaining_responses[pattern]
+        else:
+            _logger.warning(f"interact_until hit max iterations ({max_iterations})")
+
+        return results

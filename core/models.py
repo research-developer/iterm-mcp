@@ -606,3 +606,60 @@ class ManagerInfoResponse(BaseModel):
     delegation_strategy: str = Field(..., description="Delegation strategy")
     created_at: str = Field(..., description="Creation timestamp")
     metadata: Dict[str, str] = Field(default_factory=dict, description="Metadata")
+
+
+# ============================================================================
+# SESSION INFO MODELS (Issue #52)
+# ============================================================================
+
+
+class SessionInfo(BaseModel):
+    """Extended session information including tags and locks."""
+
+    session_id: str = Field(..., description="The session ID")
+    name: str = Field(..., description="Session name")
+    persistent_id: Optional[str] = Field(default=None, description="Persistent ID for reconnection")
+    agent: Optional[str] = Field(default=None, description="Registered agent name")
+    team: Optional[str] = Field(default=None, description="Primary team (first team if multiple)")
+    teams: List[str] = Field(default_factory=list, description="All teams the agent belongs to")
+    is_processing: bool = Field(default=False, description="Whether a command is running")
+
+    # Tag and lock information
+    tags: List[str] = Field(default_factory=list, description="Session tags")
+    locked: bool = Field(default=False, description="Whether session is locked")
+    locked_by: Optional[str] = Field(default=None, description="Agent holding the lock")
+    locked_at: Optional[datetime] = Field(default=None, description="When the lock was acquired")
+    pending_access_requests: int = Field(default=0, description="Number of pending access requests")
+
+
+class ListSessionsRequest(BaseModel):
+    """Request parameters for list_sessions with filtering."""
+
+    # Filter by tags
+    tag: Optional[str] = Field(default=None, description="Single tag to filter by")
+    tags: Optional[List[str]] = Field(default=None, description="Multiple tags to filter by")
+    match: Literal["any", "all"] = Field(
+        default="any",
+        description="How to match multiple tags: 'any' (OR) or 'all' (AND)"
+    )
+
+    # Filter by lock status
+    locked: Optional[bool] = Field(default=None, description="Filter by lock status")
+    locked_by: Optional[str] = Field(default=None, description="Filter by lock owner")
+
+    # Output format
+    format: Literal["full", "compact"] = Field(
+        default="full",
+        description="Output format: 'full' for JSON, 'compact' for one-line-per-session"
+    )
+
+    # Existing filter
+    agents_only: bool = Field(default=False, description="Only show sessions with registered agents")
+
+
+class ListSessionsResponse(BaseModel):
+    """Response from list_sessions."""
+
+    sessions: List[SessionInfo] = Field(..., description="Matching sessions")
+    total_count: int = Field(..., description="Total number of matching sessions")
+    filter_applied: bool = Field(default=False, description="Whether any filters were applied")
