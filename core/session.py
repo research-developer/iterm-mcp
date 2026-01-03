@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union, Callable, Literal, Any
+from typing import Dict, List, Optional, Tuple, Union, Callable, Literal
 
 import iterm2
 
@@ -24,14 +24,14 @@ class ExpectResult:
     """Result from an expect() operation.
 
     Attributes:
-        matched_pattern: The pattern string or regex that matched
+        matched_pattern: The pattern string, regex, or ExpectTimeout that matched
         match_index: Index of the matching pattern in the patterns list
         output: Full output captured up to and including the match
         matched_text: The specific text that matched the pattern
         before: Text before the match
         match: The regex match object (if pattern was regex)
     """
-    matched_pattern: Union[str, re.Pattern]
+    matched_pattern: Union[str, re.Pattern, "ExpectTimeout"]
     match_index: int
     output: str
     matched_text: str
@@ -39,11 +39,13 @@ class ExpectResult:
     match: Optional[re.Match] = None
 
     def __repr__(self) -> str:
-        pattern_str = (
-            self.matched_pattern.pattern
-            if isinstance(self.matched_pattern, re.Pattern)
-            else self.matched_pattern
-        )
+        if isinstance(self.matched_pattern, re.Pattern):
+            pattern_str = self.matched_pattern.pattern
+        elif hasattr(self.matched_pattern, 'seconds'):
+            # ExpectTimeout case
+            pattern_str = repr(self.matched_pattern)
+        else:
+            pattern_str = self.matched_pattern
         return (
             f"ExpectResult(pattern={pattern_str!r}, index={self.match_index}, "
             f"matched_text={self.matched_text!r})"
@@ -85,7 +87,7 @@ class ExpectTimeoutError(ExpectError):
 
     This is only raised when no ExpectTimeout marker is in the patterns list.
     """
-    def __init__(self, timeout: float, patterns: List, output: str):
+    def __init__(self, timeout: float, patterns: List[Union[str, re.Pattern, "ExpectTimeout"]], output: str):
         self.timeout = timeout
         self.patterns = patterns
         self.output = output
@@ -228,15 +230,13 @@ class ItermSession:
                 return self.session.is_processing
             else:
                 # If it doesn't exist, log a warning and return a default value
-                import logging
-                logging.getLogger("iterm-mcp-session").warning(
+                _logger.warning(
                     f"Session {self.id} ({self._name}) does not have is_processing attribute"
                 )
                 return False
         except Exception as e:
             # Handle any exceptions that might occur
-            import logging
-            logging.getLogger("iterm-mcp-session").error(
+            _logger.error(
                 f"Error checking is_processing for session {self.id} ({self._name}): {str(e)}"
             )
             return False
@@ -458,16 +458,14 @@ class ItermSession:
         """
         if self._monitoring:
             return
-            
+
         # Initialize monitoring state, but only set to True once we confirm task is running
-        import logging
-        logger = logging.getLogger("iterm-mcp-session")
-        logger.info(f"Setting up monitoring for session {self.id} ({self._name})")
+        _logger.info(f"Setting up monitoring for session {self.id} ({self._name})")
         
         async def monitor_screen_polling():
             """Polling-based screen monitoring as a fallback approach."""
             try:
-                logger.info(f"Starting polling-based screen monitoring for session {self.id}")
+                _logger.info(f"Starting polling-based screen monitoring for session {self.id}")
                 
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_STARTED", "Polling-based screen monitoring started")
@@ -493,7 +491,7 @@ class ItermSession:
                                     task = asyncio.create_task(callback(current_content))
                                     callback_tasks.append(task)
                                 except Exception as callback_error:
-                                    logger.error(f"Error in callback: {str(callback_error)}")
+                                    _logger.error(f"Error in callback: {str(callback_error)}")
                             
                             # Wait for all callbacks to complete
                             if callback_tasks:
@@ -510,18 +508,18 @@ class ItermSession:
                         if "SESSION_NOT_FOUND" in str(poll_error):
                             if self._monitoring:
                                 # Only log at debug level since this is expected during cleanup
-                                logger.debug(f"Session no longer available during monitoring (likely closed): {self.id}")
+                                _logger.debug(f"Session no longer available during monitoring (likely closed): {self.id}")
                                 # Signal to exit the monitoring loop
                                 self._monitoring = False
                                 return
                         else:
                             # Log any other errors as actual errors
-                            logger.error(f"Error in polling loop: {str(poll_error)}")
+                            _logger.error(f"Error in polling loop: {str(poll_error)}")
                         await asyncio.sleep(update_interval)
             except asyncio.CancelledError:
-                logger.info(f"Polling monitor task cancelled for session {self.id}")
+                _logger.info(f"Polling monitor task cancelled for session {self.id}")
             except Exception as e:
-                logger.error(f"Fatal error in polling monitor: {str(e)}")
+                _logger.error(f"Fatal error in polling monitor: {str(e)}")
                 if self.logger:
                     self.logger.log_custom_event("MONITORING_ERROR", f"Error in screen monitoring: {str(e)}")
             finally:
@@ -542,9 +540,9 @@ class ItermSession:
         # Wait for the monitoring to be properly initialized before returning
         try:
             await asyncio.wait_for(monitoring_initialized.wait(), timeout=3.0)
-            logger.info(f"Monitoring successfully started for session {self.id}")
+            _logger.info(f"Monitoring successfully started for session {self.id}")
         except asyncio.TimeoutError:
-            logger.error(f"Timeout waiting for monitoring to initialize for session {self.id}")
+            _logger.error(f"Timeout waiting for monitoring to initialize for session {self.id}")
             # If initialization times out, clean up
             self._monitoring = False
             if not self._monitor_task.done():
@@ -554,14 +552,11 @@ class ItermSession:
         
     async def stop_monitoring(self) -> None:
         """Stop monitoring the screen for changes and ensure callbacks are completed."""
-        import logging
-        logger = logging.getLogger("iterm-mcp-session")
-        
         if not self._monitoring or not self._monitor_task:
-            logger.info(f"Monitoring already stopped for session {self.id}")
+            _logger.info(f"Monitoring already stopped for session {self.id}")
             return
-        
-        logger.info(f"Stopping monitoring for session {self.id}")
+
+        _logger.info(f"Stopping monitoring for session {self.id}")
         # Set monitoring flag to False first to signal the loop to exit
         self._monitoring = False
         
@@ -572,7 +567,7 @@ class ItermSession:
                 await asyncio.sleep(0.2)
                 # Cancel if still running after grace period
                 if not self._monitor_task.done():
-                    logger.info(f"Cancelling monitor task for session {self.id}")
+                    _logger.info(f"Cancelling monitor task for session {self.id}")
                     self._monitor_task.cancel()
                     # Wait for cancellation to complete
                     try:
@@ -580,11 +575,11 @@ class ItermSession:
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         pass
             except Exception as e:
-                logger.error(f"Error stopping monitoring for session {self.id}: {str(e)}")
-        
+                _logger.error(f"Error stopping monitoring for session {self.id}: {str(e)}")
+
         # Cleanup
         self._monitor_task = None
-        logger.info(f"Monitoring stopped for session {self.id}")
+        _logger.info(f"Monitoring stopped for session {self.id}")
         
     def add_monitor_callback(self, callback: Callable[[str], None]) -> None:
         """Add a callback to be called when the screen changes.
@@ -740,8 +735,8 @@ class ItermSession:
         Example:
             # Wait for shell prompt or error
             result = await session.expect([
-                r'\\$\\s*$',           # Shell prompt (bash)
-                r'>\\s*$',             # Shell prompt (zsh)
+                r'\$\s*$',             # Shell prompt (bash)
+                r'>\s*$',              # Shell prompt (zsh)
                 r'error:',             # Error detected
                 ExpectTimeout(30)      # Timeout (returns index 3)
             ])
@@ -857,11 +852,6 @@ class ItermSession:
 
                 # Check for new content
                 if current_output != last_output:
-                    # Accumulate new output (track changes for 'before' calculation)
-                    new_content = current_output
-                    if last_output and current_output.startswith(last_output):
-                        # If new output extends old, extract just the new part
-                        new_content = current_output[len(last_output):]
                     accumulated_output = current_output
                     last_output = current_output
 
@@ -890,8 +880,9 @@ class ItermSession:
                                 match=match
                             )
 
-                # Wait before next poll
-                await asyncio.sleep(poll_interval)
+                # Wait before next poll (don't overshoot timeout)
+                remaining = timeout - (time.time() - start_time)
+                await asyncio.sleep(min(poll_interval, max(0.01, remaining)))
 
         except asyncio.CancelledError:
             _logger.debug("expect() cancelled")
@@ -975,7 +966,7 @@ class ItermSession:
             # Wait for git command to succeed or fail
             await session.send_text("git push origin main")
             is_success, result = await session.wait_for_patterns(
-                success_patterns=[r'Everything up-to-date', r'->\\s+main'],
+                success_patterns=[r'Everything up-to-date', r'->\s+main'],
                 error_patterns=[r'error:', r'fatal:', r'rejected'],
                 timeout=60
             )
@@ -1063,7 +1054,7 @@ class ItermSession:
         Example:
             # Handle npm init interactively
             results = await session.interact_until(
-                prompt_pattern=r'Is this OK\\?',
+                prompt_pattern=r'Is this OK\?',
                 responses={
                     r'package name:': 'my-package',
                     r'version:': '1.0.0',
@@ -1080,13 +1071,17 @@ class ItermSession:
         results: List[ExpectResult] = []
 
         # Build pattern list: prompt_pattern + all response patterns + timeout
-        all_patterns: List[Union[str, ExpectTimeout]] = [prompt_pattern]
-        response_patterns = list(responses.keys())
-        all_patterns.extend(response_patterns)
-        all_patterns.append(ExpectTimeout(timeout))
+        # Track remaining response patterns (remove after answering to prevent re-matching)
+        remaining_responses = dict(responses)  # Copy to avoid mutating input
 
         for iteration in range(max_iterations):
-            result = await self.expect(all_patterns, timeout=timeout)
+            # Build current pattern list with remaining response patterns
+            current_patterns: List[Union[str, ExpectTimeout]] = [prompt_pattern]
+            response_pattern_list = list(remaining_responses.keys())
+            current_patterns.extend(response_pattern_list)
+            current_patterns.append(ExpectTimeout(timeout))
+
+            result = await self.expect(current_patterns, timeout=timeout)
             results.append(result)
 
             # Check if we hit the final prompt
@@ -1100,10 +1095,12 @@ class ItermSession:
                 break
 
             # Find the matching response pattern and send response
-            if result.match_index > 0 and result.match_index <= len(response_patterns):
-                pattern = response_patterns[result.match_index - 1]
-                response = responses[pattern]
+            if result.match_index > 0 and result.match_index <= len(response_pattern_list):
+                pattern = response_pattern_list[result.match_index - 1]
+                response = remaining_responses[pattern]
                 await self.send_text(response, execute=True)
+                # Remove answered pattern to prevent re-matching
+                del remaining_responses[pattern]
         else:
             _logger.warning(f"interact_until hit max iterations ({max_iterations})")
 

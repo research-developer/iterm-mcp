@@ -1,7 +1,6 @@
 """Tests for expect-style pattern matching functionality."""
 
 import asyncio
-import os
 import re
 import tempfile
 import shutil
@@ -12,7 +11,6 @@ import iterm2
 
 from core.terminal import ItermTerminal
 from core.session import (
-    ItermSession,
     ExpectResult,
     ExpectTimeout,
     ExpectError,
