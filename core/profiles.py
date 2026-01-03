@@ -310,7 +310,15 @@ class ProfileManager:
 
         Returns:
             TeamProfile for the team
+
+        Raises:
+            ValueError: If team_name is empty or None
         """
+        if not team_name or not team_name.strip():
+            raise ValueError("team_name cannot be empty or None")
+
+        team_name = team_name.strip()
+
         if team_name in self._team_profiles:
             return self._team_profiles[team_name]
 

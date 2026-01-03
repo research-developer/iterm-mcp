@@ -6,7 +6,7 @@ Quick implementation guide for adding profile-based team visual distinction to i
 
 ## 1. Profile Manager Module
 
-Create `core/profile_manager.py` for centralized profile operations:
+Create `core/profiles.py` for centralized profile operations:
 
 ```python
 """Profile management for team-based visual distinction."""
@@ -301,7 +301,7 @@ class NotificationManager:
 Add MCP tools for profile management:
 
 ```python
-# In server/fastmcp_server.py - add profile tools
+# In iterm_mcpy/fastmcp_server.py - add profile tools
 
 from fastmcp import Tool
 
@@ -595,4 +595,4 @@ if len(badge_text) > 30:
 - `/Users/preston/MCP/iterm-mcp/docs/PROFILES.md` - Full Profile API reference
 - `/Users/preston/MCP/iterm-mcp/core/agents.py` - AgentRegistry implementation
 - `/Users/preston/MCP/iterm-mcp/core/feedback.py` - Notification/Feedback system
-- `/Users/preston/MCP/iterm-mcp/server/fastmcp_server.py` - MCP tools
+- `/Users/preston/MCP/iterm-mcp/iterm_mcpy/fastmcp_server.py` - MCP tools
