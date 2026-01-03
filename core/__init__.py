@@ -74,6 +74,18 @@ from .models import (
     PlaybookCommandResult,
     OrchestrateRequest,
     OrchestrateResponse,
+    # Manager models
+    CreateManagerRequest,
+    CreateManagerResponse,
+    DelegateTaskRequest,
+    TaskResultResponse,
+    TaskStepSpec,
+    TaskPlanSpec,
+    ExecutePlanRequest,
+    PlanResultResponse,
+    AddWorkerRequest,
+    RemoveWorkerRequest,
+    ManagerInfoResponse,
     # Workflow event models
     TriggerEventRequest,
     TriggerEventResponse,
@@ -85,6 +97,17 @@ from .models import (
     GetEventHistoryResponse,
     PatternSubscriptionRequest,
     PatternSubscriptionResponse,
+)
+from .manager import (
+    SessionRole as ManagerSessionRole,
+    TaskStatus,
+    TaskResult,
+    TaskStep,
+    TaskPlan,
+    PlanResult,
+    DelegationStrategy,
+    ManagerAgent,
+    ManagerRegistry,
 )
 from .flows import (
     # Core classes
@@ -249,6 +272,16 @@ __all__ = [
     'FeedbackRegistry',
     'FeedbackForker',
     'GitHubIntegration',
+    # Manager agent classes
+    'SessionRole',
+    'TaskStatus',
+    'TaskResult',
+    'TaskStep',
+    'TaskPlan',
+    'PlanResult',
+    'DelegationStrategy',
+    'ManagerAgent',
+    'ManagerRegistry',
     # API models
     'SessionTarget',
     'SessionMessage',
@@ -274,6 +307,18 @@ __all__ = [
     'PlaybookCommandResult',
     'OrchestrateRequest',
     'OrchestrateResponse',
+    # Manager API models
+    'CreateManagerRequest',
+    'CreateManagerResponse',
+    'DelegateTaskRequest',
+    'TaskResultResponse',
+    'TaskStepSpec',
+    'TaskPlanSpec',
+    'ExecutePlanRequest',
+    'PlanResultResponse',
+    'AddWorkerRequest',
+    'RemoveWorkerRequest',
+    'ManagerInfoResponse',
     # Workflow event models
     'TriggerEventRequest',
     'TriggerEventResponse',

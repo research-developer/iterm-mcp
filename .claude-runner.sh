@@ -1,10 +1,10 @@
 #!/bin/bash
-cd "/Users/preston/MCP/iterm-mcp-issue-61-add-role-based-session-special"
+cd "/Users/preston/MCP/iterm-mcp-issue-65-add-hierarchical-task-delegati"
 
 # Set terminal title
-echo -ne "\033]0;Issue #61: Add Role-Based Session Specialization\007"
+echo -ne "\033]0;Issue #65: Add Hierarchical Task Delegation with Manager Agen\007"
 
-echo "🤖 Claude Code - Issue #61: Add Role-Based Session Specialization"
+echo "🤖 Claude Code - Issue #65: Add Hierarchical Task Delegation with Manager Agents"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "When Claude commits, a PR will be created automatically."
@@ -18,21 +18,21 @@ create_pr() {
 
   if [ "$COMMITS" -gt 0 ]; then
     # Check if PR already exists
-    EXISTING_PR=$(gh pr list --head "issue-61-add-role-based-session-special" --json number --jq '.[0].number' 2>/dev/null)
+    EXISTING_PR=$(gh pr list --head "issue-65-add-hierarchical-task-delegati" --json number --jq '.[0].number' 2>/dev/null)
 
     if [ -z "$EXISTING_PR" ]; then
       echo ""
       echo "📤 Pushing branch and creating PR..."
 
-      git push -u origin "issue-61-add-role-based-session-special" 2>/dev/null
+      git push -u origin "issue-65-add-hierarchical-task-delegati" 2>/dev/null
 
       COMMIT_LIST=$(git log origin/main..HEAD --pretty=format:'- %s' | head -10)
 
       PR_URL=$(gh pr create \
-        --title "Fix #61: Add Role-Based Session Specialization" \
+        --title "Fix #65: Add Hierarchical Task Delegation with Manager Agents" \
         --body "## Summary
 
-Closes #61
+Closes #65
 
 ## Changes
 
@@ -41,7 +41,7 @@ $COMMIT_LIST
 ---
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)" \
-        --head "issue-61-add-role-based-session-special" \
+        --head "issue-65-add-hierarchical-task-delegati" \
         --base main 2>/dev/null)
 
       if [ -n "$PR_URL" ]; then
@@ -55,11 +55,11 @@ $COMMIT_LIST
         echo ""
         # Update terminal title with PR info
         PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$')
-        echo -ne "\033]0;Issue #61 → PR #$PR_NUM\007"
+        echo -ne "\033]0;Issue #65 → PR #$PR_NUM\007"
       fi
     else
       # PR exists, just push new commits
-      git push origin "issue-61-add-role-based-session-special" 2>/dev/null
+      git push origin "issue-65-add-hierarchical-task-delegati" 2>/dev/null
       echo ""
       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       echo "📤 Pushed new commits to PR #$EXISTING_PR"
@@ -82,10 +82,10 @@ done &
 WATCHER_PID=$!
 
 # Run Claude interactively
-claude --dangerously-skip-permissions "$(cat '/Users/preston/MCP/iterm-mcp-issue-61-add-role-based-session-special/.claude-prompt.txt')"
+claude --dangerously-skip-permissions "$(cat '/Users/preston/MCP/iterm-mcp-issue-65-add-hierarchical-task-delegati/.claude-prompt.txt')"
 
 # Clean up prompt file
-rm -f '/Users/preston/MCP/iterm-mcp-issue-61-add-role-based-session-special/.claude-prompt.txt'
+rm -f '/Users/preston/MCP/iterm-mcp-issue-65-add-hierarchical-task-delegati/.claude-prompt.txt'
 
 # Kill the watcher
 kill $WATCHER_PID 2>/dev/null
@@ -96,7 +96,7 @@ create_pr > /dev/null
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Claude session ended. Terminal staying open."
-echo "To clean up after merge: claude-issue clean 61"
+echo "To clean up after merge: claude-issue clean 65"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 

@@ -600,6 +600,148 @@ class WaitResult(BaseModel):
 
 
 # ============================================================================
+# MANAGER AGENT MODELS (MCP API)
+# ============================================================================
+
+SessionRoleType = Literal[
+    "builder", "tester", "devops", "reviewer",
+    "researcher", "writer", "analyst", "coordinator", "general"
+]
+
+DelegationStrategyType = Literal[
+    "round_robin", "role_based", "least_busy", "random", "priority"
+]
+
+TaskStatusType = Literal[
+    "pending", "in_progress", "completed", "failed", "skipped", "validation_failed"
+]
+
+
+class CreateManagerRequest(BaseModel):
+    """Request to create a manager agent."""
+
+    name: str = Field(..., description="Unique name for the manager")
+    workers: List[str] = Field(default_factory=list, description="Worker agent names")
+    delegation_strategy: DelegationStrategyType = Field(
+        default="role_based",
+        description="Strategy for selecting workers"
+    )
+    worker_roles: Dict[str, SessionRoleType] = Field(
+        default_factory=dict,
+        description="Mapping of worker names to their roles"
+    )
+    metadata: Dict[str, str] = Field(default_factory=dict, description="Additional metadata")
+
+
+class CreateManagerResponse(BaseModel):
+    """Response from creating a manager."""
+
+    name: str = Field(..., description="Manager name")
+    workers: List[str] = Field(..., description="Registered workers")
+    delegation_strategy: str = Field(..., description="Delegation strategy")
+    created: bool = Field(default=True, description="Whether creation succeeded")
+
+
+class DelegateTaskRequest(BaseModel):
+    """Request to delegate a task through a manager."""
+
+    manager: str = Field(..., description="Manager name")
+    task: str = Field(..., description="Task description/command to execute")
+    role: Optional[SessionRoleType] = Field(default=None, description="Required worker role")
+    validation: Optional[str] = Field(
+        default=None,
+        description="Validation: regex pattern or 'success'"
+    )
+    timeout_seconds: Optional[int] = Field(default=None, description="Execution timeout")
+    retry_count: int = Field(default=0, ge=0, le=5, description="Retries on failure")
+
+
+class TaskResultResponse(BaseModel):
+    """Response containing task execution result."""
+
+    task_id: str = Field(..., description="Unique task identifier")
+    task: str = Field(..., description="Task that was executed")
+    worker: str = Field(..., description="Worker that executed the task")
+    status: TaskStatusType = Field(..., description="Task status")
+    success: bool = Field(..., description="Whether task succeeded")
+    output: Optional[str] = Field(default=None, description="Task output")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    duration_seconds: Optional[float] = Field(default=None, description="Execution duration")
+    validation_passed: Optional[bool] = Field(default=None, description="Validation result")
+    validation_message: Optional[str] = Field(default=None, description="Validation message")
+
+
+class TaskStepSpec(BaseModel):
+    """Specification for a single task step in a plan."""
+
+    id: str = Field(..., description="Unique step identifier")
+    task: str = Field(..., description="Task description to execute")
+    role: Optional[SessionRoleType] = Field(default=None, description="Required worker role")
+    optional: bool = Field(default=False, description="Whether failure should stop plan")
+    depends_on: List[str] = Field(default_factory=list, description="Step IDs this depends on")
+    validation: Optional[str] = Field(default=None, description="Validation pattern or 'success'")
+    timeout_seconds: Optional[int] = Field(default=None, description="Max execution time")
+    retry_count: int = Field(default=0, ge=0, le=5, description="Retries on failure")
+
+
+class TaskPlanSpec(BaseModel):
+    """Specification for a multi-step task plan."""
+
+    name: str = Field(..., description="Plan name")
+    description: Optional[str] = Field(default=None, description="Plan description")
+    steps: List[TaskStepSpec] = Field(..., min_length=1, description="Steps to execute")
+    parallel_groups: List[List[str]] = Field(
+        default_factory=list,
+        description="Groups of step IDs that can run in parallel"
+    )
+    stop_on_failure: bool = Field(default=True, description="Stop on first failure")
+
+
+class ExecutePlanRequest(BaseModel):
+    """Request to execute a task plan."""
+
+    manager: str = Field(..., description="Manager name")
+    plan: TaskPlanSpec = Field(..., description="Plan to execute")
+
+
+class PlanResultResponse(BaseModel):
+    """Response containing plan execution results."""
+
+    plan_name: str = Field(..., description="Name of the executed plan")
+    success: bool = Field(..., description="Whether plan completed successfully")
+    results: List[TaskResultResponse] = Field(..., description="Results for each step")
+    duration_seconds: Optional[float] = Field(default=None, description="Total duration")
+    stopped_early: bool = Field(default=False, description="Whether plan stopped early")
+    stop_reason: Optional[str] = Field(default=None, description="Reason for early stop")
+
+
+class AddWorkerRequest(BaseModel):
+    """Request to add a worker to a manager."""
+
+    manager: str = Field(..., description="Manager name")
+    worker: str = Field(..., description="Worker agent name")
+    role: Optional[SessionRoleType] = Field(default=None, description="Worker role")
+
+
+class RemoveWorkerRequest(BaseModel):
+    """Request to remove a worker from a manager."""
+
+    manager: str = Field(..., description="Manager name")
+    worker: str = Field(..., description="Worker agent name")
+
+
+class ManagerInfoResponse(BaseModel):
+    """Information about a manager agent."""
+
+    name: str = Field(..., description="Manager name")
+    workers: List[str] = Field(..., description="Worker names")
+    worker_roles: Dict[str, str] = Field(..., description="Worker role mappings")
+    delegation_strategy: str = Field(..., description="Delegation strategy")
+    created_at: str = Field(..., description="Creation timestamp")
+    metadata: Dict[str, str] = Field(default_factory=dict, description="Metadata")
+
+
+# ============================================================================
 # WORKFLOW EVENT MODELS
 # ============================================================================
 
