@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple, Union, Callable, Literal
 import iterm2
 
 from utils.logging import ItermSessionLogger
-from utils.otel import trace_operation, add_span_attributes, add_span_event, create_span
+from utils.otel import trace_operation, add_span_attributes, add_span_event
 
 # Characters that can cause shell parsing issues when typed directly
 # These require base64 encoding to safely execute

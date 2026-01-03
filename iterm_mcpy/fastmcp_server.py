@@ -25,11 +25,8 @@ from utils.telemetry import TelemetryEmitter
 from utils.otel import (
     init_tracing,
     shutdown_tracing,
-    get_tracer,
     trace_operation,
     add_span_attributes,
-    add_span_event,
-    create_span,
 )
 from core.tags import SessionTagLockManager, FocusCooldownManager
 from core.profiles import ProfileManager, get_profile_manager

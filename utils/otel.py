@@ -38,7 +38,7 @@ from typing import Any, Callable, Dict, Optional, TypeVar, Union
 # OpenTelemetry imports with graceful fallback
 try:
     from opentelemetry import trace
-    from opentelemetry.trace import Status, StatusCode, Span, Tracer
+    from opentelemetry.trace import Status, StatusCode
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import (
         BatchSpanProcessor,
@@ -77,6 +77,16 @@ OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "iterm-mcp")
 OTEL_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 OTEL_EXPORTER = os.getenv("OTEL_TRACES_EXPORTER", "otlp")
 OTEL_CONSOLE = os.getenv("OTEL_CONSOLE_EXPORTER", "false").lower() in ("true", "1", "yes")
+OTEL_INSECURE = os.getenv("OTEL_EXPORTER_OTLP_INSECURE", "true").lower() in ("true", "1", "yes")
+
+
+def _get_service_version() -> str:
+    """Get service version from package metadata or fallback."""
+    try:
+        from importlib.metadata import version
+        return version("iterm-mcp")
+    except Exception:
+        return "0.1.0"  # Fallback version
 
 
 class NoOpSpan:
@@ -160,7 +170,7 @@ def init_tracing(
         # Create resource with service information
         resource = Resource.create({
             ResourceAttributes.SERVICE_NAME: svc_name,
-            ResourceAttributes.SERVICE_VERSION: "0.1.0",
+            ResourceAttributes.SERVICE_VERSION: _get_service_version(),
             "deployment.environment": os.getenv("OTEL_ENVIRONMENT", "development"),
         })
 
@@ -182,7 +192,7 @@ def init_tracing(
             try:
                 otlp_exporter = OTLPSpanExporter(
                     endpoint=otlp_endpoint,
-                    insecure=True,  # Use HTTP for local development
+                    insecure=OTEL_INSECURE,  # Configurable via OTEL_EXPORTER_OTLP_INSECURE
                 )
                 otlp_processor = BatchSpanProcessor(otlp_exporter)
                 provider.add_span_processor(otlp_processor)
@@ -248,6 +258,42 @@ def shutdown_tracing() -> None:
     _initialized = False
 
 
+def _setup_span_attributes(
+    span: Any,
+    operation_name: str,
+    args: tuple,
+    kwargs: dict,
+    extract_agent: bool,
+    extract_session: bool,
+    record_args: bool,
+) -> None:
+    """Set up common span attributes for tracing.
+
+    Args:
+        span: The span to add attributes to
+        operation_name: Name of the operation
+        args: Function positional arguments
+        kwargs: Function keyword arguments
+        extract_agent: Whether to extract agent name
+        extract_session: Whether to extract session ID
+        record_args: Whether to record function arguments
+    """
+    span.set_attribute("operation.name", operation_name)
+
+    if extract_agent:
+        agent_name = _extract_agent_name(args, kwargs)
+        if agent_name:
+            span.set_attribute("agent.name", agent_name)
+
+    if extract_session:
+        session_id = _extract_session_id(args, kwargs)
+        if session_id:
+            span.set_attribute("session.id", session_id)
+
+    if record_args:
+        _record_arguments(span, args, kwargs)
+
+
 def trace_operation(
     operation_name: str,
     *,
@@ -283,24 +329,10 @@ def trace_operation(
             tracer = get_tracer()
 
             with tracer.start_as_current_span(operation_name) as span:
-                # Set common attributes
-                span.set_attribute("operation.name", operation_name)
-
-                # Extract agent name from various sources
-                if extract_agent:
-                    agent_name = _extract_agent_name(args, kwargs)
-                    if agent_name:
-                        span.set_attribute("agent.name", agent_name)
-
-                # Extract session ID from various sources
-                if extract_session:
-                    session_id = _extract_session_id(args, kwargs)
-                    if session_id:
-                        span.set_attribute("session.id", session_id)
-
-                # Record arguments if requested
-                if record_args:
-                    _record_arguments(span, args, kwargs)
+                _setup_span_attributes(
+                    span, operation_name, args, kwargs,
+                    extract_agent, extract_session, record_args
+                )
 
                 try:
                     result = await func(*args, **kwargs)
@@ -308,9 +340,7 @@ def trace_operation(
                     if OTEL_AVAILABLE:
                         span.set_status(Status(StatusCode.OK))
 
-                    # Record result info if applicable
                     _record_result(span, result)
-
                     return result
 
                 except Exception as e:
@@ -324,20 +354,10 @@ def trace_operation(
             tracer = get_tracer()
 
             with tracer.start_as_current_span(operation_name) as span:
-                span.set_attribute("operation.name", operation_name)
-
-                if extract_agent:
-                    agent_name = _extract_agent_name(args, kwargs)
-                    if agent_name:
-                        span.set_attribute("agent.name", agent_name)
-
-                if extract_session:
-                    session_id = _extract_session_id(args, kwargs)
-                    if session_id:
-                        span.set_attribute("session.id", session_id)
-
-                if record_args:
-                    _record_arguments(span, args, kwargs)
+                _setup_span_attributes(
+                    span, operation_name, args, kwargs,
+                    extract_agent, extract_session, record_args
+                )
 
                 try:
                     result = func(*args, **kwargs)

@@ -854,6 +854,7 @@ Configure via environment variables:
 | `OTEL_ENABLED` | `true` | Enable/disable tracing |
 | `OTEL_SERVICE_NAME` | `iterm-mcp` | Service name in traces |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use insecure (HTTP) connection to collector |
 | `OTEL_TRACES_EXPORTER` | `otlp` | Exporter type (`otlp`, `console`, `none`) |
 | `OTEL_CONSOLE_EXPORTER` | `false` | Enable console exporter for debugging |
 | `OTEL_ENVIRONMENT` | `development` | Deployment environment tag |
@@ -875,6 +876,12 @@ The following operations are automatically traced:
 - `agent_registry.create_team` - Team creation
 - `agent_registry.remove_team` - Team removal
 - `agent_registry.resolve_cascade_targets` - Cascade message resolution
+
+**RPC/Service Operations:**
+- `execute_create_sessions` - Create and initialize new sessions
+- `execute_write_request` - Write data or commands to sessions
+- `execute_read_request` - Read data or screen contents from sessions
+- `execute_cascade_request` - Execute cascade operations across agents/teams
 
 Each span includes relevant attributes like `agent.name`, `session.id`, `team.name`, and operation-specific metadata.
 

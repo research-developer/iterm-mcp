@@ -3,7 +3,7 @@
 import asyncio
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 class TestOtelModule(unittest.TestCase):
@@ -137,7 +137,7 @@ class TestOtelModule(unittest.TestCase):
             async def async_function(x, y):
                 return x + y
 
-            result = asyncio.get_event_loop().run_until_complete(async_function(3, 4))
+            result = asyncio.run(async_function(3, 4))
             self.assertEqual(result, 7)
         finally:
             otel_module.OTEL_AVAILABLE = original_available
