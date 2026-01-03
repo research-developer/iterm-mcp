@@ -2,15 +2,100 @@
 
 import asyncio
 import base64
+import logging
 import os
 import re
 import time
 import uuid
-from typing import Dict, List, Optional, Tuple, Union, Callable, Literal
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union, Callable, Literal, Any
 
 import iterm2
 
 from utils.logging import ItermSessionLogger
+
+
+# Logger for session module
+_logger = logging.getLogger("iterm-mcp-session")
+
+
+@dataclass
+class ExpectResult:
+    """Result from an expect() operation.
+
+    Attributes:
+        matched_pattern: The pattern string or regex that matched
+        match_index: Index of the matching pattern in the patterns list
+        output: Full output captured up to and including the match
+        matched_text: The specific text that matched the pattern
+        before: Text before the match
+        match: The regex match object (if pattern was regex)
+    """
+    matched_pattern: Union[str, re.Pattern]
+    match_index: int
+    output: str
+    matched_text: str
+    before: str = ""
+    match: Optional[re.Match] = None
+
+    def __repr__(self) -> str:
+        pattern_str = (
+            self.matched_pattern.pattern
+            if isinstance(self.matched_pattern, re.Pattern)
+            else self.matched_pattern
+        )
+        return (
+            f"ExpectResult(pattern={pattern_str!r}, index={self.match_index}, "
+            f"matched_text={self.matched_text!r})"
+        )
+
+
+class ExpectTimeout:
+    """Marker class for timeout in expect() pattern lists.
+
+    Use this in the patterns list to specify a timeout that returns
+    a specific index instead of raising an exception.
+
+    Example:
+        result = await session.expect([
+            r'success',
+            r'error',
+            ExpectTimeout(30)  # Returns match_index=2 on timeout
+        ])
+    """
+    def __init__(self, seconds: int = 30):
+        """Initialize an ExpectTimeout marker.
+
+        Args:
+            seconds: Timeout duration in seconds
+        """
+        self.seconds = seconds
+
+    def __repr__(self) -> str:
+        return f"ExpectTimeout({self.seconds})"
+
+
+class ExpectError(Exception):
+    """Base exception for expect operations."""
+    pass
+
+
+class ExpectTimeoutError(ExpectError):
+    """Raised when expect() times out without matching any pattern.
+
+    This is only raised when no ExpectTimeout marker is in the patterns list.
+    """
+    def __init__(self, timeout: float, patterns: List, output: str):
+        self.timeout = timeout
+        self.patterns = patterns
+        self.output = output
+        pattern_strs = [
+            p.pattern if isinstance(p, re.Pattern) else str(p)
+            for p in patterns if not isinstance(p, ExpectTimeout)
+        ]
+        super().__init__(
+            f"Timeout after {timeout}s waiting for patterns: {pattern_strs}"
+        )
 
 # Characters that can cause shell parsing issues when typed directly
 # These require base64 encoding to safely execute
@@ -610,3 +695,416 @@ class ItermSession:
 
         if self.logger:
             self.logger.log_custom_event("RESET_COLORS", "Colors reset to profile defaults")
+
+    # =========================================================================
+    # Expect-Style Pattern Matching
+    # =========================================================================
+
+    async def expect(
+        self,
+        patterns: List[Union[str, re.Pattern, ExpectTimeout]],
+        timeout: int = 30,
+        poll_interval: float = 0.1,
+        search_window_lines: Optional[int] = None
+    ) -> ExpectResult:
+        """Wait for one of the patterns to appear in terminal output.
+
+        This method polls the terminal screen and checks for pattern matches.
+        It's inspired by pexpect's expect() function but adapted for iTerm2's
+        async screen access.
+
+        Args:
+            patterns: List of patterns to match. Each can be:
+                - A string (treated as a regex pattern)
+                - A compiled re.Pattern object
+                - An ExpectTimeout marker (specifies timeout behavior)
+            timeout: Maximum wait time in seconds (default 30).
+                     Overridden by ExpectTimeout in patterns list.
+            poll_interval: How often to check for new output (default 0.1s)
+            search_window_lines: Number of lines to search (default: session max_lines)
+
+        Returns:
+            ExpectResult with match details including:
+                - matched_pattern: The pattern that matched
+                - match_index: Index of the matching pattern
+                - output: Full output up to the match
+                - matched_text: The specific text that matched
+                - before: Text before the match
+                - match: The regex match object
+
+        Raises:
+            ExpectTimeoutError: If timeout expires and no ExpectTimeout marker
+                               is in the patterns list
+            ValueError: If patterns list is empty or contains only ExpectTimeout
+
+        Example:
+            # Wait for shell prompt or error
+            result = await session.expect([
+                r'\\$\\s*$',           # Shell prompt (bash)
+                r'>\\s*$',             # Shell prompt (zsh)
+                r'error:',             # Error detected
+                ExpectTimeout(30)      # Timeout (returns index 3)
+            ])
+
+            if result.match_index == 0 or result.match_index == 1:
+                print("Command completed successfully")
+            elif result.match_index == 2:
+                print(f"Error detected: {result.matched_text}")
+            elif result.match_index == 3:
+                print("Timeout waiting for response")
+        """
+        # Validate and process patterns
+        if not patterns:
+            raise ValueError("patterns list cannot be empty")
+
+        # Separate patterns from timeout marker
+        regex_patterns: List[Tuple[int, re.Pattern]] = []
+        timeout_marker: Optional[Tuple[int, ExpectTimeout]] = None
+
+        for i, pattern in enumerate(patterns):
+            if isinstance(pattern, ExpectTimeout):
+                if timeout_marker is not None:
+                    _logger.warning("Multiple ExpectTimeout markers; using first one")
+                else:
+                    timeout_marker = (i, pattern)
+                    timeout = pattern.seconds  # Override timeout
+            elif isinstance(pattern, re.Pattern):
+                regex_patterns.append((i, pattern))
+            elif isinstance(pattern, str):
+                try:
+                    compiled = re.compile(pattern)
+                    regex_patterns.append((i, compiled))
+                except re.error as e:
+                    raise ValueError(f"Invalid regex pattern at index {i}: {e}")
+            else:
+                raise ValueError(
+                    f"Invalid pattern type at index {i}: {type(pattern).__name__}. "
+                    f"Expected str, re.Pattern, or ExpectTimeout"
+                )
+
+        if not regex_patterns:
+            raise ValueError("patterns list must contain at least one regex pattern")
+
+        # Determine search window
+        if search_window_lines is None:
+            search_window_lines = self._max_lines
+
+        # Track start time and accumulated output
+        start_time = time.time()
+        last_output = ""
+        accumulated_output = ""
+
+        _logger.debug(
+            f"expect() started: {len(regex_patterns)} patterns, "
+            f"timeout={timeout}s, poll={poll_interval}s"
+        )
+
+        if self.logger:
+            pattern_strs = [
+                p.pattern if isinstance(p, re.Pattern) else str(p)
+                for p in patterns if not isinstance(p, ExpectTimeout)
+            ]
+            self.logger.log_custom_event(
+                "EXPECT_START",
+                f"Waiting for patterns: {pattern_strs}"
+            )
+
+        try:
+            while True:
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed >= timeout:
+                    if timeout_marker is not None:
+                        # Return timeout result with marker index
+                        idx, marker = timeout_marker
+                        _logger.debug(f"expect() timeout, returning marker at index {idx}")
+                        if self.logger:
+                            self.logger.log_custom_event(
+                                "EXPECT_TIMEOUT",
+                                f"Timeout after {elapsed:.1f}s"
+                            )
+                        return ExpectResult(
+                            matched_pattern=marker,
+                            match_index=idx,
+                            output=accumulated_output,
+                            matched_text="",
+                            before=accumulated_output,
+                            match=None
+                        )
+                    else:
+                        # Raise timeout error
+                        if self.logger:
+                            self.logger.log_custom_event(
+                                "EXPECT_TIMEOUT_ERROR",
+                                f"Timeout after {elapsed:.1f}s"
+                            )
+                        raise ExpectTimeoutError(
+                            timeout=timeout,
+                            patterns=patterns,
+                            output=accumulated_output
+                        )
+
+                # Get current screen contents
+                try:
+                    current_output = await self.get_screen_contents(
+                        max_lines=search_window_lines
+                    )
+                except Exception as e:
+                    if "SESSION_NOT_FOUND" in str(e):
+                        _logger.error("Session closed during expect()")
+                        raise ExpectError(f"Session closed during expect(): {e}")
+                    raise
+
+                # Check for new content
+                if current_output != last_output:
+                    # Accumulate new output (track changes for 'before' calculation)
+                    new_content = current_output
+                    if last_output and current_output.startswith(last_output):
+                        # If new output extends old, extract just the new part
+                        new_content = current_output[len(last_output):]
+                    accumulated_output = current_output
+                    last_output = current_output
+
+                    # Check each pattern against the current output
+                    for idx, pattern in regex_patterns:
+                        match = pattern.search(current_output)
+                        if match:
+                            matched_text = match.group(0)
+                            before_text = current_output[:match.start()]
+
+                            _logger.debug(
+                                f"expect() matched pattern {idx}: {pattern.pattern!r}"
+                            )
+                            if self.logger:
+                                self.logger.log_custom_event(
+                                    "EXPECT_MATCH",
+                                    f"Pattern matched: {pattern.pattern!r}"
+                                )
+
+                            return ExpectResult(
+                                matched_pattern=pattern,
+                                match_index=idx,
+                                output=current_output,
+                                matched_text=matched_text,
+                                before=before_text,
+                                match=match
+                            )
+
+                # Wait before next poll
+                await asyncio.sleep(poll_interval)
+
+        except asyncio.CancelledError:
+            _logger.debug("expect() cancelled")
+            if self.logger:
+                self.logger.log_custom_event("EXPECT_CANCELLED", "Operation cancelled")
+            raise
+
+    async def wait_for_prompt(
+        self,
+        timeout: int = 30,
+        custom_prompts: Optional[List[str]] = None
+    ) -> bool:
+        """Wait for a shell prompt to appear, indicating command completion.
+
+        This is a convenience wrapper around expect() for the common case
+        of waiting for a command to complete.
+
+        Args:
+            timeout: Maximum wait time in seconds (default 30)
+            custom_prompts: Additional prompt patterns to match. These are
+                           added to the default set of common shell prompts.
+
+        Returns:
+            True if a prompt was detected, False on timeout
+
+        Example:
+            # Execute command and wait for completion
+            await session.send_text("ls -la")
+            if await session.wait_for_prompt(timeout=10):
+                output = await session.get_screen_contents()
+                print("Command completed:", output)
+            else:
+                print("Command timed out")
+        """
+        # Common shell prompt patterns
+        default_prompts = [
+            r'\$\s*$',           # Bash prompt ending with $
+            r'>\s*$',            # Zsh/fish prompt ending with >
+            r'#\s*$',            # Root prompt ending with #
+            r'%\s*$',            # Zsh default ending with %
+            r'\]\s*$',           # Prompt ending with ]
+            r'❯\s*$',            # Starship/fancy prompt
+            r'➜\s*$',            # Oh-my-zsh arrow
+            r'\)\s*$',           # Prompt ending with )
+        ]
+
+        patterns = default_prompts.copy()
+        if custom_prompts:
+            patterns.extend(custom_prompts)
+
+        # Add timeout marker at the end
+        patterns.append(ExpectTimeout(timeout))
+
+        result = await self.expect(patterns, timeout=timeout)
+
+        # If we matched the timeout marker, return False
+        return result.match_index < len(patterns) - 1
+
+    async def wait_for_patterns(
+        self,
+        success_patterns: List[str],
+        error_patterns: Optional[List[str]] = None,
+        timeout: int = 30
+    ) -> Tuple[bool, ExpectResult]:
+        """Wait for success or error patterns in output.
+
+        A convenience method for the common case of waiting for a command
+        to succeed or fail.
+
+        Args:
+            success_patterns: Patterns indicating success
+            error_patterns: Patterns indicating failure (optional)
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            Tuple of (is_success, ExpectResult):
+                - is_success: True if a success pattern matched, False otherwise
+                - result: The full ExpectResult for detailed inspection
+
+        Example:
+            # Wait for git command to succeed or fail
+            await session.send_text("git push origin main")
+            is_success, result = await session.wait_for_patterns(
+                success_patterns=[r'Everything up-to-date', r'->\\s+main'],
+                error_patterns=[r'error:', r'fatal:', r'rejected'],
+                timeout=60
+            )
+
+            if is_success:
+                print("Push succeeded!")
+            else:
+                print(f"Push failed: {result.matched_text}")
+        """
+        # Build combined pattern list
+        patterns: List[Union[str, ExpectTimeout]] = []
+        success_count = len(success_patterns)
+
+        # Add success patterns first
+        patterns.extend(success_patterns)
+
+        # Add error patterns
+        if error_patterns:
+            patterns.extend(error_patterns)
+
+        # Add timeout marker
+        patterns.append(ExpectTimeout(timeout))
+
+        result = await self.expect(patterns, timeout=timeout)
+
+        # Determine if it was a success pattern
+        is_success = result.match_index < success_count
+
+        return (is_success, result)
+
+    async def send_and_expect(
+        self,
+        text: str,
+        patterns: List[Union[str, re.Pattern, ExpectTimeout]],
+        timeout: int = 30,
+        execute: bool = True
+    ) -> ExpectResult:
+        """Send text and wait for expected output patterns.
+
+        Combines send_text() and expect() for convenience.
+
+        Args:
+            text: Text to send to the terminal
+            patterns: Patterns to wait for (see expect() for format)
+            timeout: Maximum wait time for patterns (default 30s)
+            execute: Whether to press Enter after sending (default True)
+
+        Returns:
+            ExpectResult from the expect() call
+
+        Example:
+            # Send command and wait for prompt
+            result = await session.send_and_expect(
+                "echo 'Hello World'",
+                [r'Hello World', r'error:', ExpectTimeout(10)]
+            )
+
+            if result.match_index == 0:
+                print("Command succeeded!")
+        """
+        await self.send_text(text, execute=execute)
+        return await self.expect(patterns, timeout=timeout)
+
+    async def interact_until(
+        self,
+        prompt_pattern: str,
+        responses: Dict[str, str],
+        timeout: int = 30,
+        max_iterations: int = 100
+    ) -> List[ExpectResult]:
+        """Handle interactive prompts automatically.
+
+        Useful for scripts that ask multiple questions, like installation
+        wizards or configuration tools.
+
+        Args:
+            prompt_pattern: Pattern indicating the interaction is complete
+            responses: Dict mapping prompt patterns to responses
+            timeout: Timeout per prompt (default 30s)
+            max_iterations: Maximum number of prompts to handle (default 100)
+
+        Returns:
+            List of ExpectResult from each interaction
+
+        Example:
+            # Handle npm init interactively
+            results = await session.interact_until(
+                prompt_pattern=r'Is this OK\\?',
+                responses={
+                    r'package name:': 'my-package',
+                    r'version:': '1.0.0',
+                    r'description:': 'My awesome package',
+                    r'entry point:': 'index.js',
+                    r'test command:': 'npm test',
+                    r'git repository:': '',
+                    r'keywords:': '',
+                    r'author:': 'Me',
+                    r'license:': 'MIT',
+                }
+            )
+        """
+        results: List[ExpectResult] = []
+
+        # Build pattern list: prompt_pattern + all response patterns + timeout
+        all_patterns: List[Union[str, ExpectTimeout]] = [prompt_pattern]
+        response_patterns = list(responses.keys())
+        all_patterns.extend(response_patterns)
+        all_patterns.append(ExpectTimeout(timeout))
+
+        for iteration in range(max_iterations):
+            result = await self.expect(all_patterns, timeout=timeout)
+            results.append(result)
+
+            # Check if we hit the final prompt
+            if result.match_index == 0:
+                _logger.debug(f"interact_until completed after {iteration + 1} iterations")
+                break
+
+            # Check if we timed out
+            if isinstance(result.matched_pattern, ExpectTimeout):
+                _logger.warning(f"interact_until timed out at iteration {iteration + 1}")
+                break
+
+            # Find the matching response pattern and send response
+            if result.match_index > 0 and result.match_index <= len(response_patterns):
+                pattern = response_patterns[result.match_index - 1]
+                response = responses[pattern]
+                await self.send_text(response, execute=True)
+        else:
+            _logger.warning(f"interact_until hit max iterations ({max_iterations})")
+
+        return results
