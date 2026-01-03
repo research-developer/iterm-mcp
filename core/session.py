@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple, Union, Callable, Literal
 import iterm2
 
 from utils.logging import ItermSessionLogger
+from utils.otel import trace_operation, add_span_attributes, add_span_event, create_span
 
 # Characters that can cause shell parsing issues when typed directly
 # These require base64 encoding to safely execute
@@ -178,6 +179,7 @@ class ItermSession:
         if self.logger:
             self.logger.log_session_renamed(name)
     
+    @trace_operation("session.send_text")
     async def send_text(self, text: str, execute: bool = True) -> None:
         """Send text to the session.
 
@@ -185,6 +187,13 @@ class ItermSession:
             text: The text to send
             execute: Whether to execute the text as a command by sending Enter
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            text_length=len(text),
+            execute=execute,
+        )
+
         # Strip any trailing newlines/carriage returns to avoid double execution
         clean_text = text.rstrip("\r\n")
 
@@ -198,11 +207,14 @@ class ItermSession:
             delay = calculate_text_delay(clean_text)
             await asyncio.sleep(delay)
             await self.session.async_send_text("\r")
-        
+
         # Log the command
         if self.logger:
             self.logger.log_command(clean_text)
 
+        add_span_event("text_sent", {"text_length": len(clean_text), "executed": execute})
+
+    @trace_operation("session.execute_command")
     async def execute_command(
         self,
         command: str,
@@ -227,6 +239,13 @@ class ItermSession:
             Only use encoding when absolutely necessary (e.g., binary data or
             control characters in the command).
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            command_length=len(command),
+            use_encoding=str(use_encoding),
+        )
+
         # Strip any trailing newlines/carriage returns from input
         clean_command = command.rstrip("\r\n")
 
@@ -265,66 +284,100 @@ class ItermSession:
         if self.logger:
             self.logger.log_command(clean_command)
 
+        add_span_event("command_executed", {
+            "command_length": len(clean_command),
+            "encoded": should_encode,
+        })
+
+    @trace_operation("session.get_screen_contents")
     async def get_screen_contents(self, max_lines: Optional[int] = None) -> str:
         """Get the contents of the session's screen.
-        
+
         Args:
             max_lines: Maximum number of lines to retrieve (defaults to session's max_lines)
-            
+
         Returns:
             The text contents of the screen
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            requested_max_lines=max_lines if max_lines is not None else self._max_lines,
+        )
+
         contents = await self.session.async_get_screen_contents()
         lines = []
-        
+
         # Use instance default if not specified
         if max_lines is None:
             max_lines = self._max_lines
-            
+
         max_lines = min(max_lines, contents.number_of_lines)
-        
+
         for i in range(max_lines):
             line = contents.line(i)
             line_text = line.string
             if line_text:
                 lines.append(line_text)
-        
+
         output = "\n".join(lines)
-        
+
         # Log the output
         if self.logger:
             self.logger.log_output(output)
-        
+
+        add_span_event("screen_contents_retrieved", {
+            "lines_retrieved": len(lines),
+            "total_lines_available": contents.number_of_lines,
+            "output_length": len(output),
+        })
+
         return output
     
+    @trace_operation("session.send_control_character")
     async def send_control_character(self, character: str) -> None:
         """Send a control character to the session.
-        
+
         Args:
             character: The character (e.g., "c" for Ctrl+C)
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            control_character=character.upper() if character.isalpha() else character,
+        )
+
         if len(character) != 1 or not character.isalpha():
             raise ValueError("Control character must be a single letter")
-            
+
         # Convert to uppercase and then to control code
         character = character.upper()
         code = ord(character) - 64
         control_sequence = chr(code)
-        
+
         await self.session.async_send_text(control_sequence)
-        
+
         # Log the control character
         if self.logger:
             self.logger.log_control_character(character)
+
+        add_span_event("control_character_sent", {"character": character})
     
+    @trace_operation("session.send_special_key")
     async def send_special_key(self, key: str) -> None:
         """Send a special key to the session.
-        
+
         Args:
             key: The special key name ('enter', 'return', 'tab', 'escape', etc.)
         """
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            special_key=key.lower(),
+        )
+
         key = key.lower()
-        
+
         # Map special key names to their character sequences
         key_map = {
             'enter': '\r',
@@ -342,16 +395,18 @@ class ItermSession:
             'home': '\x1b[H',
             'end': '\x1b[F'
         }
-        
+
         if key not in key_map:
             raise ValueError(f"Unknown special key: {key}. Supported keys: {', '.join(key_map.keys())}")
-        
+
         sequence = key_map[key]
         await self.session.async_send_text(sequence)
-        
+
         # Log the special key
         if self.logger:
             self.logger.log_custom_event("SPECIAL_KEY", f"Sent special key: {key}")
+
+        add_span_event("special_key_sent", {"key": key})
     
     async def clear_screen(self) -> None:
         """Clear the screen."""

@@ -22,6 +22,15 @@ from core.session import ItermSession
 from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage, SendTarget
 from utils.telemetry import TelemetryEmitter
+from utils.otel import (
+    init_tracing,
+    shutdown_tracing,
+    get_tracer,
+    trace_operation,
+    add_span_attributes,
+    add_span_event,
+    create_span,
+)
 from core.tags import SessionTagLockManager, FocusCooldownManager
 from core.profiles import ProfileManager, get_profile_manager
 from core.feedback import (
@@ -205,6 +214,13 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     logger = logging.getLogger("iterm-mcp-server")
     logger.info("Initializing iTerm2 connection...")
 
+    # Initialize OpenTelemetry tracing
+    tracing_enabled = init_tracing()
+    if tracing_enabled:
+        logger.info("OpenTelemetry tracing initialized successfully")
+    else:
+        logger.info("OpenTelemetry tracing not available (install with: pip install iterm-mcp[otel])")
+
     connection = None
     terminal = None
     layout_manager = None
@@ -319,6 +335,11 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     finally:
         # Clean up resources
         logger.info("Shutting down iTerm MCP server...")
+
+        # Shutdown OpenTelemetry tracing
+        shutdown_tracing()
+        logger.info("OpenTelemetry tracing shutdown completed")
+
         logger.info("iTerm MCP server shutdown completed")
 
 
@@ -509,6 +530,7 @@ async def resolve_target_sessions(
     return sessions
 
 
+@trace_operation("execute_create_sessions")
 async def execute_create_sessions(
     create_request: CreateSessionsRequest,
     terminal: ItermTerminal,
@@ -518,6 +540,12 @@ async def execute_create_sessions(
     profile_manager: Optional[ProfileManager] = None,
 ) -> CreateSessionsResponse:
     """Create sessions based on a CreateSessionsRequest."""
+
+    # Add span attributes
+    add_span_attributes(
+        layout=create_request.layout,
+        session_count=len(create_request.sessions),
+    )
 
     try:
         layout_type = LayoutType[create_request.layout.upper()]
@@ -619,6 +647,7 @@ async def execute_create_sessions(
     return CreateSessionsResponse(sessions=created, window_id=create_request.window_id or "")
 
 
+@trace_operation("execute_write_request")
 async def execute_write_request(
     write_request: WriteToSessionsRequest,
     terminal: ItermTerminal,
@@ -628,6 +657,13 @@ async def execute_write_request(
     notification_manager: Optional["NotificationManager"] = None,
 ) -> WriteToSessionsResponse:
     """Send messages according to WriteToSessionsRequest and return structured results."""
+
+    # Add span attributes for message count
+    add_span_attributes(
+        message_count=len(write_request.messages),
+        parallel=write_request.parallel,
+        skip_duplicates=write_request.skip_duplicates,
+    )
 
     results: List[WriteResult] = []
     active_agent = agent_registry.get_active_agent()
@@ -717,6 +753,7 @@ async def execute_write_request(
     )
 
 
+@trace_operation("execute_read_request")
 async def execute_read_request(
     read_request: ReadSessionsRequest,
     terminal: ItermTerminal,
@@ -724,6 +761,13 @@ async def execute_read_request(
     logger: logging.Logger,
 ) -> ReadSessionsResponse:
     """Read outputs according to ReadSessionsRequest."""
+
+    # Add span attributes
+    add_span_attributes(
+        target_count=len(read_request.targets) if read_request.targets else 1,
+        parallel=read_request.parallel,
+        has_filter=bool(read_request.filter_pattern),
+    )
 
     outputs: List[SessionOutput] = []
 
@@ -782,6 +826,7 @@ async def execute_read_request(
     return ReadSessionsResponse(outputs=outputs, total_sessions=len(outputs))
 
 
+@trace_operation("execute_cascade_request")
 async def execute_cascade_request(
     cascade_request: CascadeMessageRequest,
     terminal: ItermTerminal,
@@ -789,6 +834,14 @@ async def execute_cascade_request(
     logger: logging.Logger,
 ) -> CascadeMessageResponse:
     """Execute a cascade delivery and return structured results."""
+
+    # Add span attributes
+    add_span_attributes(
+        has_broadcast=bool(cascade_request.broadcast),
+        team_count=len(cascade_request.teams),
+        agent_count=len(cascade_request.agents),
+        skip_duplicates=cascade_request.skip_duplicates,
+    )
 
     cascade = CascadingMessage(
         broadcast=cascade_request.broadcast,

@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Set, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from utils.otel import trace_operation, add_span_attributes, add_span_event
+
 if TYPE_CHECKING:
     from .tags import SessionTagLockManager
 
@@ -153,6 +155,7 @@ class AgentRegistry:
 
     # ==================== Agent Management ====================
 
+    @trace_operation("agent_registry.register_agent")
     def register_agent(
         self,
         name: str,
@@ -171,6 +174,12 @@ class AgentRegistry:
         Returns:
             The created/updated Agent
         """
+        add_span_attributes(
+            agent_name=name,
+            session_id=session_id,
+            team_count=len(teams) if teams else 0,
+        )
+
         agent = Agent(
             name=name,
             session_id=session_id,
@@ -179,6 +188,12 @@ class AgentRegistry:
         )
         self._agents[name] = agent
         self._save_agents()
+
+        add_span_event("agent_registered", {
+            "agent_name": name,
+            "teams": ",".join(teams) if teams else "",
+        })
+
         return agent
 
     def get_agent(self, name: str) -> Optional[Agent]:
@@ -192,14 +207,20 @@ class AgentRegistry:
                 return agent
         return None
 
+    @trace_operation("agent_registry.remove_agent")
     def remove_agent(self, name: str) -> bool:
         """Remove an agent. Returns True if removed."""
+        add_span_attributes(agent_name=name)
+
         if name in self._agents:
             del self._agents[name]
             self._save_agents()
             if self.lock_manager:
                 self.lock_manager.release_locks_by_agent(name)
+            add_span_event("agent_removed", {"agent_name": name})
             return True
+
+        add_span_event("agent_not_found", {"agent_name": name})
         return False
 
     def list_agents(self, team: Optional[str] = None) -> List[Agent]:
@@ -228,6 +249,7 @@ class AgentRegistry:
 
     # ==================== Team Management ====================
 
+    @trace_operation("agent_registry.create_team")
     def create_team(
         self,
         name: str,
@@ -244,26 +266,47 @@ class AgentRegistry:
         Returns:
             The created Team
         """
+        add_span_attributes(
+            team_name=name,
+            has_parent=parent_team is not None,
+            parent_team=parent_team or "",
+        )
+
         team = Team(name=name, description=description, parent_team=parent_team)
         self._teams[name] = team
         self._save_teams()
+
+        add_span_event("team_created", {"team_name": name})
+
         return team
 
     def get_team(self, name: str) -> Optional[Team]:
         """Get team by name."""
         return self._teams.get(name)
 
+    @trace_operation("agent_registry.remove_team")
     def remove_team(self, name: str) -> bool:
         """Remove a team. Returns True if removed."""
+        add_span_attributes(team_name=name)
+
         if name in self._teams:
             del self._teams[name]
             self._save_teams()
             # Also remove team from all agents
+            affected_agents = []
             for agent in self._agents.values():
                 if name in agent.teams:
                     agent.teams.remove(name)
+                    affected_agents.append(agent.name)
             self._save_agents()
+
+            add_span_event("team_removed", {
+                "team_name": name,
+                "affected_agents": len(affected_agents),
+            })
             return True
+
+        add_span_event("team_not_found", {"team_name": name})
         return False
 
     def list_teams(self) -> List[Team]:
@@ -381,6 +424,7 @@ class AgentRegistry:
 
     # ==================== Cascading Messages ====================
 
+    @trace_operation("agent_registry.resolve_cascade_targets")
     def resolve_cascade_targets(self, cascade: CascadingMessage) -> Dict[str, List[str]]:
         """Resolve a cascading message to specific agent targets.
 
@@ -397,6 +441,12 @@ class AgentRegistry:
         Returns:
             Dict mapping message content to list of agent names
         """
+        add_span_attributes(
+            has_broadcast=cascade.broadcast is not None,
+            team_count=len(cascade.teams),
+            agent_count=len(cascade.agents),
+        )
+
         # Track which agents have been assigned a message (most specific wins)
         agent_messages: Dict[str, str] = {}  # agent_name -> message
 
@@ -421,6 +471,11 @@ class AgentRegistry:
             if message not in message_targets:
                 message_targets[message] = []
             message_targets[message].append(agent_name)
+
+        add_span_event("cascade_resolved", {
+            "total_agents": len(agent_messages),
+            "unique_messages": len(message_targets),
+        })
 
         return message_targets
 
