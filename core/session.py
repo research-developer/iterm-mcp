@@ -8,7 +8,8 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union, Callable, Literal
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Literal
 
 import iterm2
 
@@ -690,6 +691,88 @@ class ItermSession:
 
         if self.logger:
             self.logger.log_custom_event("RESET_COLORS", "Colors reset to profile defaults")
+
+    # ==================== State Persistence ====================
+
+    async def save_state(self) -> Dict[str, Any]:
+        """Serialize session state to a JSON-compatible dict.
+
+        Returns a snapshot of the session's current state that can be
+        used for checkpointing, crash recovery, or debugging.
+
+        Returns:
+            Dict containing serializable session state
+        """
+        # Capture current screen content if available
+        last_output = None
+        try:
+            last_output = await self.get_screen_contents(max_lines=100)
+        except Exception:
+            pass  # Screen content may not be available
+
+        # Get last command from logger if available (currently not exposed)
+        last_command = None
+
+        state = {
+            "session_id": self.id,
+            "persistent_id": self._persistent_id,
+            "name": self._name,
+            "max_lines": self._max_lines,
+            "is_monitoring": self._monitoring,
+            "last_screen_update": self._last_screen_update,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_command": last_command,
+            "last_output": last_output,
+            "metadata": {}
+        }
+
+        # Add logger telemetry if available
+        if self.logger:
+            state["metadata"]["command_count"] = getattr(self.logger, 'command_count', 0)
+            state["metadata"]["output_line_count"] = getattr(self.logger, 'output_line_count', 0)
+
+        return state
+
+    def load_state(self, state: Dict[str, Any]) -> None:
+        """Restore session configuration from a saved state dict.
+
+        Note: This restores configuration state only. The underlying
+        iTerm2 session object and live monitoring state cannot be
+        restored from a checkpoint - those require reconnection.
+
+        Args:
+            state: Previously saved state dict from save_state()
+        """
+        # Restore configurable properties
+        if "name" in state:
+            self._name = state["name"]
+
+        if "max_lines" in state:
+            self._max_lines = state["max_lines"]
+
+        if "last_screen_update" in state:
+            self._last_screen_update = state["last_screen_update"]
+
+        # Note: We don't restore is_monitoring because monitoring
+        # requires active tasks that can't be serialized
+
+        # Note: persistent_id and session_id are set during session
+        # creation and shouldn't be overwritten from checkpoint
+
+    def get_state_summary(self) -> Dict[str, Any]:
+        """Get a brief summary of session state for logging/debugging.
+
+        Returns:
+            Dict with key session state info
+        """
+        return {
+            "session_id": self.id,
+            "persistent_id": self._persistent_id,
+            "name": self._name,
+            "max_lines": self._max_lines,
+            "is_monitoring": self.is_monitoring,
+            "last_update": self._last_screen_update
+        }
 
     # =========================================================================
     # Expect-Style Pattern Matching
