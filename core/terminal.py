@@ -185,17 +185,31 @@ class ItermTerminal:
         # Return the matching ItermSession wrapper
         return self.sessions.get(iterm_session.session_id)
 
-    async def create_window(self) -> ItermSession:
+    async def create_window(self, profile: Optional[str] = None) -> ItermSession:
         """Create a new iTerm2 window.
-        
+
+        Args:
+            profile: Optional profile name to use. If None, uses the "MCP Agent"
+                     profile if it exists, otherwise the default profile.
+
         Returns:
             The session for the new window
         """
         if not self.app:
             raise RuntimeError("Terminal not initialized")
-        
-        # Create a new window with default profile
-        window = await iterm2.Window.async_create(connection=self.connection)
+
+        # Use MCP Agent profile by default if available
+        profile_to_use = profile or "MCP Agent"
+
+        # Create a new window with the specified profile
+        try:
+            window = await iterm2.Window.async_create(
+                connection=self.connection,
+                profile=profile_to_use
+            )
+        except Exception:
+            # Fall back to default profile if the specified profile doesn't exist
+            window = await iterm2.Window.async_create(connection=self.connection)
         
         # Get the first session from the window
         tabs = window.tabs
@@ -293,18 +307,21 @@ class ItermTerminal:
         return session
     
     async def create_split_pane(
-        self, 
-        session_id: str, 
+        self,
+        session_id: str,
         vertical: bool = False,
-        name: Optional[str] = None
+        name: Optional[str] = None,
+        profile: Optional[str] = None
     ) -> ItermSession:
         """Create a new split pane from an existing session.
-        
+
         Args:
             session_id: The ID of the session to split
             vertical: Whether to split vertically (True) or horizontally (False)
             name: Optional name for the new session
-            
+            profile: Optional profile name to use. If None, uses the "MCP Agent"
+                     profile if it exists.
+
         Returns:
             The session for the new pane
         """
@@ -312,13 +329,23 @@ class ItermTerminal:
         source_session = await self.get_session_by_id(session_id)
         if not source_session:
             raise ValueError(f"Session with ID {session_id} not found")
-        
-        # Create a new split pane
-        profile_customizations = iterm2.LocalWriteOnlyProfile()
-        new_session = await source_session.session.async_split_pane(
-            vertical=vertical,
-            profile_customizations=profile_customizations
-        )
+
+        # Use MCP Agent profile by default if available
+        profile_to_use = profile or "MCP Agent"
+
+        # Create a new split pane with the specified profile
+        try:
+            new_session = await source_session.session.async_split_pane(
+                vertical=vertical,
+                profile=profile_to_use
+            )
+        except Exception:
+            # Fall back to using profile customizations if profile doesn't exist
+            profile_customizations = iterm2.LocalWriteOnlyProfile()
+            new_session = await source_session.session.async_split_pane(
+                vertical=vertical,
+                profile_customizations=profile_customizations
+            )
         
         # Create a new ItermSession with logger and add to the dictionary
         iterm_session = ItermSession(

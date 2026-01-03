@@ -15,6 +15,15 @@ from .agents import (
     MessageRecord
 )
 from .tags import SessionTagLockManager, FocusCooldownManager
+from .profiles import (
+    ProfileManager,
+    TeamProfile,
+    TeamProfileColor,
+    ColorDistributor,
+    get_profile_manager,
+    MCP_AGENT_PROFILE_NAME,
+    MCP_AGENT_PROFILE_GUID,
+)
 from .feedback import (
     # Enums
     FeedbackCategory,
@@ -106,6 +115,14 @@ __all__ = [
     'MessageRecord',
     'SessionTagLockManager',
     'FocusCooldownManager',
+    # Profile management
+    'ProfileManager',
+    'TeamProfile',
+    'TeamProfileColor',
+    'ColorDistributor',
+    'get_profile_manager',
+    'MCP_AGENT_PROFILE_NAME',
+    'MCP_AGENT_PROFILE_GUID',
     # Feedback system
     'FeedbackCategory',
     'FeedbackStatus',
