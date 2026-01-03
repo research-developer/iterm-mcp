@@ -71,6 +71,46 @@ from .models import (
     OrchestrateResponse,
 )
 
+# Message-based communication
+from .messaging import (
+    # Base types
+    AgentMessage,
+    MessagePriority,
+    # Terminal messages
+    TerminalCommand,
+    TerminalOutput,
+    TerminalReadRequest,
+    TerminalReadResponse,
+    ControlCharacterMessage,
+    SpecialKeyMessage,
+    # Session messages
+    SessionStatusRequest,
+    SessionStatusResponse,
+    SessionListRequest,
+    SessionListResponse,
+    FocusSessionMessage,
+    # Agent orchestration messages
+    BroadcastNotification,
+    AgentTaskRequest,
+    AgentTaskResponse,
+    WaitForAgentMessage,
+    WaitForAgentResponse,
+    ErrorMessage,
+    # Routing
+    MessageRouter,
+    message_handler,
+    topic_handler,
+    get_handlers,
+    get_topic_handlers,
+    clear_handlers,
+    # Utilities
+    create_terminal_command,
+    create_broadcast,
+    MESSAGE_TYPES,
+    serialize_message,
+    deserialize_message,
+)
+
 # Type checking imports for IDE support
 if TYPE_CHECKING:
     from .session import ItermSession
@@ -164,4 +204,35 @@ __all__ = [
     'PlaybookCommandResult',
     'OrchestrateRequest',
     'OrchestrateResponse',
+    # Message-based communication
+    'AgentMessage',
+    'MessagePriority',
+    'TerminalCommand',
+    'TerminalOutput',
+    'TerminalReadRequest',
+    'TerminalReadResponse',
+    'ControlCharacterMessage',
+    'SpecialKeyMessage',
+    'SessionStatusRequest',
+    'SessionStatusResponse',
+    'SessionListRequest',
+    'SessionListResponse',
+    'FocusSessionMessage',
+    'BroadcastNotification',
+    'AgentTaskRequest',
+    'AgentTaskResponse',
+    'WaitForAgentMessage',
+    'WaitForAgentResponse',
+    'ErrorMessage',
+    'MessageRouter',
+    'message_handler',
+    'topic_handler',
+    'get_handlers',
+    'get_topic_handlers',
+    'clear_handlers',
+    'create_terminal_command',
+    'create_broadcast',
+    'MESSAGE_TYPES',
+    'serialize_message',
+    'deserialize_message',
 ]
