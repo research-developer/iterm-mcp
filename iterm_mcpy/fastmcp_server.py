@@ -118,6 +118,7 @@ from core.manager import (
     DelegationStrategy,
     ManagerAgent,
     ManagerRegistry,
+)
 from core.flows import (
     EventBus,
     EventPriority,
@@ -3695,7 +3696,10 @@ async def add_worker_to_manager(
 
     except Exception as e:
         logger.error(f"Error adding worker to manager: {e}")
-=======
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
 # ROLE MANAGEMENT TOOLS
 # ============================================================================
 
