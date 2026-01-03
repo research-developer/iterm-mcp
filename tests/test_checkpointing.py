@@ -9,13 +9,11 @@ Tests cover:
 """
 
 import asyncio
-import json
 import os
 import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
 
 from core.checkpointing import (
     AgentState,
@@ -28,7 +26,7 @@ from core.checkpointing import (
     SQLiteCheckpointer,
     TeamState,
 )
-from core.agents import Agent, AgentRegistry, Team
+from core.agents import AgentRegistry
 
 
 class TestSessionState(unittest.TestCase):
@@ -905,7 +903,7 @@ class TestCheckpointWithRegistry(unittest.TestCase):
             )
 
             # Create checkpoint
-            checkpoint = await self.manager.create_checkpoint(
+            await self.manager.create_checkpoint(
                 registry=registry_state,
                 trigger="integration-test"
             )

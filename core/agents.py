@@ -498,70 +498,90 @@ class AgentRegistry:
 
         Args:
             state: Previously saved state dict from save_state()
+
+        Raises:
+            Exception: Re-raises any exception after rolling back to previous state
         """
-        # Clear current state
-        self._agents.clear()
-        self._teams.clear()
-        self._message_history.clear()
+        # Snapshot current state so we can roll back on failure
+        old_agents = dict(self._agents)
+        old_teams = dict(self._teams)
+        old_message_history = list(self._message_history)
+        old_active_session = self._active_session
 
-        # Restore agents
-        agents_data = state.get("agents", {})
-        for name, agent_data in agents_data.items():
-            # Parse created_at if it's a string
-            created_at = agent_data.get("created_at")
-            if isinstance(created_at, str):
-                created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            elif created_at is None:
-                created_at = datetime.now(timezone.utc)
+        try:
+            # Clear current state
+            self._agents.clear()
+            self._teams.clear()
+            self._message_history.clear()
 
-            agent = Agent(
-                name=agent_data["name"],
-                session_id=agent_data["session_id"],
-                teams=agent_data.get("teams", []),
-                created_at=created_at,
-                metadata=agent_data.get("metadata", {})
-            )
-            self._agents[name] = agent
+            # Restore agents
+            agents_data = state.get("agents", {})
+            for name, agent_data in agents_data.items():
+                # Parse created_at if it's a string
+                created_at = agent_data.get("created_at")
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                elif created_at is None:
+                    created_at = datetime.now(timezone.utc)
 
-        # Restore teams
-        teams_data = state.get("teams", {})
-        for name, team_data in teams_data.items():
-            created_at = team_data.get("created_at")
-            if isinstance(created_at, str):
-                created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            elif created_at is None:
-                created_at = datetime.now(timezone.utc)
+                agent = Agent(
+                    name=agent_data["name"],
+                    session_id=agent_data["session_id"],
+                    teams=agent_data.get("teams", []),
+                    created_at=created_at,
+                    metadata=agent_data.get("metadata", {})
+                )
+                self._agents[name] = agent
 
-            team = Team(
-                name=team_data["name"],
-                description=team_data.get("description", ""),
-                parent_team=team_data.get("parent_team"),
-                created_at=created_at
-            )
-            self._teams[name] = team
+            # Restore teams
+            teams_data = state.get("teams", {})
+            for name, team_data in teams_data.items():
+                created_at = team_data.get("created_at")
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                elif created_at is None:
+                    created_at = datetime.now(timezone.utc)
 
-        # Restore active session
-        self._active_session = state.get("active_session")
+                team = Team(
+                    name=team_data["name"],
+                    description=team_data.get("description", ""),
+                    parent_team=team_data.get("parent_team"),
+                    created_at=created_at
+                )
+                self._teams[name] = team
 
-        # Restore message history
-        message_history = state.get("message_history", [])
-        for record_data in message_history:
-            timestamp = record_data.get("timestamp")
-            if isinstance(timestamp, str):
-                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-            elif timestamp is None:
-                timestamp = datetime.now(timezone.utc)
+            # Restore active session
+            self._active_session = state.get("active_session")
 
-            record = MessageRecord(
-                content_hash=record_data["content_hash"],
-                recipients=record_data["recipients"],
-                timestamp=timestamp
-            )
-            self._message_history.append(record)
+            # Restore message history
+            message_history = state.get("message_history", [])
+            for record_data in message_history:
+                timestamp = record_data.get("timestamp")
+                if isinstance(timestamp, str):
+                    timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                elif timestamp is None:
+                    timestamp = datetime.now(timezone.utc)
 
-        # Persist restored state to files
-        self._save_agents()
-        self._save_teams()
+                record = MessageRecord(
+                    content_hash=record_data["content_hash"],
+                    recipients=record_data["recipients"],
+                    timestamp=timestamp
+                )
+                self._message_history.append(record)
+
+            # Persist restored state to files
+            self._save_agents()
+            self._save_teams()
+        except Exception:
+            # Roll back to previous state on any failure
+            self._agents.clear()
+            self._agents.update(old_agents)
+            self._teams.clear()
+            self._teams.update(old_teams)
+            self._message_history.clear()
+            self._message_history.extend(old_message_history)
+            self._active_session = old_active_session
+            raise
 
     def get_state_summary(self) -> Dict:
         """Get a brief summary of registry state for logging/debugging.

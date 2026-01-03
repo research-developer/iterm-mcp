@@ -7,14 +7,11 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable, Literal, TYPE_CHECKING
+from typing import Any, Dict, Optional, Union, Callable, Literal
 
 import iterm2
 
 from utils.logging import ItermSessionLogger
-
-if TYPE_CHECKING:
-    from .checkpointing import SessionState
 
 # Characters that can cause shell parsing issues when typed directly
 # These require base64 encoding to safely execute
@@ -633,11 +630,8 @@ class ItermSession:
         except Exception:
             pass  # Screen content may not be available
 
-        # Get last command from logger if available
+        # Get last command from logger if available (currently not exposed)
         last_command = None
-        if self.logger and hasattr(self.logger, 'latest_output'):
-            # Try to extract last command from logger telemetry
-            pass  # Logger doesn't expose last command directly
 
         state = {
             "session_id": self.id,

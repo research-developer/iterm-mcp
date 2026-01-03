@@ -12,10 +12,10 @@ Key features:
 """
 
 import json
+import logging
 import os
 import sqlite3
 import uuid
-from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Union, runtime_checkable
@@ -160,6 +160,10 @@ class FileCheckpointer:
 
     Stores checkpoints as JSON files in a directory structure.
     Good for development and debugging, not recommended for production.
+
+    Note: This implementation is NOT thread-safe. Index updates and file
+    operations are not protected by locks. Use only in single-threaded
+    contexts or wrap with external synchronization for concurrent access.
     """
 
     def __init__(self, checkpoint_dir: Optional[str] = None):
@@ -241,11 +245,19 @@ class FileCheckpointer:
         if not checkpoint_path.exists():
             return None
 
+        logger = logging.getLogger(__name__)
         try:
             with open(checkpoint_path, 'r') as f:
                 data = json.load(f)
             return Checkpoint.model_validate(data)
-        except (json.JSONDecodeError, IOError, Exception):
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse checkpoint {checkpoint_id}: {e}")
+            return None
+        except IOError as e:
+            logger.warning(f"Failed to read checkpoint {checkpoint_id}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to load checkpoint {checkpoint_id}: {e}")
             return None
 
     async def list_checkpoints(
@@ -296,13 +308,28 @@ class FileCheckpointer:
         if not checkpoint_path.exists():
             return False
 
+        # Preserve current index entry so we can roll back on failure
+        previous_meta = self._index.get(checkpoint_id)
+
         try:
-            checkpoint_path.unlink()
+            # First update the index and persist it
             if checkpoint_id in self._index:
                 del self._index[checkpoint_id]
                 self._save_index()
+
+            # Then remove the file from disk
+            checkpoint_path.unlink()
+
             return True
         except IOError:
+            # Attempt to roll back index changes if something failed
+            if previous_meta is not None:
+                self._index[checkpoint_id] = previous_meta
+                try:
+                    self._save_index()
+                except IOError:
+                    # If rollback persistence also fails, there is not much we can do
+                    pass
             return False
 
     async def get_latest(self, session_id: Optional[str] = None) -> Optional[Checkpoint]:
@@ -320,6 +347,46 @@ class FileCheckpointer:
             return None
 
         return await self.load(checkpoints[0]["checkpoint_id"])
+
+    async def cleanup_old_checkpoints(
+        self,
+        max_age_days: Optional[int] = None,
+        max_count: Optional[int] = None
+    ) -> int:
+        """Clean up old checkpoints based on age or count.
+
+        Args:
+            max_age_days: Delete checkpoints older than this many days
+            max_count: Keep only this many most recent checkpoints
+
+        Returns:
+            Number of checkpoints deleted
+        """
+        deleted_count = 0
+        checkpoints = await self.list_checkpoints(limit=1000)
+
+        if max_age_days is not None:
+            cutoff = datetime.now(timezone.utc).timestamp() - (max_age_days * 86400)
+            for cp in checkpoints:
+                created_at = cp.get("created_at", "")
+                if created_at:
+                    try:
+                        cp_time = datetime.fromisoformat(
+                            created_at.replace("Z", "+00:00")
+                        ).timestamp()
+                        if cp_time < cutoff:
+                            if await self.delete(cp["checkpoint_id"]):
+                                deleted_count += 1
+                    except (ValueError, TypeError):
+                        pass
+
+        if max_count is not None and len(checkpoints) > max_count:
+            # Delete oldest checkpoints beyond the limit
+            for cp in checkpoints[max_count:]:
+                if await self.delete(cp["checkpoint_id"]):
+                    deleted_count += 1
+
+        return deleted_count
 
 
 class SQLiteCheckpointer:
@@ -432,10 +499,15 @@ class SQLiteCheckpointer:
             if row is None:
                 return None
 
+            logger = logging.getLogger(__name__)
             try:
                 data = json.loads(row[0])
                 return Checkpoint.model_validate(data)
-            except (json.JSONDecodeError, Exception):
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse checkpoint {checkpoint_id}: {e}")
+                return None
+            except Exception as e:
+                logger.warning(f"Failed to load checkpoint {checkpoint_id}: {e}")
                 return None
 
     async def list_checkpoints(
