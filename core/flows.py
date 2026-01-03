@@ -48,7 +48,6 @@ from typing import (
     Set,
     Type,
     TypeVar,
-    Union,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,7 +114,7 @@ class ListenerInfo:
 
 
 class ListenerRegistry:
-    """Thread-safe registry for event listeners."""
+    """Coroutine-safe registry for event listeners."""
 
     def __init__(self):
         self._listeners: Dict[str, List[ListenerInfo]] = defaultdict(list)
@@ -127,8 +126,16 @@ class ListenerRegistry:
         """Register a listener."""
         async with self._lock:
             if listener.is_router:
+                if listener.event_name in self._routers:
+                    logger.warning(
+                        f"Overwriting existing router for event '{listener.event_name}'"
+                    )
                 self._routers[listener.event_name] = listener
             elif listener.is_start:
+                if listener.event_name in self._start_handlers:
+                    logger.warning(
+                        f"Overwriting existing start handler for event '{listener.event_name}'"
+                    )
                 self._start_handlers[listener.event_name] = listener
             else:
                 self._listeners[listener.event_name].append(listener)
@@ -230,11 +237,19 @@ class EventBus:
         """Stop the event processing loop."""
         self._running = False
         if self._process_task:
+            # Check for unprocessed events
+            pending_count = self._event_queue.qsize()
+            if pending_count > 0:
+                self._logger.warning(
+                    f"EventBus stopping with {pending_count} unprocessed events in queue"
+                )
+
             # Signal stop by putting a None event
             await self._event_queue.put(None)  # type: ignore
             try:
                 await asyncio.wait_for(self._process_task, timeout=5.0)
             except asyncio.TimeoutError:
+                self._logger.warning("EventBus processing loop timed out during shutdown")
                 self._process_task.cancel()
             self._process_task = None
         self._logger.info("EventBus stopped")
@@ -293,10 +308,21 @@ class EventBus:
             await self._event_queue.put(event)
             return None
 
-    async def _process_event(self, event: Event) -> EventResult:
-        """Process a single event."""
+    async def _process_event(
+        self, event: Event, _visited_routes: Optional[Set[str]] = None
+    ) -> EventResult:
+        """Process a single event.
+
+        Args:
+            event: The event to process
+            _visited_routes: Internal set tracking visited events to detect routing cycles
+        """
         start_time = time.time()
         result = EventResult(event=event, success=True)
+
+        # Initialize visited routes tracking for cycle detection
+        if _visited_routes is None:
+            _visited_routes = set()
 
         try:
             # Check for router first
@@ -304,6 +330,16 @@ class EventBus:
             if router:
                 routed_event_name = await self._call_handler(router, event)
                 if routed_event_name and isinstance(routed_event_name, str):
+                    # Check for routing cycle
+                    if routed_event_name in _visited_routes:
+                        self._logger.error(
+                            f"Routing cycle detected: {event.name} -> {routed_event_name}. "
+                            f"Visited: {_visited_routes}"
+                        )
+                        result.success = False
+                        result.error = f"Routing cycle detected: {routed_event_name}"
+                        return result
+
                     result.routed_to = routed_event_name
                     # Create new event with routed name
                     routed_event = Event(
@@ -313,8 +349,9 @@ class EventBus:
                         priority=event.priority,
                         metadata={**event.metadata, "routed_from": event.name}
                     )
-                    # Process routed event
-                    return await self._process_event(routed_event)
+                    # Track this route and process routed event
+                    _visited_routes.add(event.name)
+                    return await self._process_event(routed_event, _visited_routes)
 
             # Get all listeners
             listeners = await self._registry.get_listeners(event.name)
@@ -331,6 +368,10 @@ class EventBus:
 
             # Process listeners
             to_unregister = []
+            errors = []
+            handlers_called = []
+            last_result = None
+
             for listener in listeners:
                 # Check condition
                 if listener.condition and not listener.condition(event):
@@ -338,8 +379,8 @@ class EventBus:
 
                 try:
                     handler_result = await self._call_handler(listener, event)
-                    result.handler_name = listener.method_name
-                    result.result = handler_result
+                    handlers_called.append(listener.method_name)
+                    last_result = handler_result
 
                     if listener.once:
                         to_unregister.append((listener.event_name, listener.handler))
@@ -348,8 +389,15 @@ class EventBus:
                     self._logger.error(
                         f"Handler {listener.method_name} failed for event {event.name}: {e}"
                     )
-                    result.success = False
-                    result.error = str(e)
+                    errors.append(f"{listener.method_name}: {e}")
+
+            # Set result fields based on all handlers
+            if handlers_called:
+                result.handler_name = handlers_called[-1]  # Last handler called
+                result.result = last_result
+            if errors:
+                result.success = False
+                result.error = "; ".join(errors)
 
             # Unregister one-time listeners
             for event_name, handler in to_unregister:
@@ -377,7 +425,13 @@ class EventBus:
             if flow_key in self._flow_instances:
                 instance = self._flow_instances[flow_key]
             else:
-                # Create new instance
+                # Auto-instantiate flow with no arguments
+                # Note: This bypasses user-defined __init__ parameters.
+                # For custom initialization, register flows explicitly via
+                # FlowManager.register_flow() or EventBus.register_flow()
+                self._logger.debug(
+                    f"Auto-instantiating flow {flow_key} with default constructor"
+                )
                 instance = listener.flow_class()
                 instance._event_bus = self
                 self._flow_instances[flow_key] = instance
@@ -465,7 +519,8 @@ class EventBus:
         """
         subscription_id = str(uuid.uuid4())
 
-        async def wrapper(text: str) -> None:
+        async def wrapper(text: str) -> bool:
+            """Returns True if pattern matched, False otherwise."""
             match = re.search(pattern, text)
             if match:
                 await callback(match.group(0), match)
@@ -475,6 +530,8 @@ class EventBus:
                         payload={"text": text, "match": match.group(0)},
                         source="pattern_subscription"
                     )
+                return True
+            return False
 
         self._pattern_subscriptions[subscription_id].append(wrapper)
         self._logger.info(f"Registered pattern subscription: {pattern}")
@@ -493,8 +550,9 @@ class EventBus:
         for sub_id, callbacks in self._pattern_subscriptions.items():
             for callback in callbacks:
                 try:
-                    await callback(output)
-                    triggered.append(sub_id)
+                    matched = await callback(output)
+                    if matched:
+                        triggered.append(sub_id)
                 except Exception as e:
                     self._logger.error(f"Pattern callback error: {e}")
         return triggered
@@ -642,14 +700,12 @@ def router(event_name: str) -> Callable[[F], F]:
 def on_output(
     pattern: str,
     event_name: Optional[str] = None,
-    session_filter: Optional[Callable[[str], bool]] = None
 ) -> Callable[[F], F]:
     """Trigger on terminal output matching a pattern.
 
     Args:
         pattern: Regex pattern to match against output
         event_name: Optional event to trigger on match
-        session_filter: Optional filter function(session_id) -> bool
 
     Example:
         @on_output(r"error: (.+)", event_name="error_detected")
@@ -665,7 +721,6 @@ def on_output(
         wrapper._is_output_handler = True
         wrapper._output_pattern = pattern
         wrapper._output_event = event_name
-        wrapper._session_filter = session_filter
         wrapper._original_func = func
 
         return wrapper  # type: ignore
@@ -758,9 +813,10 @@ class Flow(ABC):
 
             elif getattr(method, "_is_output_handler", False):
                 # Register pattern subscription
+                # Capture 'original' with default argument to avoid closure bug
                 await self._event_bus.subscribe_to_pattern(
                     pattern=method._output_pattern,
-                    callback=lambda text, match: original(self, text, match),
+                    callback=lambda text, match, _orig=original: _orig(self, text, match),
                     event_name=method._output_event
                 )
                 self._logger.debug(f"Registered output handler: {name} -> {method._output_pattern}")

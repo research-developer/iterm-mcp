@@ -87,14 +87,10 @@ from core.models import (
 from core.flows import (
     EventBus,
     EventPriority,
-    Flow,
     FlowManager,
     get_event_bus,
     get_flow_manager,
     trigger,
-    trigger_and_wait,
-    list_workflow_events as _list_workflow_events,
-    get_event_history as _get_event_history,
 )
 
 # Global references for resources (set during lifespan)
@@ -234,6 +230,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     terminal = None
     layout_manager = None
     agent_registry = None
+    event_bus = None
+    flow_manager = None
 
     try:
         # Initialize iTerm2 connection
@@ -2025,11 +2023,15 @@ async def start_monitoring_session(
                 except Exception as e:
                     logger.error(f"Error in event bus callback: {e}")
 
-            # Register the callback
+            # Remove existing callback if present to avoid duplicates
+            if hasattr(session, '_event_bus_callback') and session._event_bus_callback:
+                session.remove_monitor_callback(session._event_bus_callback)
+                logger.debug(f"Removed existing event bus callback for session: {session.name}")
+
+            # Register the new callback
             session.add_monitor_callback(event_bus_callback)
             # Store callback reference for cleanup
-            if not hasattr(session, '_event_bus_callback'):
-                session._event_bus_callback = event_bus_callback
+            session._event_bus_callback = event_bus_callback
 
         await session.start_monitoring(update_interval=0.2)
         await asyncio.sleep(2)
@@ -3162,11 +3164,12 @@ async def trigger_workflow_event(
                 error=result.error
             )
         else:
-            # Event was queued
+            # Event was queued (not yet processed, success unknown)
             response = TriggerEventResponse(
-                success=True,
+                success=True,  # Queuing succeeded, not event processing
                 queued=True,
-                processed=False
+                processed=False,
+                error="Event queued for async processing; success indicates queue operation, not event handling"
             )
 
         logger.info(f"Triggered workflow event: {event_name}")
