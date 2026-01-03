@@ -78,6 +78,10 @@ from core.models import (
     # Wait for agent models
     WaitForAgentRequest,
     WaitResult,
+    # Session info models (Issue #52)
+    SessionInfo,
+    ListSessionsRequest,
+    ListSessionsResponse,
 )
 
 # Global references for resources (set during lifespan)
@@ -908,49 +912,166 @@ async def execute_cascade_request(
 # SESSION MANAGEMENT TOOLS
 # ============================================================================
 
+def _format_compact_session(session_info: SessionInfo) -> str:
+    """Format a session in compact one-line format.
+
+    Format: name  agent  lock_status  [tags]
+    Example: worker-1  claude-1  🔒claude-1  [ssh, production]
+    """
+    name = session_info.name.ljust(12)
+    agent = (session_info.agent or "").ljust(12)
+
+    # Lock status with emoji (truncate long agent names to 20 chars)
+    if session_info.locked and session_info.locked_by:
+        owner = session_info.locked_by[:20]
+        lock_status = f"🔒{owner}"
+    else:
+        lock_status = "🔓"
+    lock_status = lock_status.ljust(24)
+
+    # Tags in brackets
+    if session_info.tags:
+        tags = f"[{', '.join(session_info.tags)}]"
+    else:
+        tags = "[]"
+
+    return f"{name}  {agent}  {lock_status}  {tags}"
+
+
 @mcp.tool()
 async def list_sessions(
     ctx: Context,
     agents_only: bool = False,
+    tag: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    match: str = "any",
+    locked: Optional[bool] = None,
+    locked_by: Optional[str] = None,
+    format: str = "full",
 ) -> str:
     """List all available terminal sessions with agent info.
 
     Args:
         agents_only: If True, only show sessions with registered agents
+        tag: Single tag to filter by
+        tags: Multiple tags to filter by
+        match: How to match multiple tags: 'any' (OR) or 'all' (AND)
+        locked: Filter by lock status (True = only locked, False = only unlocked)
+        locked_by: Filter by lock owner
+        format: Output format: 'full' for JSON, 'compact' for one-line-per-session
     """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
-    logger.info(f"Listing sessions{' (agents_only)' if agents_only else ''}")
+    # Build filter description for logging
+    filters = []
+    if agents_only:
+        filters.append("agents_only")
+    if tag:
+        filters.append(f"tag={tag}")
+    if tags:
+        filters.append(f"tags={tags} (match={match})")
+    if locked is not None:
+        filters.append(f"locked={locked}")
+    if locked_by:
+        filters.append(f"locked_by={locked_by}")
+
+    filter_desc = f" [{', '.join(filters)}]" if filters else ""
+    logger.info(f"Listing sessions{filter_desc}")
 
     sessions = list(terminal.sessions.values())
-    result = []
+    result: List[SessionInfo] = []
+
+    # Combine single tag and multiple tags for filtering
+    all_filter_tags = []
+    if tag:
+        all_filter_tags.append(tag)
+    if tags:
+        all_filter_tags.extend(tags)
+
+    # Validate lock_manager availability when tag/lock filters are used
+    requires_lock_manager = all_filter_tags or locked is not None or locked_by is not None
+    if requires_lock_manager and lock_manager is None:
+        logger.warning("Tag/lock filtering requested but tag_lock_manager is not available")
+        return "Error: Tag and lock filtering requires the tag_lock_manager to be initialized"
 
     for session in sessions:
-        agent = agent_registry.get_agent_by_session(session.id)
+        agent_obj = agent_registry.get_agent_by_session(session.id)
 
-        # Apply filter
-        if agents_only and agent is None:
+        # Apply agents_only filter
+        if agents_only and agent_obj is None:
             continue
 
-        session_meta = {
-            "id": session.id,
-            "name": session.name,
-            "persistent_id": session.persistent_id,
-            "agent": agent.name if agent else None,
-            "teams": agent.teams if agent else []
-        }
+        # Get lock info
+        is_locked = False
+        lock_owner = None
+        lock_time = None
+        pending_requests = 0
+        session_tags: List[str] = []
 
         if lock_manager:
-            session_meta["tags"] = lock_manager.get_tags(session.id)
-            session_meta["locked_by"] = lock_manager.lock_owner(session.id)
+            session_tags = lock_manager.get_tags(session.id)
+            lock_info = lock_manager.get_lock_info(session.id)
+            if lock_info:
+                is_locked = True
+                lock_owner = lock_info.owner
+                lock_time = lock_info.locked_at
+                pending_requests = len(lock_info.pending_requests)
 
-        result.append(session_meta)
+        # Apply tag filter
+        if all_filter_tags:
+            if match == "all":
+                if not lock_manager or not lock_manager.has_all_tags(session.id, all_filter_tags):
+                    continue
+            else:  # "any" match
+                if not lock_manager or not lock_manager.has_any_tags(session.id, all_filter_tags):
+                    continue
+
+        # Apply locked filter
+        if locked is not None:
+            if locked and not is_locked:
+                continue
+            if not locked and is_locked:
+                continue
+
+        # Apply locked_by filter
+        if locked_by is not None:
+            if lock_owner != locked_by:
+                continue
+
+        # Build SessionInfo
+        session_info = SessionInfo(
+            session_id=session.id,
+            name=session.name,
+            persistent_id=session.persistent_id,
+            agent=agent_obj.name if agent_obj else None,
+            team=agent_obj.teams[0] if agent_obj and agent_obj.teams else None,
+            teams=agent_obj.teams if agent_obj else [],
+            is_processing=getattr(session, "is_processing", False),
+            tags=session_tags,
+            locked=is_locked,
+            locked_by=lock_owner,
+            locked_at=lock_time,
+            pending_access_requests=pending_requests,
+        )
+        result.append(session_info)
 
     logger.info(f"Found {len(result)} active sessions")
-    return json.dumps(result, indent=2)
+
+    # Format output
+    if format == "compact":
+        lines = [_format_compact_session(s) for s in result]
+        return "\n".join(lines) if lines else "No sessions found"
+    else:
+        # Full JSON format using the response model
+        response = ListSessionsResponse(
+            sessions=result,
+            total_count=len(result),
+            filter_applied=bool(filters),
+        )
+        return response.model_dump_json(indent=2)
 
 
 @mcp.tool()
@@ -1037,6 +1158,69 @@ async def request_session_access(
     )
 
     return json.dumps({"session_id": session_id, "allowed": False, "locked_by": owner}, indent=2)
+
+
+@mcp.tool()
+async def list_my_locks(
+    ctx: Context,
+    agent: str,
+) -> str:
+    """List all sessions locked by a specific agent.
+
+    Args:
+        agent: The agent name to list locks for
+
+    Returns:
+        JSON object with list of locked sessions and their details
+    """
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    terminal = ctx.request_context.lifespan_context.get("terminal")
+    logger = ctx.request_context.lifespan_context.get("logger")
+
+    if not lock_manager:
+        return json.dumps({"error": "Lock manager unavailable"}, indent=2)
+
+    try:
+        # Get all session IDs locked by this agent
+        locked_session_ids = lock_manager.get_locks_by_agent(agent)
+
+        locks = []
+        for session_id in locked_session_ids:
+            lock_info = lock_manager.get_lock_info(session_id)
+            session_name = None
+
+            # Try to get session name from terminal
+            if terminal:
+                try:
+                    session = await terminal.get_session_by_id(session_id)
+                    if session:
+                        session_name = session.name
+                except Exception as e:
+                    if logger:
+                        logger.debug(f"Could not get session name for {session_id}: {e}")
+
+            locks.append({
+                "session_id": session_id,
+                "session_name": session_name,
+                "locked_at": lock_info.locked_at.isoformat() if lock_info else None,
+                "pending_requests": sorted(lock_info.pending_requests) if lock_info else [],
+            })
+
+        result = {
+            "agent": agent,
+            "lock_count": len(locks),
+            "locks": locks,
+        }
+
+        if logger:
+            logger.info(f"Listed {len(locks)} locks for agent {agent}")
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Error listing locks for agent {agent}: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
 
 
 @mcp.tool()
@@ -1513,6 +1697,7 @@ async def check_session_status(request: SetActiveSessionRequest, ctx: Context) -
 
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -1538,8 +1723,17 @@ async def check_session_status(request: SetActiveSessionRequest, ctx: Context) -
             "teams": agent_obj.teams if agent_obj else [],
             "is_processing": getattr(session, "is_processing", False),
             "is_monitoring": getattr(session, "is_monitoring", False),
-            "is_active": session.id == agent_registry.active_session
+            "is_active": session.id == agent_registry.active_session,
         }
+
+        # Add tag and lock info
+        if lock_manager:
+            lock_info = lock_manager.get_lock_info(session.id)
+            status["tags"] = lock_manager.get_tags(session.id)
+            status["locked"] = lock_info is not None
+            status["locked_by"] = lock_info.owner if lock_info else None
+            status["locked_at"] = lock_info.locked_at.isoformat() if lock_info else None
+            status["pending_access_requests"] = len(lock_info.pending_requests) if lock_info else 0
 
         logger.info(f"Status for session: {session.name}")
         return json.dumps(status, indent=2)
@@ -2279,10 +2473,11 @@ async def get_agent_status_summary(ctx: Context) -> str:
     """Get a compact status summary of all agents.
 
     Returns a one-line-per-agent summary showing the most recent
-    notification for each agent. Great for quick status checks.
+    notification for each agent, including lock counts. Great for quick status checks.
     """
     notification_manager = ctx.request_context.lifespan_context["notification_manager"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -2302,7 +2497,34 @@ async def get_agent_status_summary(ctx: Context) -> str:
                 )
 
         notifications = list(latest.values())
-        formatted = notification_manager.format_compact(notifications)
+
+        # Build custom format with lock counts
+        if not notifications:
+            return "━━━ No notifications ━━━"
+
+        lines = ["━━━ Agent Status ━━━"]
+        for n in notifications:
+            icon = notification_manager.STATUS_ICONS.get(n.level, "?")
+
+            # Get lock info for this agent
+            lock_info = ""
+            if lock_manager:
+                locks = lock_manager.get_locks_by_agent(n.agent)
+                lock_count = len(locks)
+                if lock_count == 0:
+                    lock_info = "[0 locks]"
+                elif lock_count == 1:
+                    lock_info = f"[1 lock: {locks[0][:12]}]"
+                else:
+                    lock_info = f"[{lock_count} locks]"
+
+            # Format: agent (12 chars) | icon | summary (truncated) | lock info
+            agent_name = n.agent[:12].ljust(12)
+            summary = n.summary[:20].ljust(20) if len(n.summary) > 20 else n.summary.ljust(20)
+            lines.append(f"{agent_name} {icon} {summary} {lock_info}")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        formatted = "\n".join(lines)
 
         logger.info(f"Generated status summary for {len(notifications)} agents")
         return formatted
