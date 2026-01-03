@@ -22,6 +22,12 @@ from core.session import ItermSession
 from core.terminal import ItermTerminal
 from core.agents import AgentRegistry, CascadingMessage, SendTarget
 from utils.telemetry import TelemetryEmitter
+from utils.otel import (
+    init_tracing,
+    shutdown_tracing,
+    trace_operation,
+    add_span_attributes,
+)
 from core.tags import SessionTagLockManager, FocusCooldownManager
 from core.profiles import ProfileManager, get_profile_manager
 from core.feedback import (
@@ -37,6 +43,7 @@ from core.feedback import (
     FeedbackForker,
     GitHubIntegration,
 )
+from core.memory import SQLiteMemoryStore
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -83,6 +90,14 @@ from core.models import (
     GetEventHistoryResponse,
     PatternSubscriptionRequest,
     PatternSubscriptionResponse,
+    # Role-based session specialization
+    SessionRole,
+    RoleConfig,
+    DEFAULT_ROLE_CONFIGS,
+    # Session info models (Issue #52)
+    SessionInfo,
+    ListSessionsRequest,
+    ListSessionsResponse,
 )
 from core.flows import (
     EventBus,
@@ -92,6 +107,7 @@ from core.flows import (
     get_flow_manager,
     trigger,
 )
+from core.roles import RoleManager
 
 # Global references for resources (set during lifespan)
 _terminal: Optional[ItermTerminal] = None
@@ -109,6 +125,8 @@ _github_integration: Optional[GitHubIntegration] = None
 _profile_manager: Optional[ProfileManager] = None
 _event_bus: Optional[EventBus] = None
 _flow_manager: Optional[FlowManager] = None
+_role_manager: Optional[RoleManager] = None
+_memory_store: Optional[SQLiteMemoryStore] = None
 
 
 # ============================================================================
@@ -226,6 +244,13 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     logger = logging.getLogger("iterm-mcp-server")
     logger.info("Initializing iTerm2 connection...")
 
+    # Initialize OpenTelemetry tracing
+    tracing_enabled = init_tracing()
+    if tracing_enabled:
+        logger.info("OpenTelemetry tracing initialized successfully")
+    else:
+        logger.info("OpenTelemetry tracing not available (install with: pip install iterm-mcp[otel])")
+
     connection = None
     terminal = None
     layout_manager = None
@@ -309,6 +334,16 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         await event_bus.start()
         logger.info("Event bus and flow manager initialized successfully")
 
+        # Initialize role manager
+        logger.info("Initializing role manager...")
+        role_manager = RoleManager(agent_registry=agent_registry)
+        logger.info(f"Role manager initialized with {len(role_manager.list_roles())} role assignments")
+
+        # Initialize memory store
+        logger.info("Initializing memory store...")
+        memory_store = SQLiteMemoryStore()
+        logger.info("Memory store initialized successfully (SQLite with FTS5)")
+
         # Set global references for resources
         global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
@@ -324,11 +359,13 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         _feedback_hook_manager = feedback_hook_manager
         _feedback_forker = feedback_forker
         _github_integration = github_integration
-        global _profile_manager
+        global _profile_manager, _role_manager, _memory_store
         _profile_manager = profile_manager
         global _event_bus, _flow_manager
         _event_bus = event_bus
         _flow_manager = flow_manager
+        _role_manager = role_manager
+        _memory_store = memory_store
 
         # Yield the initialized components
         yield {
@@ -347,6 +384,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "profile_manager": profile_manager,
             "event_bus": event_bus,
             "flow_manager": flow_manager,
+            "role_manager": role_manager,
+            "memory_store": memory_store,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -356,6 +395,11 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         logger.info("Shutting down iTerm MCP server...")
         if event_bus:
             await event_bus.stop()
+
+        # Shutdown OpenTelemetry tracing
+        shutdown_tracing()
+        logger.info("OpenTelemetry tracing shutdown completed")
+
         logger.info("iTerm MCP server shutdown completed")
 
 
@@ -546,6 +590,7 @@ async def resolve_target_sessions(
     return sessions
 
 
+@trace_operation("execute_create_sessions")
 async def execute_create_sessions(
     create_request: CreateSessionsRequest,
     terminal: ItermTerminal,
@@ -555,6 +600,12 @@ async def execute_create_sessions(
     profile_manager: Optional[ProfileManager] = None,
 ) -> CreateSessionsResponse:
     """Create sessions based on a CreateSessionsRequest."""
+
+    # Add span attributes
+    add_span_attributes(
+        layout=create_request.layout,
+        session_count=len(create_request.sessions),
+    )
 
     try:
         layout_type = LayoutType[create_request.layout.upper()]
@@ -656,6 +707,7 @@ async def execute_create_sessions(
     return CreateSessionsResponse(sessions=created, window_id=create_request.window_id or "")
 
 
+@trace_operation("execute_write_request")
 async def execute_write_request(
     write_request: WriteToSessionsRequest,
     terminal: ItermTerminal,
@@ -665,6 +717,13 @@ async def execute_write_request(
     notification_manager: Optional["NotificationManager"] = None,
 ) -> WriteToSessionsResponse:
     """Send messages according to WriteToSessionsRequest and return structured results."""
+
+    # Add span attributes for message count
+    add_span_attributes(
+        message_count=len(write_request.messages),
+        parallel=write_request.parallel,
+        skip_duplicates=write_request.skip_duplicates,
+    )
 
     results: List[WriteResult] = []
     active_agent = agent_registry.get_active_agent()
@@ -754,6 +813,7 @@ async def execute_write_request(
     )
 
 
+@trace_operation("execute_read_request")
 async def execute_read_request(
     read_request: ReadSessionsRequest,
     terminal: ItermTerminal,
@@ -761,6 +821,13 @@ async def execute_read_request(
     logger: logging.Logger,
 ) -> ReadSessionsResponse:
     """Read outputs according to ReadSessionsRequest."""
+
+    # Add span attributes
+    add_span_attributes(
+        target_count=len(read_request.targets) if read_request.targets else 1,
+        parallel=read_request.parallel,
+        has_filter=bool(read_request.filter_pattern),
+    )
 
     outputs: List[SessionOutput] = []
 
@@ -819,6 +886,7 @@ async def execute_read_request(
     return ReadSessionsResponse(outputs=outputs, total_sessions=len(outputs))
 
 
+@trace_operation("execute_cascade_request")
 async def execute_cascade_request(
     cascade_request: CascadeMessageRequest,
     terminal: ItermTerminal,
@@ -826,6 +894,14 @@ async def execute_cascade_request(
     logger: logging.Logger,
 ) -> CascadeMessageResponse:
     """Execute a cascade delivery and return structured results."""
+
+    # Add span attributes
+    add_span_attributes(
+        has_broadcast=bool(cascade_request.broadcast),
+        team_count=len(cascade_request.teams),
+        agent_count=len(cascade_request.agents),
+        skip_duplicates=cascade_request.skip_duplicates,
+    )
 
     cascade = CascadingMessage(
         broadcast=cascade_request.broadcast,
@@ -895,49 +971,166 @@ async def execute_cascade_request(
 # SESSION MANAGEMENT TOOLS
 # ============================================================================
 
+def _format_compact_session(session_info: SessionInfo) -> str:
+    """Format a session in compact one-line format.
+
+    Format: name  agent  lock_status  [tags]
+    Example: worker-1  claude-1  🔒claude-1  [ssh, production]
+    """
+    name = session_info.name.ljust(12)
+    agent = (session_info.agent or "").ljust(12)
+
+    # Lock status with emoji (truncate long agent names to 20 chars)
+    if session_info.locked and session_info.locked_by:
+        owner = session_info.locked_by[:20]
+        lock_status = f"🔒{owner}"
+    else:
+        lock_status = "🔓"
+    lock_status = lock_status.ljust(24)
+
+    # Tags in brackets
+    if session_info.tags:
+        tags = f"[{', '.join(session_info.tags)}]"
+    else:
+        tags = "[]"
+
+    return f"{name}  {agent}  {lock_status}  {tags}"
+
+
 @mcp.tool()
 async def list_sessions(
     ctx: Context,
     agents_only: bool = False,
+    tag: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    match: str = "any",
+    locked: Optional[bool] = None,
+    locked_by: Optional[str] = None,
+    format: str = "full",
 ) -> str:
     """List all available terminal sessions with agent info.
 
     Args:
         agents_only: If True, only show sessions with registered agents
+        tag: Single tag to filter by
+        tags: Multiple tags to filter by
+        match: How to match multiple tags: 'any' (OR) or 'all' (AND)
+        locked: Filter by lock status (True = only locked, False = only unlocked)
+        locked_by: Filter by lock owner
+        format: Output format: 'full' for JSON, 'compact' for one-line-per-session
     """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
-    logger.info(f"Listing sessions{' (agents_only)' if agents_only else ''}")
+    # Build filter description for logging
+    filters = []
+    if agents_only:
+        filters.append("agents_only")
+    if tag:
+        filters.append(f"tag={tag}")
+    if tags:
+        filters.append(f"tags={tags} (match={match})")
+    if locked is not None:
+        filters.append(f"locked={locked}")
+    if locked_by:
+        filters.append(f"locked_by={locked_by}")
+
+    filter_desc = f" [{', '.join(filters)}]" if filters else ""
+    logger.info(f"Listing sessions{filter_desc}")
 
     sessions = list(terminal.sessions.values())
-    result = []
+    result: List[SessionInfo] = []
+
+    # Combine single tag and multiple tags for filtering
+    all_filter_tags = []
+    if tag:
+        all_filter_tags.append(tag)
+    if tags:
+        all_filter_tags.extend(tags)
+
+    # Validate lock_manager availability when tag/lock filters are used
+    requires_lock_manager = all_filter_tags or locked is not None or locked_by is not None
+    if requires_lock_manager and lock_manager is None:
+        logger.warning("Tag/lock filtering requested but tag_lock_manager is not available")
+        return "Error: Tag and lock filtering requires the tag_lock_manager to be initialized"
 
     for session in sessions:
-        agent = agent_registry.get_agent_by_session(session.id)
+        agent_obj = agent_registry.get_agent_by_session(session.id)
 
-        # Apply filter
-        if agents_only and agent is None:
+        # Apply agents_only filter
+        if agents_only and agent_obj is None:
             continue
 
-        session_meta = {
-            "id": session.id,
-            "name": session.name,
-            "persistent_id": session.persistent_id,
-            "agent": agent.name if agent else None,
-            "teams": agent.teams if agent else []
-        }
+        # Get lock info
+        is_locked = False
+        lock_owner = None
+        lock_time = None
+        pending_requests = 0
+        session_tags: List[str] = []
 
         if lock_manager:
-            session_meta["tags"] = lock_manager.get_tags(session.id)
-            session_meta["locked_by"] = lock_manager.lock_owner(session.id)
+            session_tags = lock_manager.get_tags(session.id)
+            lock_info = lock_manager.get_lock_info(session.id)
+            if lock_info:
+                is_locked = True
+                lock_owner = lock_info.owner
+                lock_time = lock_info.locked_at
+                pending_requests = len(lock_info.pending_requests)
 
-        result.append(session_meta)
+        # Apply tag filter
+        if all_filter_tags:
+            if match == "all":
+                if not lock_manager or not lock_manager.has_all_tags(session.id, all_filter_tags):
+                    continue
+            else:  # "any" match
+                if not lock_manager or not lock_manager.has_any_tags(session.id, all_filter_tags):
+                    continue
+
+        # Apply locked filter
+        if locked is not None:
+            if locked and not is_locked:
+                continue
+            if not locked and is_locked:
+                continue
+
+        # Apply locked_by filter
+        if locked_by is not None:
+            if lock_owner != locked_by:
+                continue
+
+        # Build SessionInfo
+        session_info = SessionInfo(
+            session_id=session.id,
+            name=session.name,
+            persistent_id=session.persistent_id,
+            agent=agent_obj.name if agent_obj else None,
+            team=agent_obj.teams[0] if agent_obj and agent_obj.teams else None,
+            teams=agent_obj.teams if agent_obj else [],
+            is_processing=getattr(session, "is_processing", False),
+            tags=session_tags,
+            locked=is_locked,
+            locked_by=lock_owner,
+            locked_at=lock_time,
+            pending_access_requests=pending_requests,
+        )
+        result.append(session_info)
 
     logger.info(f"Found {len(result)} active sessions")
-    return json.dumps(result, indent=2)
+
+    # Format output
+    if format == "compact":
+        lines = [_format_compact_session(s) for s in result]
+        return "\n".join(lines) if lines else "No sessions found"
+    else:
+        # Full JSON format using the response model
+        response = ListSessionsResponse(
+            sessions=result,
+            total_count=len(result),
+            filter_applied=bool(filters),
+        )
+        return response.model_dump_json(indent=2)
 
 
 @mcp.tool()
@@ -1024,6 +1217,69 @@ async def request_session_access(
     )
 
     return json.dumps({"session_id": session_id, "allowed": False, "locked_by": owner}, indent=2)
+
+
+@mcp.tool()
+async def list_my_locks(
+    ctx: Context,
+    agent: str,
+) -> str:
+    """List all sessions locked by a specific agent.
+
+    Args:
+        agent: The agent name to list locks for
+
+    Returns:
+        JSON object with list of locked sessions and their details
+    """
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
+    terminal = ctx.request_context.lifespan_context.get("terminal")
+    logger = ctx.request_context.lifespan_context.get("logger")
+
+    if not lock_manager:
+        return json.dumps({"error": "Lock manager unavailable"}, indent=2)
+
+    try:
+        # Get all session IDs locked by this agent
+        locked_session_ids = lock_manager.get_locks_by_agent(agent)
+
+        locks = []
+        for session_id in locked_session_ids:
+            lock_info = lock_manager.get_lock_info(session_id)
+            session_name = None
+
+            # Try to get session name from terminal
+            if terminal:
+                try:
+                    session = await terminal.get_session_by_id(session_id)
+                    if session:
+                        session_name = session.name
+                except Exception as e:
+                    if logger:
+                        logger.debug(f"Could not get session name for {session_id}: {e}")
+
+            locks.append({
+                "session_id": session_id,
+                "session_name": session_name,
+                "locked_at": lock_info.locked_at.isoformat() if lock_info else None,
+                "pending_requests": sorted(lock_info.pending_requests) if lock_info else [],
+            })
+
+        result = {
+            "agent": agent,
+            "lock_count": len(locks),
+            "locks": locks,
+        }
+
+        if logger:
+            logger.info(f"Listed {len(locks)} locks for agent {agent}")
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        if logger:
+            logger.error(f"Error listing locks for agent {agent}: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
 
 
 @mcp.tool()
@@ -1500,6 +1756,7 @@ async def check_session_status(request: SetActiveSessionRequest, ctx: Context) -
 
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -1525,8 +1782,17 @@ async def check_session_status(request: SetActiveSessionRequest, ctx: Context) -
             "teams": agent_obj.teams if agent_obj else [],
             "is_processing": getattr(session, "is_processing", False),
             "is_monitoring": getattr(session, "is_monitoring", False),
-            "is_active": session.id == agent_registry.active_session
+            "is_active": session.id == agent_registry.active_session,
         }
+
+        # Add tag and lock info
+        if lock_manager:
+            lock_info = lock_manager.get_lock_info(session.id)
+            status["tags"] = lock_manager.get_tags(session.id)
+            status["locked"] = lock_info is not None
+            status["locked_by"] = lock_info.owner if lock_info else None
+            status["locked_at"] = lock_info.locked_at.isoformat() if lock_info else None
+            status["pending_access_requests"] = len(lock_info.pending_requests) if lock_info else 0
 
         logger.info(f"Status for session: {session.name}")
         return json.dumps(status, indent=2)
@@ -2315,10 +2581,11 @@ async def get_agent_status_summary(ctx: Context) -> str:
     """Get a compact status summary of all agents.
 
     Returns a one-line-per-agent summary showing the most recent
-    notification for each agent. Great for quick status checks.
+    notification for each agent, including lock counts. Great for quick status checks.
     """
     notification_manager = ctx.request_context.lifespan_context["notification_manager"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -2338,7 +2605,34 @@ async def get_agent_status_summary(ctx: Context) -> str:
                 )
 
         notifications = list(latest.values())
-        formatted = notification_manager.format_compact(notifications)
+
+        # Build custom format with lock counts
+        if not notifications:
+            return "━━━ No notifications ━━━"
+
+        lines = ["━━━ Agent Status ━━━"]
+        for n in notifications:
+            icon = notification_manager.STATUS_ICONS.get(n.level, "?")
+
+            # Get lock info for this agent
+            lock_info = ""
+            if lock_manager:
+                locks = lock_manager.get_locks_by_agent(n.agent)
+                lock_count = len(locks)
+                if lock_count == 0:
+                    lock_info = "[0 locks]"
+                elif lock_count == 1:
+                    lock_info = f"[1 lock: {locks[0][:12]}]"
+                else:
+                    lock_info = f"[{lock_count} locks]"
+
+            # Format: agent (12 chars) | icon | summary (truncated) | lock info
+            agent_name = n.agent[:12].ljust(12)
+            summary = n.summary[:20].ljust(20) if len(n.summary) > 20 else n.summary.ljust(20)
+            lines.append(f"{agent_name} {icon} {summary} {lock_info}")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        formatted = "\n".join(lines)
 
         logger.info(f"Generated status summary for {len(notifications)} agents")
         return formatted
@@ -3050,6 +3344,300 @@ async def get_feedback_config(
 
 
 # ============================================================================
+# ROLE MANAGEMENT TOOLS
+# ============================================================================
+
+
+@mcp.tool()
+async def assign_session_role(
+    ctx: Context,
+    session_id: str,
+    role: str,
+    assigned_by: Optional[str] = None,
+) -> str:
+    """Assign a role to a session for tool access control.
+
+    Args:
+        session_id: The iTerm session ID to assign the role to
+        role: The role name (devops, builder, debugger, researcher, tester, orchestrator, monitor, custom)
+        assigned_by: Optional agent name that is assigning this role (must have can_modify_roles permission)
+    """
+    role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    agent_registry: AgentRegistry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Permission check: if assigned_by is provided, verify they have can_modify_roles
+        if assigned_by:
+            caller_agent = agent_registry.get_agent(assigned_by)
+            if caller_agent:
+                caller_session_id = caller_agent.session_id
+                if not role_manager.can_modify_roles(caller_session_id):
+                    return json.dumps({
+                        "error": f"Agent '{assigned_by}' does not have permission to modify roles. "
+                                 "Only sessions with can_modify_roles=True (e.g., orchestrator) can assign roles."
+                    }, indent=2)
+
+        # Convert string to SessionRole enum
+        try:
+            session_role = SessionRole(role.lower())
+        except ValueError:
+            valid_roles = [r.value for r in SessionRole]
+            return json.dumps({
+                "error": f"Invalid role '{role}'. Valid roles are: {valid_roles}"
+            }, indent=2)
+
+        assignment = role_manager.assign_role(
+            session_id=session_id,
+            role=session_role,
+            assigned_by=assigned_by,
+        )
+
+        logger.info(f"Assigned role {role} to session {session_id}")
+
+        return json.dumps({
+            "status": "success",
+            "session_id": session_id,
+            "role": assignment.role.value,
+            "description": assignment.role_config.description,
+            "can_spawn_agents": assignment.role_config.can_spawn_agents,
+            "can_modify_roles": assignment.role_config.can_modify_roles,
+            "priority": assignment.role_config.priority,
+            "assigned_at": assignment.assigned_at.isoformat(),
+            "assigned_by": assignment.assigned_by,
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error assigning role: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def get_session_role(
+    ctx: Context,
+    session_id: str,
+) -> str:
+    """Get the role assignment for a session.
+
+    Args:
+        session_id: The iTerm session ID to get the role for
+    """
+    role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        description = role_manager.describe(session_id)
+        return json.dumps(description, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting session role: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def remove_session_role(
+    ctx: Context,
+    session_id: str,
+    removed_by: Optional[str] = None,
+) -> str:
+    """Remove the role assignment from a session.
+
+    Args:
+        session_id: The iTerm session ID to remove the role from
+        removed_by: Optional agent name that is removing this role (must have can_modify_roles permission)
+    """
+    role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    agent_registry: AgentRegistry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Permission check: if removed_by is provided, verify they have can_modify_roles
+        if removed_by:
+            caller_agent = agent_registry.get_agent(removed_by)
+            if caller_agent:
+                caller_session_id = caller_agent.session_id
+                if not role_manager.can_modify_roles(caller_session_id):
+                    return json.dumps({
+                        "error": f"Agent '{removed_by}' does not have permission to modify roles. "
+                                 "Only sessions with can_modify_roles=True (e.g., orchestrator) can remove roles."
+                    }, indent=2)
+
+        removed = role_manager.remove_role(session_id)
+        if removed:
+            logger.info(f"Removed role from session {session_id}")
+            return json.dumps({
+                "status": "success",
+                "session_id": session_id,
+                "message": "Role removed successfully"
+            }, indent=2)
+        else:
+            return json.dumps({
+                "status": "not_found",
+                "session_id": session_id,
+                "message": "No role was assigned to this session"
+            }, indent=2)
+    except Exception as e:
+        logger.error(f"Error removing session role: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def list_session_roles(
+    ctx: Context,
+    role_filter: Optional[str] = None,
+) -> str:
+    """List all session role assignments.
+
+    Args:
+        role_filter: Optional role name to filter by
+    """
+    role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        filter_role = None
+        if role_filter:
+            try:
+                filter_role = SessionRole(role_filter.lower())
+            except ValueError:
+                valid_roles = [r.value for r in SessionRole]
+                return json.dumps({
+                    "error": f"Invalid role filter '{role_filter}'. Valid roles are: {valid_roles}"
+                }, indent=2)
+
+        assignments = role_manager.list_roles(role_filter=filter_role)
+
+        result = []
+        for assignment in assignments:
+            result.append({
+                "session_id": assignment.session_id,
+                "role": assignment.role.value,
+                "description": assignment.role_config.description,
+                "priority": assignment.role_config.priority,
+                "assigned_at": assignment.assigned_at.isoformat(),
+                "assigned_by": assignment.assigned_by,
+            })
+
+        return json.dumps({
+            "count": len(result),
+            "assignments": result,
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing session roles: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def list_available_roles(
+    ctx: Context,
+) -> str:
+    """List all available session roles and their default configurations."""
+    from core.models import DEFAULT_ROLE_CONFIGS
+
+    try:
+        roles = []
+        for role in SessionRole:
+            config = DEFAULT_ROLE_CONFIGS.get(role)
+            if config:
+                roles.append({
+                    "role": role.value,
+                    "description": config.description,
+                    "available_tools": config.available_tools,
+                    "restricted_tools": config.restricted_tools,
+                    "default_commands": config.default_commands,
+                    "can_spawn_agents": config.can_spawn_agents,
+                    "can_modify_roles": config.can_modify_roles,
+                    "priority": config.priority,
+                })
+            else:
+                roles.append({
+                    "role": role.value,
+                    "description": f"Custom role: {role.value}",
+                    "available_tools": [],
+                    "restricted_tools": [],
+                    "default_commands": [],
+                    "can_spawn_agents": False,
+                    "can_modify_roles": False,
+                    "priority": 3,
+                })
+
+        return json.dumps({
+            "count": len(roles),
+            "roles": roles,
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def check_tool_permission(
+    ctx: Context,
+    session_id: str,
+    tool_name: str,
+) -> str:
+    """Check if a specific tool is allowed for a session based on its role.
+
+    Args:
+        session_id: The iTerm session ID to check
+        tool_name: The name of the tool to check permission for
+    """
+    role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        allowed, reason = role_manager.is_tool_allowed(session_id, tool_name)
+
+        assignment = role_manager.get_role(session_id)
+        role_info = {
+            "role": assignment.role.value if assignment else None,
+            "has_role": assignment is not None,
+        }
+
+        return json.dumps({
+            "session_id": session_id,
+            "tool_name": tool_name,
+            "allowed": allowed,
+            "reason": reason,
+            **role_info,
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error checking tool permission: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def get_sessions_by_role(
+    ctx: Context,
+    role: str,
+) -> str:
+    """Get all session IDs that have a specific role assigned.
+
+    Args:
+        role: The role name to filter by
+    """
+    role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        try:
+            session_role = SessionRole(role.lower())
+        except ValueError:
+            valid_roles = [r.value for r in SessionRole]
+            return json.dumps({
+                "error": f"Invalid role '{role}'. Valid roles are: {valid_roles}"
+            }, indent=2)
+
+        session_ids = role_manager.get_sessions_by_role(session_role)
+
+        return json.dumps({
+            "role": session_role.value,
+            "count": len(session_ids),
+            "session_ids": session_ids,
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting sessions by role: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
 # TELEMETRY TOOL AND RESOURCE
 # ============================================================================
 
@@ -3233,6 +3821,154 @@ async def list_workflow_events(ctx: Context) -> str:
         return json.dumps({"error": str(e)}, indent=2)
 
 
+# ============================================================================
+# MEMORY STORE TOOLS
+# ============================================================================
+
+# Pattern for safe namespace and key characters
+# Allows alphanumeric, underscore, hyphen, and dot
+_SAFE_MEMORY_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+
+
+def _validate_namespace(namespace: List[str]) -> None:
+    """Validate namespace parts contain only safe characters.
+
+    Args:
+        namespace: List of namespace parts
+
+    Raises:
+        ValueError: If any part contains invalid characters
+    """
+    if not namespace:
+        return  # Empty namespace is valid (root)
+
+    for part in namespace:
+        if not part:
+            raise ValueError("Namespace parts cannot be empty strings")
+        if not _SAFE_MEMORY_PATTERN.match(part):
+            raise ValueError(
+                f"Invalid namespace part '{part}': only alphanumeric, underscore, hyphen, and dot allowed"
+            )
+
+
+def _validate_key(key: str) -> None:
+    """Validate key contains only safe characters.
+
+    Args:
+        key: The memory key
+
+    Raises:
+        ValueError: If key contains invalid characters
+    """
+    if not key:
+        raise ValueError("Key cannot be empty")
+    if not _SAFE_MEMORY_PATTERN.match(key):
+        raise ValueError(
+            f"Invalid key '{key}': only alphanumeric, underscore, hyphen, and dot allowed"
+        )
+
+
+@mcp.tool()
+async def memory_store(
+    ctx: Context,
+    namespace: List[str],
+    key: str,
+    value: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Store a value in the cross-agent memory store.
+
+    Enables agents to share context, learn from past interactions, and maintain
+    long-term knowledge. Uses namespace-based organization to prevent cross-project
+    contamination.
+
+    Args:
+        namespace: Hierarchical namespace (e.g., ["project-x", "build-agent", "memories"])
+        key: Unique key within the namespace
+        value: JSON-serializable value to store (string, dict, list, etc.)
+        metadata: Optional metadata tags (e.g., {"source": "build", "type": "error"})
+
+    Returns:
+        JSON confirmation with stored memory details
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        # Validate inputs
+        _validate_namespace(namespace)
+        _validate_key(key)
+
+        # Convert namespace list to tuple for the store
+        ns_tuple = tuple(namespace)
+        await memory_store_instance.store(ns_tuple, key, value, metadata)
+        logger.info(f"Stored memory: {'/'.join(namespace)}/{key}")
+
+        return json.dumps({
+            "status": "stored",
+            "namespace": namespace,
+            "key": key,
+            "metadata": metadata or {}
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error storing memory: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_retrieve(
+    ctx: Context,
+    namespace: List[str],
+    key: str,
+) -> str:
+    """Retrieve a specific memory by namespace and key.
+
+    Args:
+        namespace: Hierarchical namespace (e.g., ["project-x", "build-agent"])
+        key: The key to retrieve
+
+    Returns:
+        JSON with the memory value and metadata, or null if not found
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        # Validate inputs
+        _validate_namespace(namespace)
+        _validate_key(key)
+
+        ns_tuple = tuple(namespace)
+        memory = await memory_store_instance.retrieve(ns_tuple, key)
+
+        if memory:
+            logger.info(f"Retrieved memory: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "found": True,
+                "key": memory.key,
+                "value": memory.value,
+                "timestamp": memory.timestamp.isoformat(),
+                "metadata": memory.metadata,
+                "namespace": list(memory.namespace)
+            }, indent=2)
+        else:
+            logger.info(f"Memory not found: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "found": False,
+                "namespace": namespace,
+                "key": key
+            }, indent=2)
+    except Exception as e:
+        logger.error(f"Error retrieving memory: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
 @mcp.tool()
 async def get_workflow_event_history(
     ctx: Context,
@@ -3294,6 +4030,62 @@ async def get_workflow_event_history(
 
 
 @mcp.tool()
+async def memory_search(
+    ctx: Context,
+    namespace: List[str],
+    query: str,
+    limit: int = 10,
+) -> str:
+    """Search for memories matching a query using full-text search.
+
+    Uses FTS5 full-text search for efficient semantic matching across
+    keys, values, and metadata within the specified namespace.
+
+    Args:
+        namespace: Namespace prefix to search within (can be partial for broader search)
+        query: Search query string (e.g., "npm build errors", "deployment config")
+        limit: Maximum number of results to return (default: 10)
+
+    Returns:
+        JSON array of matching memories with relevance scores
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        # Validate namespace (query doesn't need validation - it's for search)
+        _validate_namespace(namespace)
+
+        ns_tuple = tuple(namespace)
+        results = await memory_store_instance.search(ns_tuple, query, limit)
+        logger.info(f"Memory search '{query}' in {'/'.join(namespace)}: {len(results)} results")
+
+        return json.dumps({
+            "query": query,
+            "namespace": namespace,
+            "count": len(results),
+            "results": [
+                {
+                    "key": r.memory.key,
+                    "value": r.memory.value,
+                    "score": r.score,
+                    "match_context": r.match_context,
+                    "timestamp": r.memory.timestamp.isoformat(),
+                    "metadata": r.memory.metadata,
+                    "namespace": list(r.memory.namespace)
+                }
+                for r in results
+            ]
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error searching memories: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
 async def subscribe_to_output_pattern(
     ctx: Context,
     pattern: str,
@@ -3343,6 +4135,210 @@ async def subscribe_to_output_pattern(
         return json.dumps({"error": f"Invalid regex pattern: {e}"}, indent=2)
     except Exception as e:
         logger.error(f"Error creating pattern subscription: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_list_keys(
+    ctx: Context,
+    namespace: List[str],
+) -> str:
+    """List all keys in a namespace.
+
+    Args:
+        namespace: Hierarchical namespace to list keys from
+
+    Returns:
+        JSON array of keys in the namespace
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        _validate_namespace(namespace)
+        ns_tuple = tuple(namespace)
+        keys = await memory_store_instance.list_keys(ns_tuple)
+        logger.info(f"Listed {len(keys)} keys in namespace {'/'.join(namespace)}")
+
+        return json.dumps({
+            "namespace": namespace,
+            "count": len(keys),
+            "keys": keys
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing memory keys: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_delete(
+    ctx: Context,
+    namespace: List[str],
+    key: str,
+) -> str:
+    """Delete a memory by namespace and key.
+
+    Args:
+        namespace: Hierarchical namespace
+        key: The key to delete
+
+    Returns:
+        JSON confirmation of deletion
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        _validate_namespace(namespace)
+        _validate_key(key)
+        ns_tuple = tuple(namespace)
+        deleted = await memory_store_instance.delete(ns_tuple, key)
+
+        if deleted:
+            logger.info(f"Deleted memory: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "deleted": True,
+                "namespace": namespace,
+                "key": key
+            }, indent=2)
+        else:
+            logger.info(f"Memory not found for deletion: {'/'.join(namespace)}/{key}")
+            return json.dumps({
+                "deleted": False,
+                "namespace": namespace,
+                "key": key,
+                "message": "Memory not found"
+            }, indent=2)
+    except Exception as e:
+        logger.error(f"Error deleting memory: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_list_namespaces(
+    ctx: Context,
+    prefix: Optional[List[str]] = None,
+) -> str:
+    """List all namespaces in the memory store.
+
+    Args:
+        prefix: Optional namespace prefix to filter by
+
+    Returns:
+        JSON array of namespace tuples
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        if prefix:
+            _validate_namespace(prefix)
+        prefix_tuple = tuple(prefix) if prefix else None
+        namespaces = await memory_store_instance.list_namespaces(prefix_tuple)
+        logger.info(f"Listed {len(namespaces)} namespaces")
+
+        return json.dumps({
+            "prefix": prefix,
+            "count": len(namespaces),
+            "namespaces": [list(ns) for ns in namespaces]
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error listing namespaces: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_clear_namespace(
+    ctx: Context,
+    namespace: List[str],
+    confirm: bool = False,
+) -> str:
+    """Clear all memories in a namespace.
+
+    WARNING: This permanently deletes all memories in the specified namespace.
+    You must set confirm=True to actually perform the deletion.
+
+    Args:
+        namespace: Hierarchical namespace to clear
+        confirm: Must be True to confirm deletion (safety measure)
+
+    Returns:
+        JSON with count of deleted memories
+    """
+    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store_instance:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        _validate_namespace(namespace)
+
+        if not confirm:
+            return json.dumps({
+                "error": "Confirmation required",
+                "message": "Set confirm=True to clear namespace. This permanently deletes all memories.",
+                "namespace": namespace
+            }, indent=2)
+
+        ns_tuple = tuple(namespace)
+        count = await memory_store_instance.clear_namespace(ns_tuple)
+        logger.info(f"Cleared namespace {'/'.join(namespace)}: {count} memories deleted")
+
+        return json.dumps({
+            "cleared": True,
+            "namespace": namespace,
+            "deleted_count": count
+        }, indent=2)
+    except Exception as e:
+        logger.error(f"Error clearing namespace: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def memory_stats(
+    ctx: Context,
+) -> str:
+    """Get statistics about the memory store.
+
+    Returns:
+        JSON with memory store statistics (total memories, namespaces, etc.)
+    """
+    memory_store = ctx.request_context.lifespan_context.get("memory_store")
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    if not memory_store:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        stats = await memory_store.get_stats()
+        logger.info("Retrieved memory store stats")
+        return json.dumps(stats, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting memory stats: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.resource("memory://stats")
+async def memory_stats_resource() -> str:
+    """Get memory store statistics as a resource."""
+    if _memory_store is None or _logger is None:
+        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+
+    try:
+        stats = await _memory_store.get_stats()
+        return json.dumps(stats, indent=2)
+    except Exception as e:
+        _logger.error(f"Error getting memory stats resource: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
 

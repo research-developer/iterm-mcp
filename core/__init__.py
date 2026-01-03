@@ -45,6 +45,11 @@ from .feedback import (
     GitHubIntegration,
 )
 from .models import (
+    # Role-based session specialization
+    SessionRole,
+    RoleConfig,
+    DEFAULT_ROLE_CONFIGS,
+    # Session and message models
     SessionTarget,
     SessionMessage,
     WriteToSessionsRequest,
@@ -108,16 +113,71 @@ from .flows import (
     DeployResult,
     BuildDeployFlow,
 )
+from .roles import (
+    RoleManager,
+    SessionRoleAssignment,
+    RolePermissionError,
+)
+
+# Message-based communication
+from .messaging import (
+    # Base types
+    AgentMessage,
+    MessagePriority,
+    # Terminal messages
+    TerminalCommand,
+    TerminalOutput,
+    TerminalReadRequest,
+    TerminalReadResponse,
+    ControlCharacterMessage,
+    SpecialKeyMessage,
+    # Session messages
+    SessionStatusRequest,
+    SessionStatusResponse,
+    SessionListRequest,
+    SessionListResponse,
+    FocusSessionMessage,
+    # Agent orchestration messages
+    BroadcastNotification,
+    AgentTaskRequest,
+    AgentTaskResponse,
+    WaitForAgentMessage,
+    WaitForAgentResponse,
+    ErrorMessage,
+    # Routing
+    MessageRouter,
+    message_handler,
+    topic_handler,
+    get_handlers,
+    get_topic_handlers,
+    clear_handlers,
+    # Utilities
+    create_terminal_command,
+    create_broadcast,
+    MESSAGE_TYPES,
+    serialize_message,
+    deserialize_message,
+)
 
 # Type checking imports for IDE support
 if TYPE_CHECKING:
-    from .session import ItermSession
+    from .session import (
+        ItermSession,
+        ExpectResult,
+        ExpectTimeout,
+        ExpectError,
+        ExpectTimeoutError,
+    )
     from .terminal import ItermTerminal
     from .layouts import LayoutManager, LayoutType
 
 # Lazy loading for iterm2-dependent modules
 _lazy_modules = {
     'ItermSession': '.session',
+    'ExpectResult': '.session',
+    'ExpectTimeout': '.session',
+    'ExpectError': '.session',
+    'ExpectTimeoutError': '.session',
     'ItermTerminal': '.terminal',
     'LayoutManager': '.layouts',
     'LayoutType': '.layouts',
@@ -144,6 +204,11 @@ __all__ = [
     'ItermTerminal',
     'LayoutManager',
     'LayoutType',
+    # Expect-style pattern matching
+    'ExpectResult',
+    'ExpectTimeout',
+    'ExpectError',
+    'ExpectTimeoutError',
     # Agent management
     'Agent',
     'Team',
@@ -153,6 +218,13 @@ __all__ = [
     'MessageRecord',
     'SessionTagLockManager',
     'FocusCooldownManager',
+    # Role-based session specialization
+    'SessionRole',
+    'RoleConfig',
+    'DEFAULT_ROLE_CONFIGS',
+    'RoleManager',
+    'SessionRoleAssignment',
+    'RolePermissionError',
     # Profile management
     'ProfileManager',
     'TeamProfile',
@@ -235,4 +307,35 @@ __all__ = [
     'BuildResult',
     'DeployResult',
     'BuildDeployFlow',
+    # Message-based communication
+    'AgentMessage',
+    'MessagePriority',
+    'TerminalCommand',
+    'TerminalOutput',
+    'TerminalReadRequest',
+    'TerminalReadResponse',
+    'ControlCharacterMessage',
+    'SpecialKeyMessage',
+    'SessionStatusRequest',
+    'SessionStatusResponse',
+    'SessionListRequest',
+    'SessionListResponse',
+    'FocusSessionMessage',
+    'BroadcastNotification',
+    'AgentTaskRequest',
+    'AgentTaskResponse',
+    'WaitForAgentMessage',
+    'WaitForAgentResponse',
+    'ErrorMessage',
+    'MessageRouter',
+    'message_handler',
+    'topic_handler',
+    'get_handlers',
+    'get_topic_handlers',
+    'clear_handlers',
+    'create_terminal_command',
+    'create_broadcast',
+    'MESSAGE_TYPES',
+    'serialize_message',
+    'deserialize_message',
 ]

@@ -10,6 +10,9 @@ from typing import Dict, List, Optional, Set, TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from .models import SessionRole
+from utils.otel import trace_operation, add_span_attributes, add_span_event
+
 if TYPE_CHECKING:
     from .tags import SessionTagLockManager
 
@@ -22,10 +25,15 @@ class Agent(BaseModel):
     teams: List[str] = Field(default_factory=list, description="Teams this agent belongs to")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Dict[str, str] = Field(default_factory=dict, description="Optional metadata")
+    role: Optional[SessionRole] = Field(default=None, description="Role assigned to this agent")
 
     def is_member_of(self, team: str) -> bool:
         """Check if agent is a member of the specified team."""
         return team in self.teams
+
+    def has_role(self, role: SessionRole) -> bool:
+        """Check if agent has the specified role."""
+        return self.role == role
 
 
 class Team(BaseModel):
@@ -153,12 +161,14 @@ class AgentRegistry:
 
     # ==================== Agent Management ====================
 
+    @trace_operation("agent_registry.register_agent")
     def register_agent(
         self,
         name: str,
         session_id: str,
         teams: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, str]] = None
+        metadata: Optional[Dict[str, str]] = None,
+        role: Optional[SessionRole] = None,
     ) -> Agent:
         """Register a new agent or update existing one.
 
@@ -167,18 +177,32 @@ class AgentRegistry:
             session_id: iTerm session ID
             teams: Optional list of team names
             metadata: Optional metadata dict
+            role: Optional role for this agent
 
         Returns:
             The created/updated Agent
         """
+        add_span_attributes(
+            agent_name=name,
+            session_id=session_id,
+            team_count=len(teams) if teams else 0,
+        )
+
         agent = Agent(
             name=name,
             session_id=session_id,
             teams=teams or [],
-            metadata=metadata or {}
+            metadata=metadata or {},
+            role=role,
         )
         self._agents[name] = agent
         self._save_agents()
+
+        add_span_event("agent_registered", {
+            "agent_name": name,
+            "teams": ",".join(teams) if teams else "",
+        })
+
         return agent
 
     def get_agent(self, name: str) -> Optional[Agent]:
@@ -192,14 +216,20 @@ class AgentRegistry:
                 return agent
         return None
 
+    @trace_operation("agent_registry.remove_agent")
     def remove_agent(self, name: str) -> bool:
         """Remove an agent. Returns True if removed."""
+        add_span_attributes(agent_name=name)
+
         if name in self._agents:
             del self._agents[name]
             self._save_agents()
             if self.lock_manager:
                 self.lock_manager.release_locks_by_agent(name)
+            add_span_event("agent_removed", {"agent_name": name})
             return True
+
+        add_span_event("agent_not_found", {"agent_name": name})
         return False
 
     def list_agents(self, team: Optional[str] = None) -> List[Agent]:
@@ -226,8 +256,22 @@ class AgentRegistry:
             return True
         return False
 
+    def set_agent_role(self, agent_name: str, role: Optional[SessionRole]) -> bool:
+        """Set or clear the role for an agent. Returns True if successful."""
+        agent = self._agents.get(agent_name)
+        if agent:
+            agent.role = role
+            self._save_agents()
+            return True
+        return False
+
+    def get_agents_by_role(self, role: SessionRole) -> List[Agent]:
+        """Get all agents with a specific role."""
+        return [a for a in self._agents.values() if a.role == role]
+
     # ==================== Team Management ====================
 
+    @trace_operation("agent_registry.create_team")
     def create_team(
         self,
         name: str,
@@ -244,26 +288,47 @@ class AgentRegistry:
         Returns:
             The created Team
         """
+        add_span_attributes(
+            team_name=name,
+            has_parent=parent_team is not None,
+            parent_team=parent_team or "",
+        )
+
         team = Team(name=name, description=description, parent_team=parent_team)
         self._teams[name] = team
         self._save_teams()
+
+        add_span_event("team_created", {"team_name": name})
+
         return team
 
     def get_team(self, name: str) -> Optional[Team]:
         """Get team by name."""
         return self._teams.get(name)
 
+    @trace_operation("agent_registry.remove_team")
     def remove_team(self, name: str) -> bool:
         """Remove a team. Returns True if removed."""
+        add_span_attributes(team_name=name)
+
         if name in self._teams:
             del self._teams[name]
             self._save_teams()
             # Also remove team from all agents
+            affected_agents = []
             for agent in self._agents.values():
                 if name in agent.teams:
                     agent.teams.remove(name)
+                    affected_agents.append(agent.name)
             self._save_agents()
+
+            add_span_event("team_removed", {
+                "team_name": name,
+                "affected_agents": len(affected_agents),
+            })
             return True
+
+        add_span_event("team_not_found", {"team_name": name})
         return False
 
     def list_teams(self) -> List[Team]:
@@ -381,6 +446,7 @@ class AgentRegistry:
 
     # ==================== Cascading Messages ====================
 
+    @trace_operation("agent_registry.resolve_cascade_targets")
     def resolve_cascade_targets(self, cascade: CascadingMessage) -> Dict[str, List[str]]:
         """Resolve a cascading message to specific agent targets.
 
@@ -397,6 +463,12 @@ class AgentRegistry:
         Returns:
             Dict mapping message content to list of agent names
         """
+        add_span_attributes(
+            has_broadcast=cascade.broadcast is not None,
+            team_count=len(cascade.teams),
+            agent_count=len(cascade.agents),
+        )
+
         # Track which agents have been assigned a message (most specific wins)
         agent_messages: Dict[str, str] = {}  # agent_name -> message
 
@@ -422,6 +494,11 @@ class AgentRegistry:
                 message_targets[message] = []
             message_targets[message].append(agent_name)
 
+        add_span_event("cascade_resolved", {
+            "total_agents": len(agent_messages),
+            "unique_messages": len(message_targets),
+        })
+
         return message_targets
 
     def get_session_ids_for_agents(self, agent_names: List[str]) -> List[str]:
@@ -439,3 +516,161 @@ class AgentRegistry:
             if agent:
                 session_ids.append(agent.session_id)
         return session_ids
+
+    # ==================== State Persistence ====================
+
+    def save_state(self) -> Dict:
+        """Serialize registry state to a JSON-compatible dict.
+
+        Returns a complete snapshot of the registry state including
+        agents, teams, active session, and recent message history.
+        This can be used for checkpointing, crash recovery, or debugging.
+
+        Returns:
+            Dict containing serializable registry state
+        """
+        # Serialize agents
+        agents_state = {}
+        for name, agent in self._agents.items():
+            agents_state[name] = {
+                "name": agent.name,
+                "session_id": agent.session_id,
+                "teams": agent.teams,
+                "created_at": agent.created_at.isoformat(),
+                "metadata": agent.metadata
+            }
+
+        # Serialize teams
+        teams_state = {}
+        for name, team in self._teams.items():
+            teams_state[name] = {
+                "name": team.name,
+                "description": team.description,
+                "parent_team": team.parent_team,
+                "created_at": team.created_at.isoformat()
+            }
+
+        # Serialize recent message history (for deduplication state)
+        message_history = []
+        for record in list(self._message_history)[-100:]:  # Limit to last 100
+            message_history.append({
+                "content_hash": record.content_hash,
+                "recipients": record.recipients,
+                "timestamp": record.timestamp.isoformat()
+            })
+
+        return {
+            "agents": agents_state,
+            "teams": teams_state,
+            "active_session": self._active_session,
+            "message_history": message_history,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+
+    def load_state(self, state: Dict) -> None:
+        """Restore registry state from a saved state dict.
+
+        This replaces the current registry state with the state from
+        the checkpoint. Useful for crash recovery or session resumption.
+
+        Args:
+            state: Previously saved state dict from save_state()
+
+        Raises:
+            Exception: Re-raises any exception after rolling back to previous state
+        """
+        # Snapshot current state so we can roll back on failure
+        old_agents = dict(self._agents)
+        old_teams = dict(self._teams)
+        old_message_history = list(self._message_history)
+        old_active_session = self._active_session
+
+        try:
+            # Clear current state
+            self._agents.clear()
+            self._teams.clear()
+            self._message_history.clear()
+
+            # Restore agents
+            agents_data = state.get("agents", {})
+            for name, agent_data in agents_data.items():
+                # Parse created_at if it's a string
+                created_at = agent_data.get("created_at")
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                elif created_at is None:
+                    created_at = datetime.now(timezone.utc)
+
+                agent = Agent(
+                    name=agent_data["name"],
+                    session_id=agent_data["session_id"],
+                    teams=agent_data.get("teams", []),
+                    created_at=created_at,
+                    metadata=agent_data.get("metadata", {})
+                )
+                self._agents[name] = agent
+
+            # Restore teams
+            teams_data = state.get("teams", {})
+            for name, team_data in teams_data.items():
+                created_at = team_data.get("created_at")
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                elif created_at is None:
+                    created_at = datetime.now(timezone.utc)
+
+                team = Team(
+                    name=team_data["name"],
+                    description=team_data.get("description", ""),
+                    parent_team=team_data.get("parent_team"),
+                    created_at=created_at
+                )
+                self._teams[name] = team
+
+            # Restore active session
+            self._active_session = state.get("active_session")
+
+            # Restore message history
+            message_history = state.get("message_history", [])
+            for record_data in message_history:
+                timestamp = record_data.get("timestamp")
+                if isinstance(timestamp, str):
+                    timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                elif timestamp is None:
+                    timestamp = datetime.now(timezone.utc)
+
+                record = MessageRecord(
+                    content_hash=record_data["content_hash"],
+                    recipients=record_data["recipients"],
+                    timestamp=timestamp
+                )
+                self._message_history.append(record)
+
+            # Persist restored state to files
+            self._save_agents()
+            self._save_teams()
+        except Exception:
+            # Roll back to previous state on any failure
+            self._agents.clear()
+            self._agents.update(old_agents)
+            self._teams.clear()
+            self._teams.update(old_teams)
+            self._message_history.clear()
+            self._message_history.extend(old_message_history)
+            self._active_session = old_active_session
+            raise
+
+    def get_state_summary(self) -> Dict:
+        """Get a brief summary of registry state for logging/debugging.
+
+        Returns:
+            Dict with key registry state info
+        """
+        return {
+            "agent_count": len(self._agents),
+            "team_count": len(self._teams),
+            "active_session": self._active_session,
+            "message_history_count": len(self._message_history),
+            "agents": list(self._agents.keys()),
+            "teams": list(self._teams.keys())
+        }

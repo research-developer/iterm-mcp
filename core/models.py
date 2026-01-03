@@ -2,11 +2,136 @@
 
 import re
 from datetime import datetime
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Supported AI agent CLI types
 AgentType = Literal["claude", "gemini", "codex", "copilot"]
+
+
+# ============================================================================
+# ROLE-BASED SESSION SPECIALIZATION
+# ============================================================================
+
+class SessionRole(str, Enum):
+    """Predefined roles for session specialization.
+
+    Roles define the purpose and capabilities of a session, guiding
+    what tools and commands are appropriate for that session.
+    """
+
+    DEVOPS = "devops"
+    BUILDER = "builder"
+    DEBUGGER = "debugger"
+    RESEARCHER = "researcher"
+    TESTER = "tester"
+    ORCHESTRATOR = "orchestrator"
+    MONITOR = "monitor"
+    CUSTOM = "custom"  # For user-defined roles
+
+
+class RoleConfig(BaseModel):
+    """Detailed configuration for a session role.
+
+    Defines the capabilities, restrictions, and default behavior
+    for a session with a specific role.
+    """
+
+    role: SessionRole = Field(..., description="The role type")
+    description: str = Field(
+        default="",
+        description="Human-readable description of this role's purpose"
+    )
+    available_tools: List[str] = Field(
+        default_factory=list,
+        description="List of tool names this role can use (empty = all tools)"
+    )
+    restricted_tools: List[str] = Field(
+        default_factory=list,
+        description="List of tool names this role cannot use"
+    )
+    default_commands: List[str] = Field(
+        default_factory=list,
+        description="Commands to run when session starts"
+    )
+    environment: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for this role"
+    )
+    can_spawn_agents: bool = Field(
+        default=False,
+        description="Whether this role can create new agent sessions"
+    )
+    can_modify_roles: bool = Field(
+        default=False,
+        description="Whether this role can modify other sessions' roles"
+    )
+    priority: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Role priority (1=highest, 5=lowest) for resource allocation"
+    )
+
+
+# Default role configurations for common roles
+DEFAULT_ROLE_CONFIGS: Dict[SessionRole, RoleConfig] = {
+    SessionRole.DEVOPS: RoleConfig(
+        role=SessionRole.DEVOPS,
+        description="DevOps engineer handling infrastructure, deployments, and system operations",
+        available_tools=["docker", "kubectl", "terraform", "ansible", "aws", "gcloud", "az"],
+        can_spawn_agents=False,
+        can_modify_roles=False,
+        priority=2,
+    ),
+    SessionRole.BUILDER: RoleConfig(
+        role=SessionRole.BUILDER,
+        description="Build specialist handling compilation, packaging, and artifacts",
+        available_tools=["npm", "yarn", "pip", "cargo", "go", "make", "docker", "git"],
+        default_commands=["cd /project"],
+        can_spawn_agents=False,
+        priority=3,
+    ),
+    SessionRole.DEBUGGER: RoleConfig(
+        role=SessionRole.DEBUGGER,
+        description="Debug specialist for investigating issues and analyzing logs",
+        available_tools=["gdb", "lldb", "strace", "dtrace", "tail", "grep", "awk", "jq"],
+        can_spawn_agents=False,
+        priority=2,
+    ),
+    SessionRole.RESEARCHER: RoleConfig(
+        role=SessionRole.RESEARCHER,
+        description="Research assistant for gathering information and analysis",
+        available_tools=["curl", "wget", "git", "grep", "find", "cat", "less"],
+        restricted_tools=["rm", "docker", "kubectl"],
+        can_spawn_agents=False,
+        priority=4,
+    ),
+    SessionRole.TESTER: RoleConfig(
+        role=SessionRole.TESTER,
+        description="Testing specialist for running tests and quality assurance",
+        available_tools=["pytest", "jest", "mocha", "cargo", "go", "npm", "make"],
+        can_spawn_agents=False,
+        priority=3,
+    ),
+    SessionRole.ORCHESTRATOR: RoleConfig(
+        role=SessionRole.ORCHESTRATOR,
+        description="Orchestration coordinator managing other agents and workflows",
+        available_tools=[],  # All tools available
+        can_spawn_agents=True,
+        can_modify_roles=True,
+        priority=1,
+    ),
+    SessionRole.MONITOR: RoleConfig(
+        role=SessionRole.MONITOR,
+        description="Monitoring agent for observing and reporting on system state",
+        available_tools=["tail", "grep", "ps", "top", "htop", "docker", "kubectl"],
+        restricted_tools=["rm", "kill", "pkill"],
+        can_spawn_agents=False,
+        priority=4,
+    ),
+}
 
 # Agent CLI launch commands
 AGENT_CLI_COMMANDS: Dict[str, str] = {
@@ -163,6 +288,14 @@ class SessionConfig(BaseModel):
     command: Optional[str] = Field(default=None, description="Initial command to run")
     max_lines: Optional[int] = Field(default=None, description="Max output lines")
     monitor: bool = Field(default=False, description="Start monitoring")
+    role: Optional[SessionRole] = Field(
+        default=None,
+        description="Role for this session (e.g., BUILDER, DEBUGGER, DEVOPS)"
+    )
+    role_config: Optional[RoleConfig] = Field(
+        default=None,
+        description="Custom role configuration (overrides default for the role)"
+    )
 
 
 class CreateSessionsRequest(BaseModel):
@@ -623,3 +756,60 @@ class PatternSubscriptionResponse(BaseModel):
     subscription_id: str = Field(..., description="Unique subscription ID")
     pattern: str = Field(..., description="The registered pattern")
     event_name: Optional[str] = Field(default=None, description="Event triggered on match")
+
+
+# ============================================================================
+# SESSION INFO MODELS (Issue #52)
+# ============================================================================
+
+
+class SessionInfo(BaseModel):
+    """Extended session information including tags and locks."""
+
+    session_id: str = Field(..., description="The session ID")
+    name: str = Field(..., description="Session name")
+    persistent_id: Optional[str] = Field(default=None, description="Persistent ID for reconnection")
+    agent: Optional[str] = Field(default=None, description="Registered agent name")
+    team: Optional[str] = Field(default=None, description="Primary team (first team if multiple)")
+    teams: List[str] = Field(default_factory=list, description="All teams the agent belongs to")
+    is_processing: bool = Field(default=False, description="Whether a command is running")
+
+    # Tag and lock information
+    tags: List[str] = Field(default_factory=list, description="Session tags")
+    locked: bool = Field(default=False, description="Whether session is locked")
+    locked_by: Optional[str] = Field(default=None, description="Agent holding the lock")
+    locked_at: Optional[datetime] = Field(default=None, description="When the lock was acquired")
+    pending_access_requests: int = Field(default=0, description="Number of pending access requests")
+
+
+class ListSessionsRequest(BaseModel):
+    """Request parameters for list_sessions with filtering."""
+
+    # Filter by tags
+    tag: Optional[str] = Field(default=None, description="Single tag to filter by")
+    tags: Optional[List[str]] = Field(default=None, description="Multiple tags to filter by")
+    match: Literal["any", "all"] = Field(
+        default="any",
+        description="How to match multiple tags: 'any' (OR) or 'all' (AND)"
+    )
+
+    # Filter by lock status
+    locked: Optional[bool] = Field(default=None, description="Filter by lock status")
+    locked_by: Optional[str] = Field(default=None, description="Filter by lock owner")
+
+    # Output format
+    format: Literal["full", "compact"] = Field(
+        default="full",
+        description="Output format: 'full' for JSON, 'compact' for one-line-per-session"
+    )
+
+    # Existing filter
+    agents_only: bool = Field(default=False, description="Only show sessions with registered agents")
+
+
+class ListSessionsResponse(BaseModel):
+    """Response from list_sessions."""
+
+    sessions: List[SessionInfo] = Field(..., description="Matching sessions")
+    total_count: int = Field(..., description="Total number of matching sessions")
+    filter_applied: bool = Field(default=False, description="Whether any filters were applied")
