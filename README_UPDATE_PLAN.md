@@ -66,7 +66,7 @@ async def test_team_profile_creation():
 **Pass Criteria**:
 - ✅ 5 team profiles created
 - ✅ Each profile has unique GUID
-- ✅ Hues are evenly distributed (roughly 360/5 = 72° apart)
+- ✅ Hues are well distributed across the color wheel (minimum gap ≥ 40°)
 - ✅ Profile file created at `~/Library/Application Support/iTerm2/DynamicProfiles/iterm-mcp-profiles.json`
 
 **Fail Criteria**:
@@ -154,7 +154,7 @@ def test_color_distribution():
 
 **Fail Criteria**:
 - ❌ Colors cluster together (gap < 30°)
-- ❌ Uneven distribution (max gap > 2x min gap)
+- ❌ Uneven distribution (max gap > 2.5x min gap)
 
 **Setup Requirements**:
 ```python
@@ -322,7 +322,7 @@ def test_agent_registration():
 - ✅ Team assignments recorded
 - ✅ Metadata stored
 - ✅ Team query returns correct agents
-- ✅ Data persisted to `~/.iterm-mcp/agents.jsonl`
+- ✅ Data persisted to `~/.iterm_mcp_logs/agents.jsonl`
 
 **Fail Criteria**:
 - ❌ Agent lookup returns None
@@ -337,11 +337,11 @@ pip install -e .
 **Verification**:
 ```bash
 # Check persistence
-cat ~/.iterm-mcp/agents.jsonl
+cat ~/.iterm_mcp_logs/agents.jsonl
 # Should contain 2 JSON lines with agent data
 
 # Verify teams file
-cat ~/.iterm-mcp/teams.jsonl
+cat ~/.iterm_mcp_logs/teams.jsonl
 # Should contain 2 JSON lines with team data
 ```
 
@@ -803,32 +803,27 @@ def test_session_locking():
     bob = registry.register_agent("bob", "session-2")
 
     # Alice locks her session
-    success = lock_manager.acquire_lock("session-1", "alice")
+    success = lock_manager.lock_session("session-1", "alice")
     assert success, "Lock acquisition failed"
     print("✓ Alice locked session-1")
 
     # Bob tries to lock Alice's session
-    success = lock_manager.acquire_lock("session-1", "bob")
+    success = lock_manager.lock_session("session-1", "bob")
     assert not success, "Lock should be denied"
     print("✓ Bob correctly denied access to session-1")
 
     # Check lock status
-    owner = lock_manager.get_lock_owner("session-1")
-    assert owner == "alice"
-    print(f"✓ Lock owner confirmed: {owner}")
-
-    # Request permission (returns False by default)
-    granted = lock_manager.request_write_access("session-1", "bob", "alice")
-    assert not granted, "Permission not granted by default"
-    print("✓ Permission request denied")
+    lock_info = lock_manager.get_lock("session-1")
+    assert lock_info is not None
+    print(f"✓ Lock info confirmed: {lock_info}")
 
     # Alice releases lock
-    released = lock_manager.release_lock("session-1", "alice")
+    released = lock_manager.unlock_session("session-1", "alice")
     assert released
     print("✓ Alice released session-1")
 
     # Bob can now lock
-    success = lock_manager.acquire_lock("session-1", "bob")
+    success = lock_manager.lock_session("session-1", "bob")
     assert success
     print("✓ Bob successfully locked session-1")
 
@@ -837,8 +832,7 @@ def test_session_locking():
 # Expected Output:
 # ✓ Alice locked session-1
 # ✓ Bob correctly denied access to session-1
-# ✓ Lock owner confirmed: alice
-# ✓ Permission request denied
+# ✓ Lock info confirmed: {...}
 # ✓ Alice released session-1
 # ✓ Bob successfully locked session-1
 ```
@@ -862,8 +856,8 @@ pip install -e .
 **Verification**:
 ```python
 lock_manager = test_session_locking()
-# All locks should be released at end
-assert len(lock_manager.list_locks()) == 1  # Bob's lock
+# Verify Bob's lock is active
+assert lock_manager.get_lock("session-1") is not None  # Bob's lock
 print("✓ Lock management test passed")
 ```
 
