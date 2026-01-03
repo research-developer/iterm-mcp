@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Supported AI agent CLI types
@@ -464,3 +464,162 @@ class WaitResult(BaseModel):
         default=True,
         description="Hint: is it worth waiting more?"
     )
+
+
+# ============================================================================
+# WORKFLOW EVENT MODELS
+# ============================================================================
+
+EventPriorityLevel = Literal["low", "normal", "high", "critical"]
+
+
+class TriggerEventRequest(BaseModel):
+    """Request to trigger a workflow event."""
+
+    event_name: str = Field(..., min_length=1, description="Name of the event to trigger")
+    payload: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Event payload data"
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="Source of the event (agent/flow name)"
+    )
+    priority: EventPriorityLevel = Field(
+        default="normal",
+        description="Event priority: low, normal, high, critical"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Additional event metadata"
+    )
+    immediate: bool = Field(
+        default=False,
+        description="If True, process synchronously instead of queueing"
+    )
+
+
+class EventInfo(BaseModel):
+    """Information about a single event."""
+
+    name: str = Field(..., description="Event name")
+    id: str = Field(..., description="Unique event ID")
+    source: Optional[str] = Field(default=None, description="Event source")
+    timestamp: datetime = Field(..., description="When the event was created")
+    priority: str = Field(..., description="Event priority level")
+
+
+class TriggerEventResponse(BaseModel):
+    """Response from triggering an event."""
+
+    success: bool = Field(..., description="Whether the event was triggered successfully")
+    event: Optional[EventInfo] = Field(default=None, description="Event information if triggered")
+    queued: bool = Field(default=False, description="Whether the event was queued for later processing")
+    processed: bool = Field(default=False, description="Whether the event was processed immediately")
+    routed_to: Optional[str] = Field(default=None, description="Event it was routed to, if any")
+    handler_name: Optional[str] = Field(default=None, description="Handler that processed the event")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class WorkflowEventInfo(BaseModel):
+    """Information about a registered workflow event."""
+
+    event_name: str = Field(..., description="Event name")
+    has_listeners: bool = Field(default=False, description="Whether event has listeners")
+    has_router: bool = Field(default=False, description="Whether event has a router")
+    is_start_event: bool = Field(default=False, description="Whether event is a start event")
+    listener_count: int = Field(default=0, description="Number of listeners")
+
+
+class ListWorkflowEventsResponse(BaseModel):
+    """Response listing all workflow events."""
+
+    events: List[WorkflowEventInfo] = Field(
+        default_factory=list,
+        description="List of registered workflow events"
+    )
+    total_count: int = Field(..., description="Total number of events")
+    flows_registered: List[str] = Field(
+        default_factory=list,
+        description="Names of registered flows"
+    )
+
+
+class EventHistoryEntry(BaseModel):
+    """A single entry in event history."""
+
+    event_name: str = Field(..., description="Event name")
+    event_id: str = Field(..., description="Event ID")
+    source: Optional[str] = Field(default=None, description="Event source")
+    timestamp: datetime = Field(..., description="When the event was triggered")
+    success: bool = Field(..., description="Whether processing succeeded")
+    handler_name: Optional[str] = Field(default=None, description="Handler that processed it")
+    routed_to: Optional[str] = Field(default=None, description="Event it was routed to")
+    duration_ms: float = Field(..., description="Processing duration in milliseconds")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class GetEventHistoryRequest(BaseModel):
+    """Request to get event history."""
+
+    event_name: Optional[str] = Field(default=None, description="Filter by event name")
+    limit: int = Field(default=100, ge=1, le=1000, description="Max entries to return")
+    success_only: bool = Field(default=False, description="Only return successful events")
+
+
+class GetEventHistoryResponse(BaseModel):
+    """Response containing event history."""
+
+    entries: List[EventHistoryEntry] = Field(..., description="History entries")
+    total_count: int = Field(..., description="Total entries returned")
+
+
+class RegisterFlowRequest(BaseModel):
+    """Request to register a flow class."""
+
+    flow_name: str = Field(..., description="Name of the flow class to register")
+
+
+class RegisterFlowResponse(BaseModel):
+    """Response from registering a flow."""
+
+    success: bool = Field(..., description="Whether registration succeeded")
+    flow_name: str = Field(..., description="Name of the registered flow")
+    events_registered: List[str] = Field(
+        default_factory=list,
+        description="Events registered by this flow"
+    )
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class PatternSubscriptionRequest(BaseModel):
+    """Request to subscribe to terminal output patterns."""
+
+    pattern: str = Field(..., description="Regex pattern to match")
+    event_name: Optional[str] = Field(
+        default=None,
+        description="Event to trigger on pattern match"
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Optional session to filter (None = all sessions)"
+    )
+
+    @field_validator('pattern', mode='before')
+    @classmethod
+    def validate_pattern_regex(cls, v):
+        """Validate that pattern is a valid regex."""
+        if v is not None:
+            try:
+                re.compile(v)
+            except re.error as e:
+                raise ValueError(f"Invalid regex pattern: {e}")
+        return v
+
+
+class PatternSubscriptionResponse(BaseModel):
+    """Response from creating a pattern subscription."""
+
+    subscription_id: str = Field(..., description="Unique subscription ID")
+    pattern: str = Field(..., description="The registered pattern")
+    event_name: Optional[str] = Field(default=None, description="Event triggered on match")

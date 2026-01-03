@@ -72,6 +72,29 @@ from core.models import (
     # Wait for agent models
     WaitForAgentRequest,
     WaitResult,
+    # Workflow event models
+    TriggerEventRequest,
+    TriggerEventResponse,
+    EventInfo,
+    WorkflowEventInfo,
+    ListWorkflowEventsResponse,
+    EventHistoryEntry,
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
+    PatternSubscriptionRequest,
+    PatternSubscriptionResponse,
+)
+from core.flows import (
+    EventBus,
+    EventPriority,
+    Flow,
+    FlowManager,
+    get_event_bus,
+    get_flow_manager,
+    trigger,
+    trigger_and_wait,
+    list_workflow_events as _list_workflow_events,
+    get_event_history as _get_event_history,
 )
 
 # Global references for resources (set during lifespan)
@@ -88,6 +111,8 @@ _feedback_hook_manager: Optional[FeedbackHookManager] = None
 _feedback_forker: Optional[FeedbackForker] = None
 _github_integration: Optional[GitHubIntegration] = None
 _profile_manager: Optional[ProfileManager] = None
+_event_bus: Optional[EventBus] = None
+_flow_manager: Optional[FlowManager] = None
 
 
 # ============================================================================
@@ -279,6 +304,13 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         profile_manager = get_profile_manager(logger)
         logger.info(f"Profile manager initialized with {len(profile_manager.list_team_profiles())} team profiles")
 
+        # Initialize event bus and flow manager
+        logger.info("Initializing event bus and flow manager...")
+        event_bus = get_event_bus()
+        flow_manager = get_flow_manager()
+        await event_bus.start()
+        logger.info("Event bus and flow manager initialized successfully")
+
         # Set global references for resources
         global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
@@ -296,6 +328,9 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         _github_integration = github_integration
         global _profile_manager
         _profile_manager = profile_manager
+        global _event_bus, _flow_manager
+        _event_bus = event_bus
+        _flow_manager = flow_manager
 
         # Yield the initialized components
         yield {
@@ -312,6 +347,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "feedback_forker": feedback_forker,
             "github_integration": github_integration,
             "profile_manager": profile_manager,
+            "event_bus": event_bus,
+            "flow_manager": flow_manager,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -319,6 +356,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
     finally:
         # Clean up resources
         logger.info("Shutting down iTerm MCP server...")
+        if event_bus:
+            await event_bus.stop()
         logger.info("iTerm MCP server shutdown completed")
 
 
@@ -1929,17 +1968,24 @@ async def start_monitoring_session(
     ctx: Context,
     session_id: Optional[str] = None,
     agent: Optional[str] = None,
-    name: Optional[str] = None
+    name: Optional[str] = None,
+    enable_event_bus: bool = True
 ) -> str:
     """Start real-time monitoring for a session.
+
+    When monitoring is active, terminal output changes are captured and can
+    trigger workflow events through pattern subscriptions. Use
+    subscribe_to_output_pattern to set up patterns that trigger events.
 
     Args:
         session_id: Target session ID (optional)
         agent: Target agent name (optional)
         name: Target session name (optional)
+        enable_event_bus: If True, route output to EventBus for pattern matching
     """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    event_bus: EventBus = ctx.request_context.lifespan_context["event_bus"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -1952,12 +1998,45 @@ async def start_monitoring_session(
         if session.is_monitoring:
             return f"Session {session.name} is already being monitored"
 
+        # Create a callback that routes output to the EventBus
+        if enable_event_bus:
+            async def event_bus_callback(output: str) -> None:
+                """Route terminal output to EventBus for pattern matching."""
+                try:
+                    # Process output against pattern subscriptions
+                    triggered = await event_bus.process_terminal_output(
+                        session_id=session.id,
+                        output=output
+                    )
+                    if triggered:
+                        logger.debug(f"Pattern subscriptions triggered: {triggered}")
+
+                    # Also trigger a generic terminal_output event
+                    await event_bus.trigger(
+                        event_name="terminal_output",
+                        payload={
+                            "session_id": session.id,
+                            "session_name": session.name,
+                            "output": output,
+                            "timestamp": time.time()
+                        },
+                        source=f"session:{session.name}"
+                    )
+                except Exception as e:
+                    logger.error(f"Error in event bus callback: {e}")
+
+            # Register the callback
+            session.add_monitor_callback(event_bus_callback)
+            # Store callback reference for cleanup
+            if not hasattr(session, '_event_bus_callback'):
+                session._event_bus_callback = event_bus_callback
+
         await session.start_monitoring(update_interval=0.2)
         await asyncio.sleep(2)
 
         if session.is_monitoring:
-            logger.info(f"Started monitoring for session: {session.name}")
-            return f"Started monitoring for session: {session.name}"
+            logger.info(f"Started monitoring for session: {session.name} (event_bus={enable_event_bus})")
+            return f"Started monitoring for session: {session.name} (event_bus integration: {enable_event_bus})"
         else:
             return f"Failed to start monitoring for session: {session.name}"
     except Exception as e:
@@ -1992,6 +2071,11 @@ async def stop_monitoring_session(
 
         if not session.is_monitoring:
             return f"Session {session.name} is not being monitored"
+
+        # Remove event bus callback if present
+        if hasattr(session, '_event_bus_callback') and session._event_bus_callback:
+            session.remove_monitor_callback(session._event_bus_callback)
+            session._event_bus_callback = None
 
         await session.stop_monitoring()
         logger.info(f"Stopped monitoring for session: {session.name}")
@@ -3002,6 +3086,260 @@ async def telemetry_dashboard() -> str:
         return json.dumps(state, indent=2)
     except Exception as e:
         _logger.error(f"Error getting telemetry dashboard: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# WORKFLOW EVENT TOOLS
+# ============================================================================
+
+# Priority level mapping
+PRIORITY_MAP = {
+    "low": EventPriority.LOW,
+    "normal": EventPriority.NORMAL,
+    "high": EventPriority.HIGH,
+    "critical": EventPriority.CRITICAL,
+}
+
+
+@mcp.tool()
+async def trigger_workflow_event(
+    ctx: Context,
+    event_name: str,
+    payload: Optional[Dict[str, Any]] = None,
+    source: Optional[str] = None,
+    priority: str = "normal",
+    metadata: Optional[Dict[str, Any]] = None,
+    immediate: bool = False
+) -> str:
+    """Trigger a workflow event.
+
+    Events are processed by registered listeners (@listen decorators) and can
+    be routed dynamically using @router decorators.
+
+    Args:
+        event_name: Name of the event to trigger
+        payload: Event payload data (will be passed to listeners)
+        source: Source of the event (agent/flow name)
+        priority: Event priority: low, normal, high, critical
+        metadata: Additional event metadata
+        immediate: If True, process synchronously instead of queueing
+
+    Returns:
+        JSON response with event info and processing result
+    """
+    event_bus: EventBus = ctx.request_context.lifespan_context["event_bus"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Map priority string to enum
+        priority_enum = PRIORITY_MAP.get(priority.lower(), EventPriority.NORMAL)
+
+        # Trigger the event
+        result = await event_bus.trigger(
+            event_name=event_name,
+            payload=payload,
+            source=source,
+            priority=priority_enum,
+            metadata=metadata or {},
+            immediate=immediate
+        )
+
+        if immediate and result:
+            response = TriggerEventResponse(
+                success=result.success,
+                event=EventInfo(
+                    name=result.event.name,
+                    id=result.event.id,
+                    source=result.event.source,
+                    timestamp=result.event.timestamp,
+                    priority=result.event.priority.name.lower()
+                ),
+                queued=False,
+                processed=True,
+                routed_to=result.routed_to,
+                handler_name=result.handler_name,
+                error=result.error
+            )
+        else:
+            # Event was queued
+            response = TriggerEventResponse(
+                success=True,
+                queued=True,
+                processed=False
+            )
+
+        logger.info(f"Triggered workflow event: {event_name}")
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error triggering workflow event: {e}")
+        return TriggerEventResponse(
+            success=False,
+            error=str(e)
+        ).model_dump_json(indent=2)
+
+
+@mcp.tool()
+async def list_workflow_events(ctx: Context) -> str:
+    """List all registered workflow events.
+
+    Returns information about all events that have listeners, routers,
+    or start handlers registered.
+
+    Returns:
+        JSON response with list of registered events
+    """
+    event_bus: EventBus = ctx.request_context.lifespan_context["event_bus"]
+    flow_manager: FlowManager = ctx.request_context.lifespan_context["flow_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Get all registered event names
+        event_names = await event_bus.get_registered_events()
+
+        # Build detailed info for each event
+        events = []
+        for name in sorted(event_names):
+            listeners = await event_bus._registry.get_listeners(name)
+            router = await event_bus._registry.get_router(name)
+            start_handler = await event_bus._registry.get_start_handler(name)
+
+            events.append(WorkflowEventInfo(
+                event_name=name,
+                has_listeners=len(listeners) > 0,
+                has_router=router is not None,
+                is_start_event=start_handler is not None,
+                listener_count=len(listeners)
+            ))
+
+        # Get registered flows
+        flow_names = flow_manager.list_flows()
+
+        response = ListWorkflowEventsResponse(
+            events=events,
+            total_count=len(events),
+            flows_registered=flow_names
+        )
+
+        logger.info(f"Listed {len(events)} workflow events")
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error listing workflow events: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def get_workflow_event_history(
+    ctx: Context,
+    event_name: Optional[str] = None,
+    limit: int = 100,
+    success_only: bool = False
+) -> str:
+    """Get workflow event history.
+
+    Args:
+        event_name: Filter by event name (optional)
+        limit: Max entries to return (default: 100, max: 1000)
+        success_only: Only return successfully processed events
+
+    Returns:
+        JSON response with event history entries
+    """
+    event_bus: EventBus = ctx.request_context.lifespan_context["event_bus"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Cap limit
+        limit = min(limit, 1000)
+
+        # Get history
+        history = await event_bus.get_history(
+            event_name=event_name,
+            limit=limit,
+            success_only=success_only
+        )
+
+        # Convert to response format
+        entries = [
+            EventHistoryEntry(
+                event_name=r.event.name,
+                event_id=r.event.id,
+                source=r.event.source,
+                timestamp=r.event.timestamp,
+                success=r.success,
+                handler_name=r.handler_name,
+                routed_to=r.routed_to,
+                duration_ms=r.duration_ms,
+                error=r.error
+            )
+            for r in history
+        ]
+
+        response = GetEventHistoryResponse(
+            entries=entries,
+            total_count=len(entries)
+        )
+
+        logger.info(f"Retrieved {len(entries)} event history entries")
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting event history: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def subscribe_to_output_pattern(
+    ctx: Context,
+    pattern: str,
+    event_name: Optional[str] = None
+) -> str:
+    """Subscribe to terminal output matching a pattern.
+
+    When terminal output matches the pattern, the specified event will be
+    triggered with the matched text as payload.
+
+    Args:
+        pattern: Regex pattern to match against terminal output
+        event_name: Event to trigger on pattern match (optional)
+
+    Returns:
+        JSON response with subscription ID
+    """
+    event_bus: EventBus = ctx.request_context.lifespan_context["event_bus"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Validate pattern
+        re.compile(pattern)
+
+        # Create callback
+        async def on_match(text: str, match: Any) -> None:
+            logger.debug(f"Pattern matched: {pattern} -> {match}")
+
+        # Subscribe
+        subscription_id = await event_bus.subscribe_to_pattern(
+            pattern=pattern,
+            callback=on_match,
+            event_name=event_name
+        )
+
+        response = PatternSubscriptionResponse(
+            subscription_id=subscription_id,
+            pattern=pattern,
+            event_name=event_name
+        )
+
+        logger.info(f"Created pattern subscription: {pattern}")
+        return response.model_dump_json(indent=2)
+
+    except re.error as e:
+        logger.error(f"Invalid regex pattern: {e}")
+        return json.dumps({"error": f"Invalid regex pattern: {e}"}, indent=2)
+    except Exception as e:
+        logger.error(f"Error creating pattern subscription: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
 
