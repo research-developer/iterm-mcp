@@ -45,6 +45,11 @@ from .feedback import (
     GitHubIntegration,
 )
 from .models import (
+    # Role-based session specialization
+    SessionRole,
+    RoleConfig,
+    DEFAULT_ROLE_CONFIGS,
+    # Session and message models
     SessionTarget,
     SessionMessage,
     WriteToSessionsRequest,
@@ -92,6 +97,11 @@ from .manager import (
     DelegationStrategy,
     ManagerAgent,
     ManagerRegistry,
+)
+from .roles import (
+    RoleManager,
+    SessionRoleAssignment,
+    RolePermissionError,
 )
 
 # Message-based communication
@@ -193,6 +203,13 @@ __all__ = [
     'MessageRecord',
     'SessionTagLockManager',
     'FocusCooldownManager',
+    # Role-based session specialization
+    'SessionRole',
+    'RoleConfig',
+    'DEFAULT_ROLE_CONFIGS',
+    'RoleManager',
+    'SessionRoleAssignment',
+    'RolePermissionError',
     # Profile management
     'ProfileManager',
     'TeamProfile',

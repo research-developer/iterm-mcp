@@ -30,6 +30,7 @@ See [EPIC_STATUS.md](EPIC_STATUS.md) for detailed implementation status.
 - Background process execution and status tracking
 - Control character support (Ctrl+C, etc.)
 - Lightweight telemetry with MCP resource + optional dashboard for pane and team health (see [docs/telemetry.md](docs/telemetry.md))
+- **Role-based session specialization** with tool filtering and access control (see [docs/ROLES.md](docs/ROLES.md))
 
 ## Requirements
 
@@ -58,6 +59,7 @@ iterm-mcp/
 │   ├── terminal.py               # Terminal window/tab management
 │   ├── layouts.py                # Predefined layouts
 │   ├── agents.py                 # Agent/team registry
+│   ├── roles.py                  # Role-based session specialization
 │   └── models.py                 # Pydantic request/response models
 ├── iterm_mcpy/                   # Server implementations
 │   ├── __init__.py
