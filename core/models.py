@@ -2,11 +2,136 @@
 
 import re
 from datetime import datetime
+from enum import Enum
 from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Supported AI agent CLI types
 AgentType = Literal["claude", "gemini", "codex", "copilot"]
+
+
+# ============================================================================
+# ROLE-BASED SESSION SPECIALIZATION
+# ============================================================================
+
+class SessionRole(str, Enum):
+    """Predefined roles for session specialization.
+
+    Roles define the purpose and capabilities of a session, guiding
+    what tools and commands are appropriate for that session.
+    """
+
+    DEVOPS = "devops"
+    BUILDER = "builder"
+    DEBUGGER = "debugger"
+    RESEARCHER = "researcher"
+    TESTER = "tester"
+    ORCHESTRATOR = "orchestrator"
+    MONITOR = "monitor"
+    CUSTOM = "custom"  # For user-defined roles
+
+
+class RoleConfig(BaseModel):
+    """Detailed configuration for a session role.
+
+    Defines the capabilities, restrictions, and default behavior
+    for a session with a specific role.
+    """
+
+    role: SessionRole = Field(..., description="The role type")
+    description: str = Field(
+        default="",
+        description="Human-readable description of this role's purpose"
+    )
+    available_tools: List[str] = Field(
+        default_factory=list,
+        description="List of tool names this role can use (empty = all tools)"
+    )
+    restricted_tools: List[str] = Field(
+        default_factory=list,
+        description="List of tool names this role cannot use"
+    )
+    default_commands: List[str] = Field(
+        default_factory=list,
+        description="Commands to run when session starts"
+    )
+    environment: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for this role"
+    )
+    can_spawn_agents: bool = Field(
+        default=False,
+        description="Whether this role can create new agent sessions"
+    )
+    can_modify_roles: bool = Field(
+        default=False,
+        description="Whether this role can modify other sessions' roles"
+    )
+    priority: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Role priority (1=highest, 5=lowest) for resource allocation"
+    )
+
+
+# Default role configurations for common roles
+DEFAULT_ROLE_CONFIGS: Dict[SessionRole, RoleConfig] = {
+    SessionRole.DEVOPS: RoleConfig(
+        role=SessionRole.DEVOPS,
+        description="DevOps engineer handling infrastructure, deployments, and system operations",
+        available_tools=["docker", "kubectl", "terraform", "ansible", "aws", "gcloud", "az"],
+        can_spawn_agents=False,
+        can_modify_roles=False,
+        priority=2,
+    ),
+    SessionRole.BUILDER: RoleConfig(
+        role=SessionRole.BUILDER,
+        description="Build specialist handling compilation, packaging, and artifacts",
+        available_tools=["npm", "yarn", "pip", "cargo", "go", "make", "docker", "git"],
+        default_commands=["cd /project"],
+        can_spawn_agents=False,
+        priority=3,
+    ),
+    SessionRole.DEBUGGER: RoleConfig(
+        role=SessionRole.DEBUGGER,
+        description="Debug specialist for investigating issues and analyzing logs",
+        available_tools=["gdb", "lldb", "strace", "dtrace", "tail", "grep", "awk", "jq"],
+        can_spawn_agents=False,
+        priority=2,
+    ),
+    SessionRole.RESEARCHER: RoleConfig(
+        role=SessionRole.RESEARCHER,
+        description="Research assistant for gathering information and analysis",
+        available_tools=["curl", "wget", "git", "grep", "find", "cat", "less"],
+        restricted_tools=["rm", "docker", "kubectl"],
+        can_spawn_agents=False,
+        priority=4,
+    ),
+    SessionRole.TESTER: RoleConfig(
+        role=SessionRole.TESTER,
+        description="Testing specialist for running tests and quality assurance",
+        available_tools=["pytest", "jest", "mocha", "cargo", "go", "npm", "make"],
+        can_spawn_agents=False,
+        priority=3,
+    ),
+    SessionRole.ORCHESTRATOR: RoleConfig(
+        role=SessionRole.ORCHESTRATOR,
+        description="Orchestration coordinator managing other agents and workflows",
+        available_tools=[],  # All tools available
+        can_spawn_agents=True,
+        can_modify_roles=True,
+        priority=1,
+    ),
+    SessionRole.MONITOR: RoleConfig(
+        role=SessionRole.MONITOR,
+        description="Monitoring agent for observing and reporting on system state",
+        available_tools=["tail", "grep", "ps", "top", "htop", "docker", "kubectl"],
+        restricted_tools=["rm", "kill", "pkill"],
+        can_spawn_agents=False,
+        priority=4,
+    ),
+}
 
 # Agent CLI launch commands
 AGENT_CLI_COMMANDS: Dict[str, str] = {
@@ -163,6 +288,14 @@ class SessionConfig(BaseModel):
     command: Optional[str] = Field(default=None, description="Initial command to run")
     max_lines: Optional[int] = Field(default=None, description="Max output lines")
     monitor: bool = Field(default=False, description="Start monitoring")
+    role: Optional[SessionRole] = Field(
+        default=None,
+        description="Role for this session (e.g., BUILDER, DEBUGGER, DEVOPS)"
+    )
+    role_config: Optional[RoleConfig] = Field(
+        default=None,
+        description="Custom role configuration (overrides default for the role)"
+    )
 
 
 class CreateSessionsRequest(BaseModel):

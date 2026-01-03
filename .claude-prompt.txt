@@ -1,0 +1,98 @@
+Please solve this GitHub issue:
+
+## Issue #61: Add Role-Based Session Specialization
+
+## Summary
+Implement role-based session specialization allowing sessions to be defined with professional roles (DevOps, Builder, Debugger) that influence available tools and behavior.
+
+## Background
+Role-based agent design is central to CrewAI and Agency Swarm:
+- **CrewAI**: Agents receive dedicated roles, goals, and backstories
+- **Agency Swarm**: Organizational structure metaphor (CEO, Developer, VA)
+- Both use roles to guide behavior and tool access
+
+## Proposed Implementation
+
+### Role Definition
+```python
+from enum import Enum
+from typing import List, Optional
+
+class SessionRole(Enum):
+    DEVOPS = "devops"
+    BUILDER = "builder"
+    DEBUGGER = "debugger"
+    RESEARCHER = "researcher"
+    TESTER = "tester"
+
+class RoleConfig(BaseModel):
+    role: SessionRole
+    description: str
+    available_tools: List[str]
+    default_commands: List[str] = []
+    environment: dict = {}
+```
+
+### Session Configuration
+```python
+class SessionConfig(BaseModel):
+    name: str
+    agent: Optional[str] = None
+    team: Optional[str] = None
+    role: Optional[SessionRole] = None
+    role_config: Optional[RoleConfig] = None
+    
+# Usage
+session = SessionConfig(
+    name="build-worker",
+    agent="build-1",
+    team="builders",
+    role=SessionRole.BUILDER,
+    role_config=RoleConfig(
+        role=SessionRole.BUILDER,
+        description="Handles npm builds and Docker containers",
+        available_tools=["npm", "docker", "git"],
+        default_commands=["cd /project", "nvm use 18"]
+    )
+)
+```
+
+### Role-Based Tool Filtering
+```python
+@mcp.tool()
+async def execute_npm(command: str, session_target: SessionTarget):
+    """Execute npm command. Only available to BUILDER role."""
+    session = await resolve_session(session_target)
+    if session.role not in [SessionRole.BUILDER, SessionRole.DEVOPS]:
+        raise PermissionError("npm commands require BUILDER or DEVOPS role")
+    ...
+```
+
+## Benefits
+- **Clear specialization**: Sessions have defined capabilities
+- **Tool restrictions**: Limit dangerous operations by role
+- **Better coordination**: Orchestrator knows what each session can do
+- **Self-documenting**: Roles describe session purpose
+
+## Acceptance Criteria
+- [ ] SessionRole enum with common roles
+- [ ] RoleConfig for detailed role configuration
+- [ ] Role field on SessionConfig
+- [ ] Optional tool filtering by role
+- [ ] Documentation for role definitions
+
+## References
+- CrewAI Roles: https://docs.crewai.com/concepts/agents
+- Agency Swarm: https://github.com/VRSEN/agency-swarm
+
+---
+**Research Source:** Multi-agent orchestration platform analysis (CrewAI, Agency Swarm)
+
+---
+
+Instructions:
+1. Analyze the issue and understand what needs to be done
+2. Implement the necessary changes
+3. Make sure to run tests if applicable
+4. When done, commit your changes with a descriptive message that references the issue
+5. After committing, create a PR that closes this issue (use "Closes #61" in the PR body)
