@@ -69,6 +69,29 @@ from .models import (
     PlaybookCommandResult,
     OrchestrateRequest,
     OrchestrateResponse,
+    # Manager models
+    CreateManagerRequest,
+    CreateManagerResponse,
+    DelegateTaskRequest,
+    TaskResultResponse,
+    TaskStepSpec,
+    TaskPlanSpec,
+    ExecutePlanRequest,
+    PlanResultResponse,
+    AddWorkerRequest,
+    RemoveWorkerRequest,
+    ManagerInfoResponse,
+)
+from .manager import (
+    SessionRole,
+    TaskStatus,
+    TaskResult,
+    TaskStep,
+    TaskPlan,
+    PlanResult,
+    DelegationStrategy,
+    ManagerAgent,
+    ManagerRegistry,
 )
 
 # Type checking imports for IDE support
@@ -139,6 +162,16 @@ __all__ = [
     'FeedbackRegistry',
     'FeedbackForker',
     'GitHubIntegration',
+    # Manager agent classes
+    'SessionRole',
+    'TaskStatus',
+    'TaskResult',
+    'TaskStep',
+    'TaskPlan',
+    'PlanResult',
+    'DelegationStrategy',
+    'ManagerAgent',
+    'ManagerRegistry',
     # API models
     'SessionTarget',
     'SessionMessage',
@@ -164,4 +197,16 @@ __all__ = [
     'PlaybookCommandResult',
     'OrchestrateRequest',
     'OrchestrateResponse',
+    # Manager API models
+    'CreateManagerRequest',
+    'CreateManagerResponse',
+    'DelegateTaskRequest',
+    'TaskResultResponse',
+    'TaskStepSpec',
+    'TaskPlanSpec',
+    'ExecutePlanRequest',
+    'PlanResultResponse',
+    'AddWorkerRequest',
+    'RemoveWorkerRequest',
+    'ManagerInfoResponse',
 ]

@@ -72,6 +72,28 @@ from core.models import (
     # Wait for agent models
     WaitForAgentRequest,
     WaitResult,
+    # Manager models
+    CreateManagerRequest,
+    CreateManagerResponse,
+    DelegateTaskRequest,
+    TaskResultResponse,
+    TaskStepSpec,
+    TaskPlanSpec,
+    ExecutePlanRequest,
+    PlanResultResponse,
+    AddWorkerRequest,
+    RemoveWorkerRequest,
+    ManagerInfoResponse,
+)
+from core.manager import (
+    SessionRole,
+    TaskStatus,
+    TaskResult,
+    TaskStep,
+    TaskPlan,
+    DelegationStrategy,
+    ManagerAgent,
+    ManagerRegistry,
 )
 
 # Global references for resources (set during lifespan)
@@ -88,6 +110,7 @@ _feedback_hook_manager: Optional[FeedbackHookManager] = None
 _feedback_forker: Optional[FeedbackForker] = None
 _github_integration: Optional[GitHubIntegration] = None
 _profile_manager: Optional[ProfileManager] = None
+_manager_registry: Optional[ManagerRegistry] = None
 
 
 # ============================================================================
@@ -279,6 +302,11 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         profile_manager = get_profile_manager(logger)
         logger.info(f"Profile manager initialized with {len(profile_manager.list_team_profiles())} team profiles")
 
+        # Initialize manager registry for hierarchical task delegation
+        logger.info("Initializing manager registry...")
+        manager_registry = ManagerRegistry()
+        logger.info("Manager registry initialized successfully")
+
         # Set global references for resources
         global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
@@ -294,8 +322,9 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         _feedback_hook_manager = feedback_hook_manager
         _feedback_forker = feedback_forker
         _github_integration = github_integration
-        global _profile_manager
+        global _profile_manager, _manager_registry
         _profile_manager = profile_manager
+        _manager_registry = manager_registry
 
         # Yield the initialized components
         yield {
@@ -312,6 +341,7 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "feedback_forker": feedback_forker,
             "github_integration": github_integration,
             "profile_manager": profile_manager,
+            "manager_registry": manager_registry,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -2960,6 +2990,467 @@ async def get_feedback_config(
 
     except Exception as e:
         logger.error(f"Error with feedback config: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# MANAGER AGENT TOOLS
+# ============================================================================
+
+
+async def _execute_task_on_worker(
+    worker: str,
+    task: str,
+    timeout_seconds: Optional[int],
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> tuple[Optional[str], bool, Optional[str]]:
+    """Execute a task on a worker agent and return result.
+
+    Args:
+        worker: Worker agent name
+        task: Command to execute
+        timeout_seconds: Optional timeout
+        terminal: Terminal instance
+        agent_registry: Agent registry
+        logger: Logger instance
+
+    Returns:
+        Tuple of (output, success, error)
+    """
+    agent = agent_registry.get_agent(worker)
+    if not agent:
+        return None, False, f"Worker agent '{worker}' not found"
+
+    session = terminal.get_session_by_id(agent.session_id)
+    if not session:
+        return None, False, f"Session for worker '{worker}' not found"
+
+    try:
+        # Send the command
+        await session.send_text(task + "\n")
+
+        # Wait for completion (simple approach - wait for prompt)
+        if timeout_seconds:
+            await asyncio.sleep(min(timeout_seconds, 2))
+        else:
+            await asyncio.sleep(1)
+
+        # Read output
+        output = await session.get_screen_contents(max_lines=100)
+
+        return output, True, None
+
+    except asyncio.TimeoutError:
+        return None, False, f"Task timed out after {timeout_seconds} seconds"
+    except Exception as e:
+        logger.error(f"Error executing task on worker {worker}: {e}")
+        return None, False, str(e)
+
+
+def _setup_manager_callbacks(
+    manager: ManagerAgent,
+    terminal: ItermTerminal,
+    agent_registry: AgentRegistry,
+    logger: logging.Logger,
+) -> None:
+    """Set up execution callbacks for a manager agent."""
+
+    async def execute_callback(
+        worker: str,
+        task: str,
+        timeout_seconds: Optional[int],
+    ) -> tuple[Optional[str], bool, Optional[str]]:
+        return await _execute_task_on_worker(
+            worker, task, timeout_seconds, terminal, agent_registry, logger
+        )
+
+    manager._execute_callback = execute_callback
+
+
+@mcp.tool()
+async def create_manager(
+    request: CreateManagerRequest,
+    ctx: Context,
+) -> str:
+    """Create a manager agent for hierarchical task delegation.
+
+    A manager agent coordinates other agents by delegating tasks to workers
+    based on their roles. This enables complex multi-step workflows.
+
+    Args:
+        request: Manager creation request with name, workers, and strategy
+
+    Returns:
+        JSON with created manager details
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Convert worker roles from strings to SessionRole
+        worker_roles = {}
+        for worker, role_str in request.worker_roles.items():
+            worker_roles[worker] = SessionRole(role_str)
+
+        # Create the manager
+        manager = manager_registry.create_manager(
+            name=request.name,
+            workers=request.workers,
+            delegation_strategy=DelegationStrategy(request.delegation_strategy),
+            worker_roles=worker_roles,
+            metadata=request.metadata,
+        )
+
+        # Set up execution callbacks
+        _setup_manager_callbacks(manager, terminal, agent_registry, logger)
+
+        logger.info(f"Created manager '{request.name}' with {len(request.workers)} workers")
+
+        response = CreateManagerResponse(
+            name=manager.name,
+            workers=manager.workers,
+            delegation_strategy=manager.strategy.value,
+            created=True,
+        )
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error creating manager: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def delegate_task(
+    request: DelegateTaskRequest,
+    ctx: Context,
+) -> str:
+    """Delegate a task through a manager to an appropriate worker.
+
+    The manager selects a worker based on its delegation strategy and the
+    required role. The task is executed and optionally validated.
+
+    Args:
+        request: Task delegation request with manager, task, and options
+
+    Returns:
+        JSON with task execution result
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        manager = manager_registry.get_manager(request.manager)
+        if not manager:
+            return json.dumps({"error": f"Manager '{request.manager}' not found"}, indent=2)
+
+        # Ensure callbacks are set up
+        _setup_manager_callbacks(manager, terminal, agent_registry, logger)
+
+        # Convert role string to SessionRole if provided
+        role = SessionRole(request.role) if request.role else None
+
+        # Delegate the task
+        result = await manager.delegate(
+            task=request.task,
+            required_role=role,
+            validation=request.validation,
+            timeout_seconds=request.timeout_seconds,
+            retry_count=request.retry_count,
+        )
+
+        logger.info(f"Task delegated via manager '{request.manager}': {result.status.value}")
+
+        response = TaskResultResponse(
+            task_id=result.task_id,
+            task=result.task,
+            worker=result.worker,
+            status=result.status.value,
+            success=result.success,
+            output=result.output,
+            error=result.error,
+            duration_seconds=result.duration_seconds,
+            validation_passed=result.validation_passed,
+            validation_message=result.validation_message,
+        )
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error delegating task: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def execute_plan(
+    request: ExecutePlanRequest,
+    ctx: Context,
+) -> str:
+    """Execute a multi-step task plan through a manager.
+
+    The manager orchestrates the execution of multiple steps, handling
+    dependencies and parallel execution as specified in the plan.
+
+    Args:
+        request: Plan execution request with manager and plan specification
+
+    Returns:
+        JSON with plan execution results
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        manager = manager_registry.get_manager(request.manager)
+        if not manager:
+            return json.dumps({"error": f"Manager '{request.manager}' not found"}, indent=2)
+
+        # Ensure callbacks are set up
+        _setup_manager_callbacks(manager, terminal, agent_registry, logger)
+
+        # Convert plan spec to TaskPlan
+        steps = []
+        for step_spec in request.plan.steps:
+            role = SessionRole(step_spec.role) if step_spec.role else None
+            step = TaskStep(
+                id=step_spec.id,
+                task=step_spec.task,
+                role=role,
+                optional=step_spec.optional,
+                depends_on=step_spec.depends_on,
+                validation=step_spec.validation,
+                timeout_seconds=step_spec.timeout_seconds,
+                retry_count=step_spec.retry_count,
+            )
+            steps.append(step)
+
+        plan = TaskPlan(
+            name=request.plan.name,
+            description=request.plan.description,
+            steps=steps,
+            parallel_groups=request.plan.parallel_groups,
+            stop_on_failure=request.plan.stop_on_failure,
+        )
+
+        # Execute the plan
+        plan_result = await manager.orchestrate(plan)
+
+        logger.info(
+            f"Plan '{plan.name}' completed: success={plan_result.success}, "
+            f"steps={len(plan_result.results)}"
+        )
+
+        # Convert results to response
+        result_responses = []
+        for result in plan_result.results:
+            result_responses.append(TaskResultResponse(
+                task_id=result.task_id,
+                task=result.task,
+                worker=result.worker,
+                status=result.status.value,
+                success=result.success,
+                output=result.output,
+                error=result.error,
+                duration_seconds=result.duration_seconds,
+                validation_passed=result.validation_passed,
+                validation_message=result.validation_message,
+            ))
+
+        response = PlanResultResponse(
+            plan_name=plan_result.plan_name,
+            success=plan_result.success,
+            results=result_responses,
+            duration_seconds=plan_result.duration_seconds,
+            stopped_early=plan_result.stopped_early,
+            stop_reason=plan_result.stop_reason,
+        )
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error executing plan: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def add_worker_to_manager(
+    request: AddWorkerRequest,
+    ctx: Context,
+) -> str:
+    """Add a worker agent to a manager.
+
+    Args:
+        request: Request with manager name, worker name, and optional role
+
+    Returns:
+        JSON with success status
+    """
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        manager = manager_registry.get_manager(request.manager)
+        if not manager:
+            return json.dumps({"error": f"Manager '{request.manager}' not found"}, indent=2)
+
+        role = SessionRole(request.role) if request.role else None
+        manager.add_worker(request.worker, role)
+
+        logger.info(f"Added worker '{request.worker}' to manager '{request.manager}'")
+
+        return json.dumps({
+            "success": True,
+            "manager": request.manager,
+            "worker": request.worker,
+            "role": request.role,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error adding worker to manager: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def remove_worker_from_manager(
+    request: RemoveWorkerRequest,
+    ctx: Context,
+) -> str:
+    """Remove a worker agent from a manager.
+
+    Args:
+        request: Request with manager and worker names
+
+    Returns:
+        JSON with success status
+    """
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        manager = manager_registry.get_manager(request.manager)
+        if not manager:
+            return json.dumps({"error": f"Manager '{request.manager}' not found"}, indent=2)
+
+        removed = manager.remove_worker(request.worker)
+
+        if removed:
+            logger.info(f"Removed worker '{request.worker}' from manager '{request.manager}'")
+        else:
+            logger.warning(f"Worker '{request.worker}' not found in manager '{request.manager}'")
+
+        return json.dumps({
+            "success": removed,
+            "manager": request.manager,
+            "worker": request.worker,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error removing worker from manager: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def get_manager_info(
+    manager_name: str,
+    ctx: Context,
+) -> str:
+    """Get information about a manager agent.
+
+    Args:
+        manager_name: Name of the manager to get info for
+
+    Returns:
+        JSON with manager details
+    """
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        manager = manager_registry.get_manager(manager_name)
+        if not manager:
+            return json.dumps({"error": f"Manager '{manager_name}' not found"}, indent=2)
+
+        response = ManagerInfoResponse(
+            name=manager.name,
+            workers=manager.workers,
+            worker_roles={k: v.value for k, v in manager.worker_roles.items()},
+            delegation_strategy=manager.strategy.value,
+            created_at=manager.created_at.isoformat(),
+            metadata=manager.metadata,
+        )
+        return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting manager info: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def list_managers(ctx: Context) -> str:
+    """List all registered manager agents.
+
+    Returns:
+        JSON with list of manager summaries
+    """
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        managers = manager_registry.list_managers()
+
+        result = []
+        for manager in managers:
+            result.append({
+                "name": manager.name,
+                "workers": manager.workers,
+                "delegation_strategy": manager.strategy.value,
+                "worker_count": len(manager.workers),
+            })
+
+        logger.info(f"Listed {len(managers)} managers")
+        return json.dumps({"managers": result, "count": len(result)}, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error listing managers: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def remove_manager(
+    manager_name: str,
+    ctx: Context,
+) -> str:
+    """Remove a manager agent.
+
+    Args:
+        manager_name: Name of the manager to remove
+
+    Returns:
+        JSON with success status
+    """
+    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        removed = manager_registry.remove_manager(manager_name)
+
+        if removed:
+            logger.info(f"Removed manager '{manager_name}'")
+        else:
+            logger.warning(f"Manager '{manager_name}' not found")
+
+        return json.dumps({
+            "success": removed,
+            "manager": manager_name,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error removing manager: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
 
