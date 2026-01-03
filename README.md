@@ -411,6 +411,20 @@ Example:
 - `start_monitoring_session` - Start real-time monitoring for a session
 - `stop_monitoring_session` - Stop real-time monitoring for a session
 
+### Session Lock & Tag Tools
+
+- `lock_session` - Lock a session for exclusive agent access
+- `unlock_session` - Release a session lock
+- `request_session_access` - Request permission to write to a locked session
+- `set_session_tags` - Set or append tags on a session
+
+### Notification Tools
+
+- `get_notifications` - Get recent agent notifications (errors, completions, blocks)
+- `get_agent_status_summary` - Compact one-line-per-agent status summary
+- `notify` - Manually add a notification for an agent
+- `wait_for_agent` - Wait for an agent to complete or reach idle state
+
 ### Resources
 
 - `terminal://{session_id}/output` - Get the output from a terminal session
@@ -427,6 +441,47 @@ Example:
 ## Multi-Agent Orchestration
 
 The iTerm MCP server supports coordinating multiple Claude Code instances through named agents, teams, and parallel session operations.
+
+### Team Profiles with Auto-Assigned Colors
+
+Teams can be assigned unique iTerm profiles with automatically distributed colors. The `ColorDistributor` uses a maximum-gap algorithm to ensure colors are visually distinct.
+
+```python
+from core.profiles import ProfileManager, ColorDistributor
+
+# Create profile manager
+profile_manager = ProfileManager()
+
+# Create profiles for teams - colors are auto-assigned
+teams = ["backend", "frontend", "devops", "ml", "security"]
+for team_name in teams:
+    profile = profile_manager.get_or_create_team_profile(team_name)
+    print(f"{team_name}: hue={profile.color.hue:.1f}°, GUID={profile.guid}")
+
+# Save profiles to iTerm Dynamic Profiles
+profile_manager.save_profiles()
+
+# Verify: profiles saved to ~/Library/Application Support/iTerm2/DynamicProfiles/
+```
+
+**Pass Criteria**:
+- 5 team profiles created with unique GUIDs
+- Hues are evenly distributed (minimum gap ≥ 40°)
+- Profile file created at `~/Library/Application Support/iTerm2/DynamicProfiles/iterm-mcp-profiles.json`
+
+The color distribution algorithm starts at 180° (teal) and bisects the largest gap for each new color:
+
+```python
+from core.profiles import ColorDistributor
+
+distributor = ColorDistributor(saturation=70, lightness=38)
+
+# Get 6 colors - each fills the largest gap
+colors = [distributor.get_next_color() for _ in range(6)]
+hues = [c.hue for c in colors]  # [180.0, 0.0, 90.0, 270.0, 45.0, 225.0]
+
+# Verify: min gap ≥ 45°, max gap ≤ 90° for 6 colors
+```
 
 ### Agent & Team Concepts
 
@@ -467,6 +522,52 @@ Example payload:
     "reads": {"targets": [{"team": "qa"}], "parallel": true}
   }
 }
+```
+
+**Python API (verified)**:
+
+```python
+from core.models import (
+    CreateSessionsRequest, SessionConfig,
+    OrchestrateRequest, Playbook, PlaybookCommand,
+    SessionMessage, SessionTarget
+)
+
+# Create a multi-stage playbook
+playbook = Playbook(
+    commands=[
+        PlaybookCommand(
+            name='initial-setup',
+            messages=[
+                SessionMessage(
+                    content='echo "Hello from playbook"',
+                    targets=[SessionTarget(team='docs-testing')],
+                    execute=True
+                )
+            ],
+            parallel=True
+        ),
+        PlaybookCommand(
+            name='verification',
+            messages=[
+                SessionMessage(
+                    content='echo "Setup complete"',
+                    targets=[SessionTarget(agent='test-profiles')],
+                    execute=True
+                )
+            ],
+            parallel=False
+        )
+    ]
+)
+
+# Wrap in OrchestrateRequest for MCP tool
+request = OrchestrateRequest(playbook=playbook)
+
+# Pass Criteria:
+# - Commands: 2 stages created
+# - Each PlaybookCommand has messages with targets
+# - OrchestrateRequest validates successfully
 ```
 
 ### Parallel Session Operations
@@ -521,6 +622,39 @@ Resolution order:
 3. Else if broadcast exists → use broadcast
 4. Messages are deduplicated to prevent sending the same content twice
 
+**Python API (verified)**:
+
+```python
+from core.agents import AgentRegistry, CascadingMessage
+
+registry = AgentRegistry()
+
+# Create teams and register agents
+registry.create_team("docs-testing", "Documentation testing team")
+registry.register_agent("test-profiles", "session-1", teams=["docs-testing"])
+registry.register_agent("test-agents", "session-2", teams=["docs-testing"])
+
+# Create a cascading message targeting a team
+team_cascade = CascadingMessage(teams={"docs-testing": "Hello team!"})
+result = registry.resolve_cascade_targets(team_cascade)
+# Returns: {'Hello team!': ['test-profiles', 'test-agents']}
+
+# Target a specific agent
+agent_cascade = CascadingMessage(agents={"test-profiles": "Hello agent!"})
+result = registry.resolve_cascade_targets(agent_cascade)
+# Returns: {'Hello agent!': ['test-profiles']}
+
+# Broadcast to all registered agents
+broadcast_cascade = CascadingMessage(broadcast="Hello everyone!")
+result = registry.resolve_cascade_targets(broadcast_cascade)
+# Returns: {'Hello everyone!': ['test-profiles', 'test-agents', ...]}
+```
+
+**Pass Criteria**:
+- Team messages resolve to all agents in that team
+- Agent-specific messages resolve to only that agent
+- Broadcasts reach all registered agents
+
 ### gRPC Client
 
 For programmatic access outside MCP, use the gRPC client:
@@ -554,6 +688,39 @@ with ITermClient(host='localhost', port=50051) as client:
         teams={"frontend": "Run tests"},
         agents={"alice": "Review PR #42"}
     )
+```
+
+### Session Locking
+
+Agents can lock sessions for exclusive access, preventing other agents from writing:
+
+```python
+# Via MCP tools:
+lock_session(session_id="session-123", agent="alice")      # Alice locks
+unlock_session(session_id="session-123", agent="alice")    # Alice releases
+
+# Other agent trying to lock is rejected
+lock_session(session_id="session-123", agent="bob")        # Returns: locked=False
+```
+
+**Lock behavior**:
+- Only the lock owner can unlock the session
+- `request_session_access` allows requesting write permission from the owner
+- Locks are enforced by the MCP server's `write_to_sessions` tool
+
+**Python API (verified)**:
+
+```python
+# Session locking via MCP tools (lock_session, unlock_session)
+# Example test flow:
+#   1. lock_session(session_id, agent="test-agents") → locked=True
+#   2. lock_session(session_id, agent="other-agent") → locked=False (rejected)
+#   3. unlock_session(session_id, agent="test-agents") → unlocked=True
+#
+# Pass Criteria:
+# - Lock acquired by owner
+# - Lock denied to non-owner
+# - Owner can release lock
 ```
 
 ### Data Persistence
