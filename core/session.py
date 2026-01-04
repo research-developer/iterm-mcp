@@ -110,8 +110,12 @@ SIMPLE_COMMAND_PATTERN = re.compile(r'^[a-zA-Z0-9_\-./: =,@#%^*+~]+$')
 
 # Constants for text input delay calculation
 BASE_DELAY_SECONDS = 0.05  # 50ms base delay
-DELAY_PER_CHAR_SECONDS = 0.00002  # 0.02ms per character (1000 chars = 20ms extra)
-MAX_DELAY_SECONDS = 0.5  # Maximum 500ms delay
+DELAY_PER_CHAR_SECONDS = 0.0001  # 0.1ms per character (1000 chars = 100ms extra)
+MAX_DELAY_SECONDS = 3.0  # Maximum 3 second delay for very large pastes
+
+# Thresholds for tiered delay calculation
+LARGE_PASTE_THRESHOLD = 1000  # Characters above which we add extra delay
+EXTRA_LARGE_PASTE_THRESHOLD = 5000  # Characters above which we add even more delay
 
 
 def calculate_text_delay(text: str) -> float:
@@ -121,6 +125,11 @@ def calculate_text_delay(text: str) -> float:
     the Enter key is sent. This function returns a delay that scales with text
     length to prevent race conditions where Enter is processed before the text.
 
+    Uses a tiered approach:
+    - Small pastes (<1000 chars): base + linear scaling
+    - Large pastes (1000-5000 chars): additional 200ms buffer
+    - Extra large pastes (>5000 chars): additional 500ms buffer
+
     Args:
         text: The text being sent to the terminal
 
@@ -128,7 +137,16 @@ def calculate_text_delay(text: str) -> float:
         Delay in seconds (between BASE_DELAY_SECONDS and MAX_DELAY_SECONDS)
     """
     text_length = len(text)
+
+    # Base linear scaling
     calculated_delay = BASE_DELAY_SECONDS + (text_length * DELAY_PER_CHAR_SECONDS)
+
+    # Add tiered buffers for large pastes
+    if text_length > EXTRA_LARGE_PASTE_THRESHOLD:
+        calculated_delay += 0.5  # Extra 500ms for very large pastes
+    elif text_length > LARGE_PASTE_THRESHOLD:
+        calculated_delay += 0.2  # Extra 200ms for large pastes
+
     return min(calculated_delay, MAX_DELAY_SECONDS)
 
 
