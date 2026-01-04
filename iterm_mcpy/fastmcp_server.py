@@ -37,6 +37,19 @@ from core.feedback import (
     FeedbackForker,
     GitHubIntegration,
 )
+from core.services import (
+    ServicePriority,
+    ServiceConfig,
+    ServiceRegistry,
+    ServiceState,
+    ServiceManager,
+    get_service_manager,
+)
+from core.service_hooks import (
+    HookResult,
+    ServiceHookManager,
+    get_service_hook_manager,
+)
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -88,6 +101,8 @@ _feedback_hook_manager: Optional[FeedbackHookManager] = None
 _feedback_forker: Optional[FeedbackForker] = None
 _github_integration: Optional[GitHubIntegration] = None
 _profile_manager: Optional[ProfileManager] = None
+_service_manager: Optional[ServiceManager] = None
+_service_hook_manager: Optional[ServiceHookManager] = None
 
 
 # ============================================================================
@@ -279,6 +294,14 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         profile_manager = get_profile_manager(logger)
         logger.info(f"Profile manager initialized with {len(profile_manager.list_team_profiles())} team profiles")
 
+        # Initialize service manager and hooks
+        logger.info("Initializing service manager...")
+        service_manager = get_service_manager(logger=logger)
+        service_manager.set_terminal(terminal)
+        service_manager.load_global_config()
+        service_hook_manager = get_service_hook_manager(service_manager, logger)
+        logger.info("Service manager initialized successfully")
+
         # Set global references for resources
         global _terminal, _logger, _agent_registry, _telemetry, _notification_manager
         _terminal = terminal
@@ -296,6 +319,9 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         _github_integration = github_integration
         global _profile_manager
         _profile_manager = profile_manager
+        global _service_manager, _service_hook_manager
+        _service_manager = service_manager
+        _service_hook_manager = service_hook_manager
 
         # Yield the initialized components
         yield {
@@ -312,6 +338,8 @@ async def iterm_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             "feedback_forker": feedback_forker,
             "github_integration": github_integration,
             "profile_manager": profile_manager,
+            "service_manager": service_manager,
+            "service_hook_manager": service_hook_manager,
             "logger": logger,
             "log_dir": log_dir
         }
@@ -1590,15 +1618,66 @@ async def remove_agent(
 
 
 @mcp.tool()
-async def create_team(request: CreateTeamRequest, ctx: Context) -> str:
-    """Create a new team."""
+async def create_team(
+    request: CreateTeamRequest,
+    ctx: Context,
+    repo_path: Optional[str] = None
+) -> str:
+    """Create a new team.
+
+    Args:
+        request: Team creation request
+        ctx: MCP context
+        repo_path: Optional repo path for service hook checks
+    """
 
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     profile_manager = ctx.request_context.lifespan_context["profile_manager"]
+    service_hook_manager = ctx.request_context.lifespan_context["service_hook_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
         req = ensure_model(CreateTeamRequest, request)
+
+        # Check service hooks before creating team
+        hook_result = await service_hook_manager.pre_create_team_hook(
+            team_name=req.name,
+            repo_path=repo_path
+        )
+
+        # Build response with hook information
+        response_data = {}
+
+        # If hook requires prompt, return the hook result for agent to decide
+        if hook_result.prompt_required:
+            response_data["service_prompt"] = {
+                "message": hook_result.message,
+                "inactive_services": [
+                    {
+                        "name": s.name,
+                        "display_name": s.effective_display_name,
+                        "priority": s.priority.value,
+                    }
+                    for s in hook_result.inactive_services
+                ],
+                "action_required": True,
+            }
+            # Still create the team, but inform about services
+            logger.info(f"Service hook prompting for team '{req.name}': {hook_result.message}")
+
+        # If hook says don't proceed, return error
+        if not hook_result.proceed:
+            return json.dumps({
+                "error": hook_result.message,
+                "proceed": False,
+            }, indent=2)
+
+        # Add info about auto-started services
+        if hook_result.auto_started:
+            response_data["auto_started_services"] = [
+                s.name for s in hook_result.auto_started
+            ]
+
         team = agent_registry.create_team(
             name=req.name,
             description=req.description,
@@ -1611,13 +1690,15 @@ async def create_team(request: CreateTeamRequest, ctx: Context) -> str:
 
         logger.info(f"Created team '{team.name}' with profile color hue={team_profile.color.hue:.1f}")
 
-        return json.dumps({
+        response_data.update({
             "name": team.name,
             "description": team.description,
             "parent_team": team.parent_team,
             "profile_guid": team_profile.guid,
             "color_hue": round(team_profile.color.hue, 1)
-        }, indent=2)
+        })
+
+        return json.dumps(response_data, indent=2)
     except Exception as e:
         logger.error(f"Error creating team: {e}")
         return f"Error: {e}"
@@ -2960,6 +3041,353 @@ async def get_feedback_config(
 
     except Exception as e:
         logger.error(f"Error with feedback config: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+# ============================================================================
+# SERVICE MANAGEMENT TOOLS
+# ============================================================================
+
+@mcp.tool()
+async def list_services(
+    ctx: Context,
+    repo_path: Optional[str] = None,
+    min_priority: Optional[str] = None,
+    include_status: bool = True,
+) -> str:
+    """List configured services and their status.
+
+    Args:
+        repo_path: Repository path to filter services for
+        min_priority: Minimum priority level to include (quiet, optional, preferred, required)
+        include_status: Whether to check running status (may be slower)
+    """
+    service_manager = ctx.request_context.lifespan_context["service_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Parse priority if provided
+        priority = None
+        if min_priority:
+            priority = ServicePriority.from_string(min_priority)
+
+        # Get services
+        if repo_path:
+            services = service_manager.get_merged_services(repo_path, priority)
+        else:
+            global_registry = service_manager.load_global_config()
+            services = global_registry.services
+            if priority:
+                priority_order = [
+                    ServicePriority.QUIET,
+                    ServicePriority.OPTIONAL,
+                    ServicePriority.PREFERRED,
+                    ServicePriority.REQUIRED
+                ]
+                min_idx = priority_order.index(priority)
+                services = [
+                    s for s in services
+                    if priority_order.index(s.priority) >= min_idx
+                ]
+
+        result = []
+        for service in services:
+            info = {
+                "name": service.name,
+                "display_name": service.effective_display_name,
+                "priority": service.priority.value,
+                "command": service.command,
+                "port": service.port,
+                "working_directory": service.working_directory,
+            }
+
+            if include_status:
+                is_running = await service_manager.check_service_running(service)
+                info["is_running"] = is_running
+
+            result.append(info)
+
+        return json.dumps({
+            "services": result,
+            "count": len(result),
+            "repo_path": repo_path,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error listing services: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def start_service(
+    ctx: Context,
+    service_name: str,
+    repo_path: Optional[str] = None,
+) -> str:
+    """Start a configured service.
+
+    Args:
+        service_name: Name of the service to start
+        repo_path: Repository path context
+    """
+    service_manager = ctx.request_context.lifespan_context["service_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Find the service
+        if repo_path:
+            services = service_manager.get_merged_services(repo_path)
+        else:
+            global_registry = service_manager.load_global_config()
+            services = global_registry.services
+
+        service = None
+        for s in services:
+            if s.name == service_name:
+                service = s
+                break
+
+        if not service:
+            return json.dumps({
+                "error": f"Service '{service_name}' not found",
+                "available_services": [s.name for s in services],
+            }, indent=2)
+
+        # Start the service
+        state = await service_manager.start_service(service, repo_path=repo_path)
+
+        return json.dumps({
+            "service": service_name,
+            "started": state.is_running,
+            "session_id": state.session_id,
+            "error": state.error_message,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error starting service: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def stop_service(
+    ctx: Context,
+    service_name: str,
+) -> str:
+    """Stop a running service.
+
+    Args:
+        service_name: Name of the service to stop
+    """
+    service_manager = ctx.request_context.lifespan_context["service_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        success = await service_manager.stop_service(service_name)
+
+        return json.dumps({
+            "service": service_name,
+            "stopped": success,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error stopping service: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def add_service(
+    ctx: Context,
+    name: str,
+    command: str,
+    priority: str = "optional",
+    display_name: Optional[str] = None,
+    port: Optional[int] = None,
+    working_directory: Optional[str] = None,
+    repo_patterns: Optional[List[str]] = None,
+    scope: str = "global",
+    repo_path: Optional[str] = None,
+) -> str:
+    """Add a new service definition.
+
+    Args:
+        name: Unique service identifier
+        command: Command to start the service
+        priority: Priority level (quiet, optional, preferred, required)
+        display_name: Human-readable name
+        port: Port the service listens on
+        working_directory: Working directory for the service
+        repo_patterns: Glob patterns to match repo paths
+        scope: Where to save ("global" or "repo")
+        repo_path: Required if scope is "repo"
+    """
+    service_manager = ctx.request_context.lifespan_context["service_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Create service config
+        service = ServiceConfig(
+            name=name,
+            display_name=display_name,
+            command=command,
+            priority=ServicePriority.from_string(priority),
+            port=port,
+            working_directory=working_directory,
+            repo_patterns=repo_patterns or [],
+        )
+
+        # Add to appropriate registry
+        if scope == "repo":
+            if not repo_path:
+                return json.dumps({
+                    "error": "repo_path required when scope is 'repo'",
+                }, indent=2)
+
+            registry = service_manager.load_repo_config(repo_path)
+            # Remove existing service with same name
+            registry.services = [s for s in registry.services if s.name != name]
+            registry.services.append(service)
+            service_manager.save_repo_config(repo_path, registry)
+        else:
+            registry = service_manager.load_global_config()
+            # Remove existing service with same name
+            registry.services = [s for s in registry.services if s.name != name]
+            registry.services.append(service)
+            service_manager.save_global_config(registry)
+
+        logger.info(f"Added service '{name}' to {scope} config")
+
+        return json.dumps({
+            "service": name,
+            "scope": scope,
+            "added": True,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error adding service: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def configure_service(
+    ctx: Context,
+    service_name: str,
+    priority: Optional[str] = None,
+    port: Optional[int] = None,
+    command: Optional[str] = None,
+    working_directory: Optional[str] = None,
+    scope: str = "global",
+    repo_path: Optional[str] = None,
+) -> str:
+    """Update configuration for an existing service.
+
+    Args:
+        service_name: Name of the service to configure
+        priority: New priority level
+        port: New port number
+        command: New command
+        working_directory: New working directory
+        scope: Where to save changes ("global" or "repo")
+        repo_path: Required if scope is "repo"
+    """
+    service_manager = ctx.request_context.lifespan_context["service_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        # Load the appropriate registry
+        if scope == "repo":
+            if not repo_path:
+                return json.dumps({
+                    "error": "repo_path required when scope is 'repo'",
+                }, indent=2)
+            registry = service_manager.load_repo_config(repo_path)
+        else:
+            registry = service_manager.load_global_config()
+
+        # Find and update the service
+        found = False
+        for i, service in enumerate(registry.services):
+            if service.name == service_name:
+                found = True
+                updates = {}
+
+                if priority:
+                    updates["priority"] = ServicePriority.from_string(priority)
+                if port is not None:
+                    updates["port"] = port
+                if command:
+                    updates["command"] = command
+                if working_directory:
+                    updates["working_directory"] = working_directory
+
+                # Create updated service
+                updated_data = service.model_dump()
+                updated_data.update(updates)
+                registry.services[i] = ServiceConfig.model_validate(updated_data)
+                break
+
+        if not found:
+            return json.dumps({
+                "error": f"Service '{service_name}' not found in {scope} config",
+            }, indent=2)
+
+        # Save changes
+        if scope == "repo":
+            service_manager.save_repo_config(repo_path, registry)
+        else:
+            service_manager.save_global_config(registry)
+
+        logger.info(f"Updated service '{service_name}' in {scope} config")
+
+        return json.dumps({
+            "service": service_name,
+            "scope": scope,
+            "updated": True,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error configuring service: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
+async def get_inactive_services(
+    ctx: Context,
+    repo_path: str,
+    min_priority: Optional[str] = None,
+) -> str:
+    """Get services that should be running but aren't.
+
+    Args:
+        repo_path: Repository path to check services for
+        min_priority: Minimum priority level to check
+    """
+    service_manager = ctx.request_context.lifespan_context["service_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        priority = None
+        if min_priority:
+            priority = ServicePriority.from_string(min_priority)
+
+        inactive = await service_manager.get_inactive_services(repo_path, priority)
+
+        result = []
+        for service in inactive:
+            result.append({
+                "name": service.name,
+                "display_name": service.effective_display_name,
+                "priority": service.priority.value,
+                "command": service.command,
+            })
+
+        return json.dumps({
+            "inactive_services": result,
+            "count": len(result),
+            "repo_path": repo_path,
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Error getting inactive services: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
 
