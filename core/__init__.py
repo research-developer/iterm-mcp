@@ -63,6 +63,11 @@ from .service_hooks import (
     get_service_hook_manager,
 )
 from .models import (
+    # Role-based session specialization
+    SessionRole,
+    RoleConfig,
+    DEFAULT_ROLE_CONFIGS,
+    # Session and message models
     SessionTarget,
     SessionMessage,
     WriteToSessionsRequest,
@@ -87,17 +92,133 @@ from .models import (
     PlaybookCommandResult,
     OrchestrateRequest,
     OrchestrateResponse,
+    # Manager models
+    CreateManagerRequest,
+    CreateManagerResponse,
+    DelegateTaskRequest,
+    TaskResultResponse,
+    TaskStepSpec,
+    TaskPlanSpec,
+    ExecutePlanRequest,
+    PlanResultResponse,
+    AddWorkerRequest,
+    RemoveWorkerRequest,
+    ManagerInfoResponse,
+    # Workflow event models
+    TriggerEventRequest,
+    TriggerEventResponse,
+    EventInfo,
+    WorkflowEventInfo,
+    ListWorkflowEventsResponse,
+    EventHistoryEntry,
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
+    PatternSubscriptionRequest,
+    PatternSubscriptionResponse,
+)
+from .manager import (
+    SessionRole as ManagerSessionRole,
+    TaskStatus,
+    TaskResult,
+    TaskStep,
+    TaskPlan,
+    PlanResult,
+    DelegationStrategy,
+    ManagerAgent,
+    ManagerRegistry,
+)
+from .flows import (
+    # Core classes
+    Event,
+    EventResult,
+    EventPriority,
+    EventBus,
+    Flow,
+    FlowManager,
+    ListenerInfo,
+    ListenerRegistry,
+    # Decorators
+    start,
+    listen,
+    router,
+    on_output,
+    # Functions
+    trigger,
+    trigger_and_wait,
+    get_event_bus,
+    get_flow_manager,
+    list_workflow_events,
+    get_event_history,
+    # Example flow
+    BuildResult,
+    DeployResult,
+    BuildDeployFlow,
+)
+from .roles import (
+    RoleManager,
+    SessionRoleAssignment,
+    RolePermissionError,
+)
+
+# Message-based communication
+from .messaging import (
+    # Base types
+    AgentMessage,
+    MessagePriority,
+    # Terminal messages
+    TerminalCommand,
+    TerminalOutput,
+    TerminalReadRequest,
+    TerminalReadResponse,
+    ControlCharacterMessage,
+    SpecialKeyMessage,
+    # Session messages
+    SessionStatusRequest,
+    SessionStatusResponse,
+    SessionListRequest,
+    SessionListResponse,
+    FocusSessionMessage,
+    # Agent orchestration messages
+    BroadcastNotification,
+    AgentTaskRequest,
+    AgentTaskResponse,
+    WaitForAgentMessage,
+    WaitForAgentResponse,
+    ErrorMessage,
+    # Routing
+    MessageRouter,
+    message_handler,
+    topic_handler,
+    get_handlers,
+    get_topic_handlers,
+    clear_handlers,
+    # Utilities
+    create_terminal_command,
+    create_broadcast,
+    MESSAGE_TYPES,
+    serialize_message,
+    deserialize_message,
 )
 
 # Type checking imports for IDE support
 if TYPE_CHECKING:
-    from .session import ItermSession
+    from .session import (
+        ItermSession,
+        ExpectResult,
+        ExpectTimeout,
+        ExpectError,
+        ExpectTimeoutError,
+    )
     from .terminal import ItermTerminal
     from .layouts import LayoutManager, LayoutType
 
 # Lazy loading for iterm2-dependent modules
 _lazy_modules = {
     'ItermSession': '.session',
+    'ExpectResult': '.session',
+    'ExpectTimeout': '.session',
+    'ExpectError': '.session',
+    'ExpectTimeoutError': '.session',
     'ItermTerminal': '.terminal',
     'LayoutManager': '.layouts',
     'LayoutType': '.layouts',
@@ -124,6 +245,11 @@ __all__ = [
     'ItermTerminal',
     'LayoutManager',
     'LayoutType',
+    # Expect-style pattern matching
+    'ExpectResult',
+    'ExpectTimeout',
+    'ExpectError',
+    'ExpectTimeoutError',
     # Agent management
     'Agent',
     'Team',
@@ -133,6 +259,13 @@ __all__ = [
     'MessageRecord',
     'SessionTagLockManager',
     'FocusCooldownManager',
+    # Role-based session specialization
+    'SessionRole',
+    'RoleConfig',
+    'DEFAULT_ROLE_CONFIGS',
+    'RoleManager',
+    'SessionRoleAssignment',
+    'RolePermissionError',
     # Profile management
     'ProfileManager',
     'TeamProfile',
@@ -168,6 +301,16 @@ __all__ = [
     'HookResult',
     'ServiceHookManager',
     'get_service_hook_manager',
+    # Manager agent classes
+    'ManagerSessionRole',
+    'TaskStatus',
+    'TaskResult',
+    'TaskStep',
+    'TaskPlan',
+    'PlanResult',
+    'DelegationStrategy',
+    'ManagerAgent',
+    'ManagerRegistry',
     # API models
     'SessionTarget',
     'SessionMessage',
@@ -193,4 +336,80 @@ __all__ = [
     'PlaybookCommandResult',
     'OrchestrateRequest',
     'OrchestrateResponse',
+    # Manager API models
+    'CreateManagerRequest',
+    'CreateManagerResponse',
+    'DelegateTaskRequest',
+    'TaskResultResponse',
+    'TaskStepSpec',
+    'TaskPlanSpec',
+    'ExecutePlanRequest',
+    'PlanResultResponse',
+    'AddWorkerRequest',
+    'RemoveWorkerRequest',
+    'ManagerInfoResponse',
+    # Workflow event models
+    'TriggerEventRequest',
+    'TriggerEventResponse',
+    'EventInfo',
+    'WorkflowEventInfo',
+    'ListWorkflowEventsResponse',
+    'EventHistoryEntry',
+    'GetEventHistoryRequest',
+    'GetEventHistoryResponse',
+    'PatternSubscriptionRequest',
+    'PatternSubscriptionResponse',
+    # Event-driven flow control
+    'Event',
+    'EventResult',
+    'EventPriority',
+    'EventBus',
+    'Flow',
+    'FlowManager',
+    'ListenerInfo',
+    'ListenerRegistry',
+    'start',
+    'listen',
+    'router',
+    'on_output',
+    'trigger',
+    'trigger_and_wait',
+    'get_event_bus',
+    'get_flow_manager',
+    'list_workflow_events',
+    'get_event_history',
+    'BuildResult',
+    'DeployResult',
+    'BuildDeployFlow',
+    # Message-based communication
+    'AgentMessage',
+    'MessagePriority',
+    'TerminalCommand',
+    'TerminalOutput',
+    'TerminalReadRequest',
+    'TerminalReadResponse',
+    'ControlCharacterMessage',
+    'SpecialKeyMessage',
+    'SessionStatusRequest',
+    'SessionStatusResponse',
+    'SessionListRequest',
+    'SessionListResponse',
+    'FocusSessionMessage',
+    'BroadcastNotification',
+    'AgentTaskRequest',
+    'AgentTaskResponse',
+    'WaitForAgentMessage',
+    'WaitForAgentResponse',
+    'ErrorMessage',
+    'MessageRouter',
+    'message_handler',
+    'topic_handler',
+    'get_handlers',
+    'get_topic_handlers',
+    'clear_handlers',
+    'create_terminal_command',
+    'create_broadcast',
+    'MESSAGE_TYPES',
+    'serialize_message',
+    'deserialize_message',
 ]

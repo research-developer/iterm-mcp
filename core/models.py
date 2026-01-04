@@ -2,11 +2,136 @@
 
 import re
 from datetime import datetime
-from typing import Dict, List, Literal, Optional, Union
+from enum import Enum
+from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Supported AI agent CLI types
 AgentType = Literal["claude", "gemini", "codex", "copilot"]
+
+
+# ============================================================================
+# ROLE-BASED SESSION SPECIALIZATION
+# ============================================================================
+
+class SessionRole(str, Enum):
+    """Predefined roles for session specialization.
+
+    Roles define the purpose and capabilities of a session, guiding
+    what tools and commands are appropriate for that session.
+    """
+
+    DEVOPS = "devops"
+    BUILDER = "builder"
+    DEBUGGER = "debugger"
+    RESEARCHER = "researcher"
+    TESTER = "tester"
+    ORCHESTRATOR = "orchestrator"
+    MONITOR = "monitor"
+    CUSTOM = "custom"  # For user-defined roles
+
+
+class RoleConfig(BaseModel):
+    """Detailed configuration for a session role.
+
+    Defines the capabilities, restrictions, and default behavior
+    for a session with a specific role.
+    """
+
+    role: SessionRole = Field(..., description="The role type")
+    description: str = Field(
+        default="",
+        description="Human-readable description of this role's purpose"
+    )
+    available_tools: List[str] = Field(
+        default_factory=list,
+        description="List of tool names this role can use (empty = all tools)"
+    )
+    restricted_tools: List[str] = Field(
+        default_factory=list,
+        description="List of tool names this role cannot use"
+    )
+    default_commands: List[str] = Field(
+        default_factory=list,
+        description="Commands to run when session starts"
+    )
+    environment: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Environment variables to set for this role"
+    )
+    can_spawn_agents: bool = Field(
+        default=False,
+        description="Whether this role can create new agent sessions"
+    )
+    can_modify_roles: bool = Field(
+        default=False,
+        description="Whether this role can modify other sessions' roles"
+    )
+    priority: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Role priority (1=highest, 5=lowest) for resource allocation"
+    )
+
+
+# Default role configurations for common roles
+DEFAULT_ROLE_CONFIGS: Dict[SessionRole, RoleConfig] = {
+    SessionRole.DEVOPS: RoleConfig(
+        role=SessionRole.DEVOPS,
+        description="DevOps engineer handling infrastructure, deployments, and system operations",
+        available_tools=["docker", "kubectl", "terraform", "ansible", "aws", "gcloud", "az"],
+        can_spawn_agents=False,
+        can_modify_roles=False,
+        priority=2,
+    ),
+    SessionRole.BUILDER: RoleConfig(
+        role=SessionRole.BUILDER,
+        description="Build specialist handling compilation, packaging, and artifacts",
+        available_tools=["npm", "yarn", "pip", "cargo", "go", "make", "docker", "git"],
+        default_commands=["cd /project"],
+        can_spawn_agents=False,
+        priority=3,
+    ),
+    SessionRole.DEBUGGER: RoleConfig(
+        role=SessionRole.DEBUGGER,
+        description="Debug specialist for investigating issues and analyzing logs",
+        available_tools=["gdb", "lldb", "strace", "dtrace", "tail", "grep", "awk", "jq"],
+        can_spawn_agents=False,
+        priority=2,
+    ),
+    SessionRole.RESEARCHER: RoleConfig(
+        role=SessionRole.RESEARCHER,
+        description="Research assistant for gathering information and analysis",
+        available_tools=["curl", "wget", "git", "grep", "find", "cat", "less"],
+        restricted_tools=["rm", "docker", "kubectl"],
+        can_spawn_agents=False,
+        priority=4,
+    ),
+    SessionRole.TESTER: RoleConfig(
+        role=SessionRole.TESTER,
+        description="Testing specialist for running tests and quality assurance",
+        available_tools=["pytest", "jest", "mocha", "cargo", "go", "npm", "make"],
+        can_spawn_agents=False,
+        priority=3,
+    ),
+    SessionRole.ORCHESTRATOR: RoleConfig(
+        role=SessionRole.ORCHESTRATOR,
+        description="Orchestration coordinator managing other agents and workflows",
+        available_tools=[],  # All tools available
+        can_spawn_agents=True,
+        can_modify_roles=True,
+        priority=1,
+    ),
+    SessionRole.MONITOR: RoleConfig(
+        role=SessionRole.MONITOR,
+        description="Monitoring agent for observing and reporting on system state",
+        available_tools=["tail", "grep", "ps", "top", "htop", "docker", "kubectl"],
+        restricted_tools=["rm", "kill", "pkill"],
+        can_spawn_agents=False,
+        priority=4,
+    ),
+}
 
 # Agent CLI launch commands
 AGENT_CLI_COMMANDS: Dict[str, str] = {
@@ -163,6 +288,14 @@ class SessionConfig(BaseModel):
     command: Optional[str] = Field(default=None, description="Initial command to run")
     max_lines: Optional[int] = Field(default=None, description="Max output lines")
     monitor: bool = Field(default=False, description="Start monitoring")
+    role: Optional[SessionRole] = Field(
+        default=None,
+        description="Role for this session (e.g., BUILDER, DEBUGGER, DEVOPS)"
+    )
+    role_config: Optional[RoleConfig] = Field(
+        default=None,
+        description="Custom role configuration (overrides default for the role)"
+    )
 
 
 class CreateSessionsRequest(BaseModel):
@@ -464,3 +597,361 @@ class WaitResult(BaseModel):
         default=True,
         description="Hint: is it worth waiting more?"
     )
+
+
+# ============================================================================
+# MANAGER AGENT MODELS (MCP API)
+# ============================================================================
+
+SessionRoleType = Literal[
+    "builder", "tester", "devops", "reviewer",
+    "researcher", "writer", "analyst", "coordinator", "general"
+]
+
+DelegationStrategyType = Literal[
+    "round_robin", "role_based", "least_busy", "random", "priority"
+]
+
+TaskStatusType = Literal[
+    "pending", "in_progress", "completed", "failed", "skipped", "validation_failed"
+]
+
+
+class CreateManagerRequest(BaseModel):
+    """Request to create a manager agent."""
+
+    name: str = Field(..., description="Unique name for the manager")
+    workers: List[str] = Field(default_factory=list, description="Worker agent names")
+    delegation_strategy: DelegationStrategyType = Field(
+        default="role_based",
+        description="Strategy for selecting workers"
+    )
+    worker_roles: Dict[str, SessionRoleType] = Field(
+        default_factory=dict,
+        description="Mapping of worker names to their roles"
+    )
+    metadata: Dict[str, str] = Field(default_factory=dict, description="Additional metadata")
+
+
+class CreateManagerResponse(BaseModel):
+    """Response from creating a manager."""
+
+    name: str = Field(..., description="Manager name")
+    workers: List[str] = Field(..., description="Registered workers")
+    delegation_strategy: str = Field(..., description="Delegation strategy")
+    created: bool = Field(default=True, description="Whether creation succeeded")
+
+
+class DelegateTaskRequest(BaseModel):
+    """Request to delegate a task through a manager."""
+
+    manager: str = Field(..., description="Manager name")
+    task: str = Field(..., description="Task description/command to execute")
+    role: Optional[SessionRoleType] = Field(default=None, description="Required worker role")
+    validation: Optional[str] = Field(
+        default=None,
+        description="Validation: regex pattern or 'success'"
+    )
+    timeout_seconds: Optional[int] = Field(default=None, description="Execution timeout")
+    retry_count: int = Field(default=0, ge=0, le=5, description="Retries on failure")
+
+
+class TaskResultResponse(BaseModel):
+    """Response containing task execution result."""
+
+    task_id: str = Field(..., description="Unique task identifier")
+    task: str = Field(..., description="Task that was executed")
+    worker: str = Field(..., description="Worker that executed the task")
+    status: TaskStatusType = Field(..., description="Task status")
+    success: bool = Field(..., description="Whether task succeeded")
+    output: Optional[str] = Field(default=None, description="Task output")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    duration_seconds: Optional[float] = Field(default=None, description="Execution duration")
+    validation_passed: Optional[bool] = Field(default=None, description="Validation result")
+    validation_message: Optional[str] = Field(default=None, description="Validation message")
+
+
+class TaskStepSpec(BaseModel):
+    """Specification for a single task step in a plan."""
+
+    id: str = Field(..., description="Unique step identifier")
+    task: str = Field(..., description="Task description to execute")
+    role: Optional[SessionRoleType] = Field(default=None, description="Required worker role")
+    optional: bool = Field(default=False, description="Whether failure should stop plan")
+    depends_on: List[str] = Field(default_factory=list, description="Step IDs this depends on")
+    validation: Optional[str] = Field(default=None, description="Validation pattern or 'success'")
+    timeout_seconds: Optional[int] = Field(default=None, description="Max execution time")
+    retry_count: int = Field(default=0, ge=0, le=5, description="Retries on failure")
+
+
+class TaskPlanSpec(BaseModel):
+    """Specification for a multi-step task plan."""
+
+    name: str = Field(..., description="Plan name")
+    description: Optional[str] = Field(default=None, description="Plan description")
+    steps: List[TaskStepSpec] = Field(..., min_length=1, description="Steps to execute")
+    parallel_groups: List[List[str]] = Field(
+        default_factory=list,
+        description="Groups of step IDs that can run in parallel"
+    )
+    stop_on_failure: bool = Field(default=True, description="Stop on first failure")
+
+
+class ExecutePlanRequest(BaseModel):
+    """Request to execute a task plan."""
+
+    manager: str = Field(..., description="Manager name")
+    plan: TaskPlanSpec = Field(..., description="Plan to execute")
+
+
+class PlanResultResponse(BaseModel):
+    """Response containing plan execution results."""
+
+    plan_name: str = Field(..., description="Name of the executed plan")
+    success: bool = Field(..., description="Whether plan completed successfully")
+    results: List[TaskResultResponse] = Field(..., description="Results for each step")
+    duration_seconds: Optional[float] = Field(default=None, description="Total duration")
+    stopped_early: bool = Field(default=False, description="Whether plan stopped early")
+    stop_reason: Optional[str] = Field(default=None, description="Reason for early stop")
+
+
+class AddWorkerRequest(BaseModel):
+    """Request to add a worker to a manager."""
+
+    manager: str = Field(..., description="Manager name")
+    worker: str = Field(..., description="Worker agent name")
+    role: Optional[SessionRoleType] = Field(default=None, description="Worker role")
+
+
+class RemoveWorkerRequest(BaseModel):
+    """Request to remove a worker from a manager."""
+
+    manager: str = Field(..., description="Manager name")
+    worker: str = Field(..., description="Worker agent name")
+
+
+class ManagerInfoResponse(BaseModel):
+    """Information about a manager agent."""
+
+    name: str = Field(..., description="Manager name")
+    workers: List[str] = Field(..., description="Worker names")
+    worker_roles: Dict[str, str] = Field(..., description="Worker role mappings")
+    delegation_strategy: str = Field(..., description="Delegation strategy")
+    created_at: str = Field(..., description="Creation timestamp")
+    metadata: Dict[str, str] = Field(default_factory=dict, description="Metadata")
+
+
+# ============================================================================
+# WORKFLOW EVENT MODELS
+# ============================================================================
+
+EventPriorityLevel = Literal["low", "normal", "high", "critical"]
+
+
+class TriggerEventRequest(BaseModel):
+    """Request to trigger a workflow event."""
+
+    event_name: str = Field(..., min_length=1, description="Name of the event to trigger")
+    payload: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Event payload data"
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="Source of the event (agent/flow name)"
+    )
+    priority: EventPriorityLevel = Field(
+        default="normal",
+        description="Event priority: low, normal, high, critical"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Additional event metadata"
+    )
+    immediate: bool = Field(
+        default=False,
+        description="If True, process synchronously instead of queueing"
+    )
+
+
+class EventInfo(BaseModel):
+    """Information about a single event."""
+
+    name: str = Field(..., description="Event name")
+    id: str = Field(..., description="Unique event ID")
+    source: Optional[str] = Field(default=None, description="Event source")
+    timestamp: datetime = Field(..., description="When the event was created")
+    priority: str = Field(..., description="Event priority level")
+
+
+class TriggerEventResponse(BaseModel):
+    """Response from triggering an event."""
+
+    success: bool = Field(..., description="Whether the event was triggered successfully")
+    event: Optional[EventInfo] = Field(default=None, description="Event information if triggered")
+    queued: bool = Field(default=False, description="Whether the event was queued for later processing")
+    processed: bool = Field(default=False, description="Whether the event was processed immediately")
+    routed_to: Optional[str] = Field(default=None, description="Event it was routed to, if any")
+    handler_name: Optional[str] = Field(default=None, description="Handler that processed the event")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class WorkflowEventInfo(BaseModel):
+    """Information about a registered workflow event."""
+
+    event_name: str = Field(..., description="Event name")
+    has_listeners: bool = Field(default=False, description="Whether event has listeners")
+    has_router: bool = Field(default=False, description="Whether event has a router")
+    is_start_event: bool = Field(default=False, description="Whether event is a start event")
+    listener_count: int = Field(default=0, description="Number of listeners")
+
+
+class ListWorkflowEventsResponse(BaseModel):
+    """Response listing all workflow events."""
+
+    events: List[WorkflowEventInfo] = Field(
+        default_factory=list,
+        description="List of registered workflow events"
+    )
+    total_count: int = Field(..., description="Total number of events")
+    flows_registered: List[str] = Field(
+        default_factory=list,
+        description="Names of registered flows"
+    )
+
+
+class EventHistoryEntry(BaseModel):
+    """A single entry in event history."""
+
+    event_name: str = Field(..., description="Event name")
+    event_id: str = Field(..., description="Event ID")
+    source: Optional[str] = Field(default=None, description="Event source")
+    timestamp: datetime = Field(..., description="When the event was triggered")
+    success: bool = Field(..., description="Whether processing succeeded")
+    handler_name: Optional[str] = Field(default=None, description="Handler that processed it")
+    routed_to: Optional[str] = Field(default=None, description="Event it was routed to")
+    duration_ms: float = Field(..., description="Processing duration in milliseconds")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class GetEventHistoryRequest(BaseModel):
+    """Request to get event history."""
+
+    event_name: Optional[str] = Field(default=None, description="Filter by event name")
+    limit: int = Field(default=100, ge=1, le=1000, description="Max entries to return")
+    success_only: bool = Field(default=False, description="Only return successful events")
+
+
+class GetEventHistoryResponse(BaseModel):
+    """Response containing event history."""
+
+    entries: List[EventHistoryEntry] = Field(..., description="History entries")
+    total_count: int = Field(..., description="Total entries returned")
+
+
+class RegisterFlowRequest(BaseModel):
+    """Request to register a flow class."""
+
+    flow_name: str = Field(..., description="Name of the flow class to register")
+
+
+class RegisterFlowResponse(BaseModel):
+    """Response from registering a flow."""
+
+    success: bool = Field(..., description="Whether registration succeeded")
+    flow_name: str = Field(..., description="Name of the registered flow")
+    events_registered: List[str] = Field(
+        default_factory=list,
+        description="Events registered by this flow"
+    )
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class PatternSubscriptionRequest(BaseModel):
+    """Request to subscribe to terminal output patterns."""
+
+    pattern: str = Field(..., description="Regex pattern to match")
+    event_name: Optional[str] = Field(
+        default=None,
+        description="Event to trigger on pattern match"
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Optional session to filter (None = all sessions)"
+    )
+
+    @field_validator('pattern', mode='before')
+    @classmethod
+    def validate_pattern_regex(cls, v):
+        """Validate that pattern is a valid regex."""
+        if v is not None:
+            try:
+                re.compile(v)
+            except re.error as e:
+                raise ValueError(f"Invalid regex pattern: {e}")
+        return v
+
+
+class PatternSubscriptionResponse(BaseModel):
+    """Response from creating a pattern subscription."""
+
+    subscription_id: str = Field(..., description="Unique subscription ID")
+    pattern: str = Field(..., description="The registered pattern")
+    event_name: Optional[str] = Field(default=None, description="Event triggered on match")
+
+
+# ============================================================================
+# SESSION INFO MODELS (Issue #52)
+# ============================================================================
+
+
+class SessionInfo(BaseModel):
+    """Extended session information including tags and locks."""
+
+    session_id: str = Field(..., description="The session ID")
+    name: str = Field(..., description="Session name")
+    persistent_id: Optional[str] = Field(default=None, description="Persistent ID for reconnection")
+    agent: Optional[str] = Field(default=None, description="Registered agent name")
+    team: Optional[str] = Field(default=None, description="Primary team (first team if multiple)")
+    teams: List[str] = Field(default_factory=list, description="All teams the agent belongs to")
+    is_processing: bool = Field(default=False, description="Whether a command is running")
+
+    # Tag and lock information
+    tags: List[str] = Field(default_factory=list, description="Session tags")
+    locked: bool = Field(default=False, description="Whether session is locked")
+    locked_by: Optional[str] = Field(default=None, description="Agent holding the lock")
+    locked_at: Optional[datetime] = Field(default=None, description="When the lock was acquired")
+    pending_access_requests: int = Field(default=0, description="Number of pending access requests")
+
+
+class ListSessionsRequest(BaseModel):
+    """Request parameters for list_sessions with filtering."""
+
+    # Filter by tags
+    tag: Optional[str] = Field(default=None, description="Single tag to filter by")
+    tags: Optional[List[str]] = Field(default=None, description="Multiple tags to filter by")
+    match: Literal["any", "all"] = Field(
+        default="any",
+        description="How to match multiple tags: 'any' (OR) or 'all' (AND)"
+    )
+
+    # Filter by lock status
+    locked: Optional[bool] = Field(default=None, description="Filter by lock status")
+    locked_by: Optional[str] = Field(default=None, description="Filter by lock owner")
+
+    # Output format
+    format: Literal["full", "compact"] = Field(
+        default="full",
+        description="Output format: 'full' for JSON, 'compact' for one-line-per-session"
+    )
+
+    # Existing filter
+    agents_only: bool = Field(default=False, description="Only show sessions with registered agents")
+
+
+class ListSessionsResponse(BaseModel):
+    """Response from list_sessions."""
+
+    sessions: List[SessionInfo] = Field(..., description="Matching sessions")
+    total_count: int = Field(..., description="Total number of matching sessions")
+    filter_applied: bool = Field(default=False, description="Whether any filters were applied")
