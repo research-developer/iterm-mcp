@@ -3478,7 +3478,7 @@ async def create_manager(
         # Convert worker roles from strings to SessionRole
         worker_roles = {}
         for worker, role_str in request.worker_roles.items():
-            worker_roles[worker] = SessionRole(role_str)
+            worker_roles[worker] = ManagerSessionRole(role_str)
 
         # Create the manager
         manager = manager_registry.create_manager(
@@ -3536,8 +3536,8 @@ async def delegate_task(
         # Ensure callbacks are set up
         _setup_manager_callbacks(manager, terminal, agent_registry, logger)
 
-        # Convert role string to SessionRole if provided
-        role = SessionRole(request.role) if request.role else None
+        # Convert role string to ManagerSessionRole if provided
+        role = ManagerSessionRole(request.role) if request.role else None
 
         # Delegate the task
         result = await manager.delegate(
@@ -3601,7 +3601,7 @@ async def execute_plan(
         # Convert plan spec to TaskPlan
         steps = []
         for step_spec in request.plan.steps:
-            role = SessionRole(step_spec.role) if step_spec.role else None
+            role = ManagerSessionRole(step_spec.role) if step_spec.role else None
             step = TaskStep(
                 id=step_spec.id,
                 task=step_spec.task,
@@ -3682,7 +3682,7 @@ async def add_worker_to_manager(
         if not manager:
             return json.dumps({"error": f"Manager '{request.manager}' not found"}, indent=2)
 
-        role = SessionRole(request.role) if request.role else None
+        role = ManagerSessionRole(request.role) if request.role else None
         manager.add_worker(request.worker, role)
 
         logger.info(f"Added worker '{request.worker}' to manager '{request.manager}'")
@@ -3803,6 +3803,10 @@ async def remove_worker_from_manager(
 
     except Exception as e:
         logger.error(f"Error removing worker from manager: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
 async def get_session_role(
     ctx: Context,
     session_id: str,
@@ -3933,6 +3937,10 @@ async def list_managers(ctx: Context) -> str:
 
     except Exception as e:
         logger.error(f"Error listing managers: {e}")
+        return json.dumps({"error": str(e)}, indent=2)
+
+
+@mcp.tool()
 async def list_session_roles(
     ctx: Context,
     role_filter: Optional[str] = None,
@@ -4009,6 +4017,14 @@ async def remove_manager(
 
     except Exception as e:
         logger.error(f"Error removing manager: {e}")
+        return json.dumps({
+            "success": False,
+            "manager": manager_name,
+            "error": str(e),
+        }, indent=2)
+
+
+@mcp.tool()
 async def list_available_roles(
     ctx: Context,
 ) -> str:
