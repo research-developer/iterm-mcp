@@ -97,9 +97,14 @@ class TeamProfile:
     guid: str
     color: HSLColor
     parent_guid: str = MCP_AGENT_BASE_GUID
+    service_tag: Optional[str] = None  # For service detection
 
     def to_dynamic_profile(self) -> Dict:
         """Convert to iTerm2 Dynamic Profile format."""
+        tags = ["mcp", "agent", "team", self.team_name]
+        if self.service_tag:
+            tags.append(f"service:{self.service_tag}")
+
         return {
             "Name": f"MCP Team: {self.team_name}",
             "Guid": self.guid,
@@ -107,7 +112,12 @@ class TeamProfile:
             "Custom Tab Color": True,
             "Tab Color": self.color.to_iterm_dict(),
             "Badge Text": f"🤖 {self.team_name}",
-            "Tags": ["mcp", "agent", "team", self.team_name]
+            "Tags": tags,
+            # Initial Text: disable shell corrections, show welcome status
+            "Initial Text": (
+                "unsetopt correct correctall 2>/dev/null; "
+                "setopt NO_CORRECT NO_CORRECT_ALL 2>/dev/null"
+            ),
         }
 
 
