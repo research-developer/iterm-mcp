@@ -46,13 +46,10 @@ from core.feedback import (
 from core.services import (
     ServicePriority,
     ServiceConfig,
-    ServiceRegistry,
-    ServiceState,
     ServiceManager,
     get_service_manager,
 )
 from core.service_hooks import (
-    HookResult,
     ServiceHookManager,
     get_service_hook_manager,
 )
@@ -2031,7 +2028,7 @@ async def create_team(
         return json.dumps(response_data, indent=2)
     except Exception as e:
         logger.error(f"Error creating team: {e}")
-        return f"Error: {e}"
+        return json.dumps({"error": str(e)}, indent=2)
 
 
 @mcp.tool()

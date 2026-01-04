@@ -7,6 +7,7 @@ when new sessions are started in a repository context.
 import asyncio
 import logging
 import os
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -184,8 +185,9 @@ class WelcomeStatusDisplay:
 
             message = "\n".join(lines)
 
-            # Display in the session using ANSI escape for color (optional)
-            await session.async_send_text(f"echo '{message}'\n")
+            # Display in the session - use shlex.quote for safe shell escaping
+            safe_message = shlex.quote(message)
+            await session.async_send_text(f"echo {safe_message}\n")
 
             return True
 
@@ -224,20 +226,20 @@ def generate_initial_text_command(repo_path: str) -> str:
     It displays service status for the repository.
 
     Args:
-        repo_path: Path to the repository
+        repo_path: Path to the repository (required, must be non-empty string)
 
     Returns:
-        Shell command string
+        Multi-line shell script string that runs the welcome status display
     """
-    # Escape the path for shell
-    escaped_path = repo_path.replace("'", "'\\''")
+    # Use shlex.quote for proper shell escaping
+    escaped_path = shlex.quote(repo_path)
 
     return f"""
 # iTerm MCP Welcome Status
 python3 -c "
 import asyncio
 import sys
-sys.path.insert(0, '{escaped_path}')
+sys.path.insert(0, {escaped_path})
 try:
     import iterm2
     from iterm_mcpy.welcome_status import WelcomeStatusDisplay
@@ -248,7 +250,7 @@ try:
         sm = get_service_manager()
         sm.load_global_config()
         wd = WelcomeStatusDisplay(sm)
-        await wd.show_welcome(conn, '{escaped_path}')
+        await wd.show_welcome(conn, {escaped_path})
 
     asyncio.run(show_status())
 except Exception as e:
