@@ -446,15 +446,9 @@ class ManagerAgent:
 
         try:
             if self._execute_callback:
-                # Use the provided callback to execute on the worker
-                # Wrap with asyncio.wait_for for timeout enforcement
-                if timeout_seconds is not None:
-                    output, success, error = await asyncio.wait_for(
-                        self._execute_callback(worker, task, timeout_seconds),
-                        timeout=timeout_seconds,
-                    )
-                else:
-                    output, success, error = await self._execute_callback(worker, task, timeout_seconds)
+                # Use the provided callback to execute on the worker.
+                # The callback is responsible for honoring timeout_seconds if applicable.
+                output, success, error = await self._execute_callback(worker, task, timeout_seconds)
                 result.mark_completed(success=success, output=output, error=error)
             else:
                 # No callback configured - this is a stub for testing

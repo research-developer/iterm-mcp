@@ -300,7 +300,7 @@ async def example_manager_registry():
 
     registry = ManagerRegistry()
 
-    # Create specialized managers (prefixed with _ as they are used indirectly via registry)
+    # Create specialized managers; local variables are prefixed with _ to indicate they aren't used directly
     _build_manager = registry.create_manager(
         name="build-orchestrator",
         workers=["builder-1", "builder-2"],
