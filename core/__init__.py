@@ -44,6 +44,24 @@ from .feedback import (
     FeedbackForker,
     GitHubIntegration,
 )
+from .services import (
+    # Enums
+    ServicePriority,
+    # Models
+    ServiceConfig,
+    ServiceRegistry,
+    ServiceState,
+    # Core classes
+    ServiceManager,
+    get_service_manager,
+    # Constants
+    DEFAULT_PARENT_FOLDER,
+)
+from .service_hooks import (
+    HookResult,
+    ServiceHookManager,
+    get_service_hook_manager,
+)
 from .models import (
     SessionTarget,
     SessionMessage,
@@ -139,6 +157,17 @@ __all__ = [
     'FeedbackRegistry',
     'FeedbackForker',
     'GitHubIntegration',
+    # Service registry
+    'ServicePriority',
+    'ServiceConfig',
+    'ServiceRegistry',
+    'ServiceState',
+    'ServiceManager',
+    'get_service_manager',
+    'DEFAULT_PARENT_FOLDER',
+    'HookResult',
+    'ServiceHookManager',
+    'get_service_hook_manager',
     # API models
     'SessionTarget',
     'SessionMessage',
