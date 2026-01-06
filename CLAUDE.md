@@ -143,6 +143,37 @@ iterm-mcp/
 - `applescript-implementation`: Contains the original AppleScript-based code
 - `python-api-implementation`: New Python-based implementation using iTerm2's official API
 
+### Worktrees
+
+Git worktrees allow parallel development on multiple branches. All worktrees are stored in `.worktrees/` at repo root.
+
+#### Managing Worktrees
+
+```bash
+# Create a new worktree
+git worktree add .worktrees/<name> <branch-name>
+
+# List all worktrees
+git worktree list
+
+# Remove a worktree (after merging/closing branch)
+git worktree remove .worktrees/<name>
+```
+
+#### Active Worktrees
+
+| Worktree | Branch | Purpose |
+|----------|--------|---------|
+| `.worktrees/refactor-tools` | `refactor/tools-consolidation` | Refactor and consolidate MCP tools |
+| `.worktrees/feat-parallel` | `feat/parallel` | Parallel execution features |
+| `.worktrees/10-auditadapt-test-strategies-from-claude-code-mcp-happy-cli` | `10-auditadapt-test-strategies-from-claude-code-mcp-happy-cli` | Test strategy audit |
+
+#### Conventions
+- **Naming**: Use descriptive names matching the branch purpose (e.g., `refactor-tools`, `feat-parallel`)
+- **Location**: Always create in `.worktrees/` to keep repo root clean
+- **Cleanup**: Remove worktrees after branches are merged
+- **CLAUDE.md**: Each worktree inherits this CLAUDE.md - keep instructions consistent
+
 ### Next Steps
 1. ✅ Address the API compatibility issues for real-time monitoring
    - ✅ Implemented polling-based monitoring as a more reliable alternative
