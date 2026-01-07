@@ -105,9 +105,20 @@ def is_tool_call(first_line: str) -> bool:
 async def get_response_content(
     session: iterm2.Session,
     start_line: int,
+    max_lines: int = 500,
 ) -> Tuple[str, str, Optional[str]]:
     """
-    Capture response content from start_line until blank line.
+    Capture response content from start_line until end of response block.
+
+    The response block ends when we see:
+    - Two consecutive blank lines (paragraph break)
+    - A new bullet character (next response started)
+    - Max line limit reached
+
+    Args:
+        session: The iTerm2 session to read from
+        start_line: Line number where the response starts
+        max_lines: Maximum lines to capture (default 500)
 
     Returns:
         (first_line, full_content, response_type)
@@ -116,9 +127,11 @@ async def get_response_content(
     lines = []
     first_line = ""
     response_type = "neutral"
+    consecutive_blank_lines = 0
 
-    # Read from start_line forward until blank line
-    for i in range(start_line, contents.number_of_lines):
+    # Read from start_line forward until end of response block
+    end_line = min(start_line + max_lines, contents.number_of_lines)
+    for i in range(start_line, end_line):
         line = contents.line(i)
         text = line.string.rstrip()
 
@@ -128,10 +141,23 @@ async def get_response_content(
             # Note: This requires style information which may not be available
             # in all iTerm2 API versions
 
-        if not text:  # Blank line - stop capturing
-            break
+        # Check for end-of-response markers
+        if not text:
+            consecutive_blank_lines += 1
+            # Two consecutive blank lines indicate end of response block
+            if consecutive_blank_lines >= 2:
+                break
+            lines.append(text)  # Keep single blank lines (paragraph breaks)
+        else:
+            consecutive_blank_lines = 0
+            # New bullet character means a new response started
+            if i > start_line and BULLET_CHAR in text:
+                break
+            lines.append(text)
 
-        lines.append(text)
+    # Remove trailing blank lines
+    while lines and not lines[-1]:
+        lines.pop()
 
     full_content = "\n".join(lines)
 
