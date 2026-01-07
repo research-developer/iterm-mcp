@@ -955,3 +955,343 @@ class ListSessionsResponse(BaseModel):
     sessions: List[SessionInfo] = Field(..., description="Matching sessions")
     total_count: int = Field(..., description="Total number of matching sessions")
     filter_applied: bool = Field(default=False, description="Whether any filters were applied")
+
+
+# ============================================================================
+# CONSOLIDATED MEMORY OPERATIONS (8 tools → 1)
+# ============================================================================
+
+MemoryOperationType = Literal[
+    "store", "retrieve", "search", "list_keys",
+    "list_namespaces", "delete", "clear", "stats"
+]
+
+
+class ManageMemoryRequest(BaseModel):
+    """Unified request for all memory store operations.
+
+    Operations:
+    - store: Save a value (requires namespace, key, value; optional metadata)
+    - retrieve: Get a value (requires namespace, key)
+    - search: Full-text search (requires namespace, query; optional limit)
+    - list_keys: List all keys (requires namespace)
+    - list_namespaces: List namespaces (optional prefix as namespace)
+    - delete: Delete a key (requires namespace, key)
+    - clear: Clear namespace (requires namespace, confirm=True)
+    - stats: Get statistics (no params required)
+    """
+
+    operation: MemoryOperationType = Field(
+        ...,
+        description="Operation: store, retrieve, search, list_keys, list_namespaces, delete, clear, stats"
+    )
+    namespace: Optional[List[str]] = Field(
+        default=None,
+        description="Hierarchical namespace (e.g., ['project-x', 'build-agent'])"
+    )
+    key: Optional[str] = Field(
+        default=None,
+        description="Key within the namespace (for store, retrieve, delete)"
+    )
+    value: Optional[Any] = Field(
+        default=None,
+        description="Value to store (for store operation)"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional metadata tags (for store operation)"
+    )
+    query: Optional[str] = Field(
+        default=None,
+        description="Search query string (for search operation)"
+    )
+    limit: int = Field(
+        default=10,
+        description="Max results for search operation"
+    )
+    confirm: bool = Field(
+        default=False,
+        description="Confirmation for clear operation (must be True to clear)"
+    )
+
+
+class ManageMemoryResponse(BaseModel):
+    """Response from manage_memory operations."""
+
+    operation: str = Field(..., description="The operation that was performed")
+    success: bool = Field(..., description="Whether the operation succeeded")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Operation-specific response data"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if operation failed"
+    )
+
+
+# ============================================================================
+# CONSOLIDATED SERVICE MANAGEMENT (6 tools → 1)
+# ============================================================================
+
+ServiceOperationType = Literal[
+    "list", "start", "stop", "add", "configure", "list_inactive"
+]
+
+
+class ManageServicesRequest(BaseModel):
+    """Unified request for all service management operations.
+
+    Operations:
+    - list: List configured services (optional: repo_path, min_priority, include_status)
+    - start: Start a service (requires service_name; optional: repo_path)
+    - stop: Stop a service (requires service_name)
+    - add: Add new service (requires service_name, command; optional: priority, display_name, port, etc.)
+    - configure: Update service config (requires service_name; optional: priority, port, command, etc.)
+    - list_inactive: Get services that should be running but aren't (requires repo_path)
+    """
+
+    operation: ServiceOperationType = Field(
+        ...,
+        description="Operation: list, start, stop, add, configure, list_inactive"
+    )
+    service_name: Optional[str] = Field(
+        default=None,
+        description="Service identifier (for start, stop, add, configure)"
+    )
+    repo_path: Optional[str] = Field(
+        default=None,
+        description="Repository path for context or filtering"
+    )
+    min_priority: Optional[str] = Field(
+        default=None,
+        description="Min priority filter: quiet, optional, preferred, required"
+    )
+    include_status: bool = Field(
+        default=True,
+        description="Include running status in list (may be slower)"
+    )
+    # For add/configure operations
+    command: Optional[str] = Field(
+        default=None,
+        description="Command to start the service (for add/configure)"
+    )
+    priority: Optional[str] = Field(
+        default=None,
+        description="Priority level: quiet, optional, preferred, required (for add/configure)"
+    )
+    display_name: Optional[str] = Field(
+        default=None,
+        description="Human-readable name (for add/configure)"
+    )
+    port: Optional[int] = Field(
+        default=None,
+        description="Port the service listens on (for add/configure)"
+    )
+    working_directory: Optional[str] = Field(
+        default=None,
+        description="Working directory for the service (for add/configure)"
+    )
+    repo_patterns: Optional[List[str]] = Field(
+        default=None,
+        description="Glob patterns to match repo paths (for add)"
+    )
+    scope: str = Field(
+        default="global",
+        description="Where to save: 'global' or 'repo' (for add/configure)"
+    )
+
+
+class ManageServicesResponse(BaseModel):
+    """Response from manage_services operations."""
+
+    operation: str = Field(..., description="The operation that was performed")
+    success: bool = Field(..., description="Whether the operation succeeded")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Operation-specific response data"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if operation failed"
+    )
+
+
+# ============================================================================
+# CONSOLIDATED SESSION LOCKING (3 tools → 1)
+# Consolidates: lock_session, unlock_session, request_session_access
+# ============================================================================
+
+SessionLockOperationType = Literal["lock", "unlock", "request_access"]
+
+
+class ManageSessionLockRequest(BaseModel):
+    """Request for consolidated session lock operations.
+
+    Operations:
+    - lock: Lock a session for an agent
+    - unlock: Unlock a session (optionally enforcing owner match)
+    - request_access: Request permission to write to a locked session
+    """
+
+    operation: SessionLockOperationType = Field(
+        ...,
+        description="The lock operation to perform"
+    )
+    session_id: str = Field(
+        ...,
+        description="The session ID to operate on"
+    )
+    agent: Optional[str] = Field(
+        default=None,
+        description="Agent name (required for lock/request_access, optional for unlock)"
+    )
+
+
+class ManageSessionLockResponse(BaseModel):
+    """Response from manage_session_lock operations."""
+
+    operation: str = Field(..., description="The operation that was performed")
+    success: bool = Field(..., description="Whether the operation succeeded")
+    session_id: str = Field(..., description="The session ID")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Operation-specific response data"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if operation failed"
+    )
+
+
+# ============================================================================
+# CONSOLIDATED TEAM OPERATIONS (5 tools → 1)
+# Consolidates: create_team, list_teams, remove_team, assign_agent_to_team, remove_agent_from_team
+# ============================================================================
+
+TeamOperationType = Literal["create", "list", "remove", "assign_agent", "remove_agent"]
+
+
+class ManageTeamsRequest(BaseModel):
+    """Request for consolidated team operations.
+
+    Operations:
+    - create: Create a new team
+    - list: List all teams
+    - remove: Remove a team
+    - assign_agent: Add an agent to a team
+    - remove_agent: Remove an agent from a team
+    """
+
+    operation: TeamOperationType = Field(
+        ...,
+        description="The team operation to perform"
+    )
+    team_name: Optional[str] = Field(
+        default=None,
+        description="Team name (required for create/remove/assign_agent/remove_agent)"
+    )
+    description: str = Field(
+        default="",
+        description="Team description (for create)"
+    )
+    parent_team: Optional[str] = Field(
+        default=None,
+        description="Parent team name (for create)"
+    )
+    agent_name: Optional[str] = Field(
+        default=None,
+        description="Agent name (required for assign_agent/remove_agent)"
+    )
+    repo_path: Optional[str] = Field(
+        default=None,
+        description="Optional repo path for service hook checks (for create)"
+    )
+
+
+class ManageTeamsResponse(BaseModel):
+    """Response from manage_teams operations."""
+
+    operation: str = Field(..., description="The operation that was performed")
+    success: bool = Field(..., description="Whether the operation succeeded")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Operation-specific response data"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if operation failed"
+    )
+
+
+# ============================================================================
+# CONSOLIDATED MANAGER OPERATIONS (6 tools → 1)
+# Consolidates: create_manager, list_managers, get_manager_info, remove_manager,
+#               add_worker_to_manager, remove_worker_from_manager
+# Note: delegate_task and execute_plan remain separate due to complex interfaces
+# ============================================================================
+
+ManagerOperationType = Literal[
+    "create", "list", "get_info", "remove", "add_worker", "remove_worker"
+]
+
+
+class ManageManagersRequest(BaseModel):
+    """Request for consolidated manager operations.
+
+    Operations:
+    - create: Create a new manager
+    - list: List all managers
+    - get_info: Get information about a manager
+    - remove: Remove a manager
+    - add_worker: Add a worker to a manager
+    - remove_worker: Remove a worker from a manager
+    """
+
+    operation: ManagerOperationType = Field(
+        ...,
+        description="The manager operation to perform"
+    )
+    manager_name: Optional[str] = Field(
+        default=None,
+        description="Manager name (required for create/get_info/remove/add_worker/remove_worker)"
+    )
+    worker_name: Optional[str] = Field(
+        default=None,
+        description="Worker agent name (required for add_worker/remove_worker)"
+    )
+    workers: List[str] = Field(
+        default_factory=list,
+        description="Initial worker names (for create)"
+    )
+    delegation_strategy: str = Field(
+        default="role_based",
+        description="Strategy for selecting workers (for create)"
+    )
+    worker_roles: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping of worker names to their roles (for create)"
+    )
+    worker_role: Optional[str] = Field(
+        default=None,
+        description="Role for a single worker (for add_worker)"
+    )
+    metadata: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Additional metadata (for create)"
+    )
+
+
+class ManageManagersResponse(BaseModel):
+    """Response from manage_managers operations."""
+
+    operation: str = Field(..., description="The operation that was performed")
+    success: bool = Field(..., description="Whether the operation succeeded")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Operation-specific response data"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if operation failed"
+    )
