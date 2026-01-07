@@ -1172,6 +1172,9 @@ async def list_sessions(
             team=agent_obj.teams[0] if agent_obj and agent_obj.teams else None,
             teams=agent_obj.teams if agent_obj else [],
             is_processing=getattr(session, "is_processing", False),
+            suspended=getattr(session, "is_suspended", False),
+            suspended_at=getattr(session, "suspended_at", None),
+            suspended_by=getattr(session, "suspended_by", None),
             tags=session_tags,
             locked=is_locked,
             locked_by=lock_owner,
@@ -2274,6 +2277,48 @@ async def apply_session_modification(
             agent_registry.active_session = session.id
             changes.append("set_active")
 
+        # Handle suspend/resume (with toggle fallback if both are set)
+        if modification.suspend and modification.resume:
+            # Both set: toggle based on current state
+            if session.is_suspended:
+                try:
+                    await session.resume()
+                    changes.append("toggle->resume")
+                    logger.info(f"Toggled session {session.name}: resumed (was suspended)")
+                except RuntimeError as e:
+                    result.error = str(e)
+                    logger.warning(f"Could not resume session {session.name}: {e}")
+                    return result
+            else:
+                suspend_agent = modification.suspend_by or agent_name
+                try:
+                    await session.suspend(agent=suspend_agent)
+                    changes.append(f"toggle->suspend (by {suspend_agent or 'unknown'})")
+                    logger.info(f"Toggled session {session.name}: suspended (was running)")
+                except RuntimeError as e:
+                    result.error = str(e)
+                    logger.warning(f"Could not suspend session {session.name}: {e}")
+                    return result
+        elif modification.suspend:
+            suspend_agent = modification.suspend_by or agent_name
+            try:
+                await session.suspend(agent=suspend_agent)
+                changes.append(f"suspend (by {suspend_agent or 'unknown'})")
+                logger.info(f"Suspended session {session.name} by agent {suspend_agent}")
+            except RuntimeError as e:
+                result.error = str(e)
+                logger.warning(f"Could not suspend session {session.name}: {e}")
+                return result
+        elif modification.resume:
+            try:
+                await session.resume()
+                changes.append("resume")
+                logger.info(f"Resumed session {session.name}")
+            except RuntimeError as e:
+                result.error = str(e)
+                logger.warning(f"Could not resume session {session.name}: {e}")
+                return result
+
         # Handle focus with cooldown check
         if modification.focus:
             if focus_cooldown:
@@ -2346,11 +2391,12 @@ async def modify_sessions(
     request: ModifySessionsRequest,
     ctx: Context
 ) -> str:
-    """Modify multiple terminal sessions (appearance, focus, active state).
+    """Modify multiple terminal sessions (appearance, focus, active state, suspend/resume).
 
     This consolidated tool handles all session modifications in a single call:
     - Visual appearance: background color, tab color, cursor color, badge
     - Session state: set as active session, bring to foreground (focus)
+    - Process control: suspend (Ctrl+Z) or resume (fg) running processes
 
     Each modification entry specifies a target session (by agent, name, or session_id)
     and the properties to modify.
@@ -2373,6 +2419,15 @@ async def modify_sessions(
             {
                 "agent": "claude-3",
                 "reset": true
+            },
+            {
+                "agent": "long-running-agent",
+                "suspend": true,
+                "suspend_by": "orchestrator"
+            },
+            {
+                "agent": "paused-agent",
+                "resume": true
             }
         ]
     }

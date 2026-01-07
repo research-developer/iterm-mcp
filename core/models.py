@@ -477,7 +477,7 @@ class ColorSpec(BaseModel):
 
 
 class SessionModification(BaseModel):
-    """Modification settings for a session (appearance, focus, active state)."""
+    """Modification settings for a session (appearance, focus, active state, suspend/resume)."""
 
     # Target session (at least one required)
     session_id: Optional[str] = Field(default=None, description="Direct session ID")
@@ -487,6 +487,11 @@ class SessionModification(BaseModel):
     # Session state modifications
     set_active: bool = Field(default=False, description="Set this session as the active session")
     focus: bool = Field(default=False, description="Bring this session to the foreground in iTerm")
+
+    # Process control (suspend/resume)
+    suspend: bool = Field(default=False, description="Suspend the running process with Ctrl+Z")
+    resume: bool = Field(default=False, description="Resume a suspended process with 'fg'")
+    suspend_by: Optional[str] = Field(default=None, description="Agent name performing the suspend (for tracking)")
 
     # Appearance settings (all optional - only set what you want to change)
     background_color: Optional[ColorSpec] = Field(default=None, description="Background color")
@@ -915,6 +920,11 @@ class SessionInfo(BaseModel):
     team: Optional[str] = Field(default=None, description="Primary team (first team if multiple)")
     teams: List[str] = Field(default_factory=list, description="All teams the agent belongs to")
     is_processing: bool = Field(default=False, description="Whether a command is running")
+
+    # Suspension state
+    suspended: bool = Field(default=False, description="Whether a process is suspended (Ctrl+Z)")
+    suspended_at: Optional[datetime] = Field(default=None, description="When the process was suspended")
+    suspended_by: Optional[str] = Field(default=None, description="Agent that suspended the process")
 
     # Tag and lock information
     tags: List[str] = Field(default_factory=list, description="Session tags")
