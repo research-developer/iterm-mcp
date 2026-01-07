@@ -191,7 +191,7 @@ class TestSuspendResumeIntegration(unittest.TestCase):
             if self.test_session.is_suspended:
                 try:
                     await self.test_session.resume()
-                except:
+                except Exception:
                     pass
             await self.terminal.close_session(self.test_session.id)
 
