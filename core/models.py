@@ -916,6 +916,11 @@ class SessionInfo(BaseModel):
     teams: List[str] = Field(default_factory=list, description="All teams the agent belongs to")
     is_processing: bool = Field(default=False, description="Whether a command is running")
 
+    # Suspension state
+    suspended: bool = Field(default=False, description="Whether a process is suspended (Ctrl+Z)")
+    suspended_at: Optional[datetime] = Field(default=None, description="When the process was suspended")
+    suspended_by: Optional[str] = Field(default=None, description="Agent that suspended the process")
+
     # Tag and lock information
     tags: List[str] = Field(default_factory=list, description="Session tags")
     locked: bool = Field(default=False, description="Whether session is locked")

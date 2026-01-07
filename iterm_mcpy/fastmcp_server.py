@@ -1172,6 +1172,9 @@ async def list_sessions(
             team=agent_obj.teams[0] if agent_obj and agent_obj.teams else None,
             teams=agent_obj.teams if agent_obj else [],
             is_processing=getattr(session, "is_processing", False),
+            suspended=getattr(session, "is_suspended", False),
+            suspended_at=getattr(session, "suspended_at", None),
+            suspended_by=getattr(session, "suspended_by", None),
             tags=session_tags,
             locked=is_locked,
             locked_by=lock_owner,
@@ -1872,6 +1875,121 @@ async def send_special_key(
     except Exception as e:
         logger.error(f"Error sending special key: {e}")
         return f"Error: {e}"
+
+
+@mcp.tool()
+async def suspend_session(
+    target: SessionTarget,
+    ctx: Context,
+    agent: Optional[str] = None,
+) -> str:
+    """Suspend a session's running process with Ctrl+Z.
+
+    Use this to pause long-running commands without terminating them.
+    The process can be resumed later with resume_session.
+
+    Args:
+        target: Session to suspend (by session_id, name, or agent)
+        agent: Optional name of the agent performing the suspension
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        target_model = ensure_model(SessionTarget, target)
+        sessions = await resolve_target_sessions(terminal, agent_registry, [target_model])
+        if not sessions:
+            return "No matching sessions found"
+
+        results = []
+        for session in sessions:
+            try:
+                await session.suspend(agent=agent)
+                results.append(f"{session.name}: Suspended successfully")
+                logger.info(f"Suspended session: {session.name} (by {agent or 'unknown'})")
+            except RuntimeError as e:
+                results.append(f"{session.name}: {e}")
+                logger.warning(f"Could not suspend session {session.name}: {e}")
+
+        return "\n".join(results)
+    except Exception as e:
+        logger.error(f"Error suspending session: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def resume_session(
+    target: SessionTarget,
+    ctx: Context,
+) -> str:
+    """Resume a suspended session with 'fg'.
+
+    Brings the most recently suspended job back to foreground.
+
+    Args:
+        target: Session to resume (by session_id, name, or agent)
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        target_model = ensure_model(SessionTarget, target)
+        sessions = await resolve_target_sessions(terminal, agent_registry, [target_model])
+        if not sessions:
+            return "No matching sessions found"
+
+        results = []
+        for session in sessions:
+            try:
+                await session.resume()
+                results.append(f"{session.name}: Resumed successfully")
+                logger.info(f"Resumed session: {session.name}")
+            except RuntimeError as e:
+                results.append(f"{session.name}: {e}")
+                logger.warning(f"Could not resume session {session.name}: {e}")
+
+        return "\n".join(results)
+    except Exception as e:
+        logger.error(f"Error resuming session: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def list_suspended_sessions(ctx: Context) -> str:
+    """List all currently suspended sessions with their suspend info.
+
+    Returns information about all sessions that have a suspended process,
+    including when they were suspended and by which agent.
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    sessions = list(terminal.sessions.values())
+    suspended = []
+
+    for session in sessions:
+        if getattr(session, "is_suspended", False):
+            agent_obj = agent_registry.get_agent_by_session(session.id)
+            suspended.append({
+                "session_id": session.id,
+                "name": session.name,
+                "agent": agent_obj.name if agent_obj else None,
+                "suspended_at": session.suspended_at.isoformat() if session.suspended_at else None,
+                "suspended_by": session.suspended_by,
+            })
+
+    logger.info(f"Found {len(suspended)} suspended sessions")
+
+    if not suspended:
+        return "No suspended sessions"
+
+    return json.dumps({
+        "suspended_sessions": suspended,
+        "count": len(suspended),
+    }, indent=2)
 
 
 @mcp.tool()
