@@ -13,8 +13,10 @@ import logging
 import os
 import stat
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from urllib.parse import unquote, urlparse
+
+from core.dashboard_db import DashboardDB, get_db
 
 if TYPE_CHECKING:
     from core.terminal import ItermTerminal
@@ -145,6 +147,14 @@ class DashboardServer:
         self._sse_clients: list = []
         self._update_interval = 1.0  # seconds between SSE updates
         self._running = False
+        self._db: Optional[DashboardDB] = None
+
+    @property
+    def db(self) -> DashboardDB:
+        """Lazy-load the database."""
+        if self._db is None:
+            self._db = get_db()
+        return self._db
 
     def _default_static_dir(self) -> Path:
         """Get the default static directory path."""
@@ -264,6 +274,21 @@ class DashboardServer:
                 await self._handle_focus(writer, query_params)
             elif url_path == "/api/send":
                 await self._handle_send(writer, query_params, reader, headers)
+            # Database API routes
+            elif url_path == "/api/db/responses":
+                await self._handle_db_responses(writer, query_params, reader, headers)
+            elif url_path == "/api/db/agents":
+                await self._handle_db_agents(writer, query_params)
+            elif url_path == "/api/db/teams":
+                await self._handle_db_teams(writer, query_params)
+            elif url_path == "/api/db/services":
+                await self._handle_db_services(writer, query_params)
+            elif url_path == "/api/db/repos":
+                await self._handle_db_repos(writer, query_params)
+            elif url_path == "/api/db/stats":
+                await self._handle_db_stats(writer)
+            elif url_path == "/api/db/search":
+                await self._handle_db_search(writer, query_params)
             else:
                 await self._handle_static(url_path, writer)
 
@@ -548,9 +573,12 @@ class DashboardServer:
         body: bytes,
     ) -> None:
         """Send an HTTP response."""
-        status_text = {200: "OK", 404: "Not Found", 500: "Internal Server Error"}.get(
-            status, "Unknown"
-        )
+        status_text = {
+            200: "OK",
+            400: "Bad Request",
+            404: "Not Found",
+            500: "Internal Server Error",
+        }.get(status, "Unknown")
         response = (
             f"HTTP/1.1 {status} {status_text}\r\n"
             f"Content-Type: {content_type}\r\n"
@@ -586,6 +614,159 @@ class DashboardServer:
         logger.info(
             f"Add to PATH: export PATH=\"$PATH:{bin_dir}\""
         )
+
+    # -------------------------------------------------------------------------
+    # Database API handlers
+    # -------------------------------------------------------------------------
+
+    async def _handle_db_responses(
+        self,
+        writer: asyncio.StreamWriter,
+        params: Dict[str, str],
+        reader: asyncio.StreamReader,
+        headers: Dict[str, str],
+    ) -> None:
+        """Handle /api/db/responses - GET to list, POST to add."""
+        try:
+            # Check if POST (adding a response)
+            content_length = int(headers.get("content-length", 0))
+            if content_length > 0:
+                # POST - add a new response
+                body_data = await reader.read(content_length)
+                try:
+                    data = json.loads(body_data.decode())
+                    response_id = self.db.add_response(
+                        agent_name=data.get("agent_name"),
+                        session_id=data.get("session_id"),
+                        response_type=data.get("response_type", "neutral"),
+                        first_line=data.get("first_line"),
+                        full_content=data.get("full_content"),
+                        repo_path=data.get("repo_path"),
+                        duration_ms=data.get("duration_ms"),
+                        tool_name=data.get("tool_name"),
+                    )
+                    body = json.dumps({"success": True, "id": response_id}).encode()
+                    await self._send_response(writer, 200, "application/json", body)
+                except json.JSONDecodeError as e:
+                    body = json.dumps({"error": f"Invalid JSON: {e}"}).encode()
+                    await self._send_response(writer, 400, "application/json", body)
+            else:
+                # GET - list responses
+                responses = self.db.get_responses(
+                    agent_name=params.get("agent"),
+                    response_type=params.get("type"),
+                    session_id=params.get("session_id"),
+                    limit=int(params.get("limit", 100)),
+                    offset=int(params.get("offset", 0)),
+                )
+                body = json.dumps({"responses": responses}, default=str).encode()
+                await self._send_response(writer, 200, "application/json", body)
+        except Exception as e:
+            logger.error(f"Error in db/responses: {e}")
+            body = json.dumps({"error": str(e)}).encode()
+            await self._send_response(writer, 500, "application/json", body)
+
+    async def _handle_db_agents(
+        self,
+        writer: asyncio.StreamWriter,
+        params: Dict[str, str],
+    ) -> None:
+        """Handle /api/db/agents - list agents from database."""
+        try:
+            agents = self.db.get_agents(
+                team_name=params.get("team"),
+                status=params.get("status"),
+            )
+            body = json.dumps({"agents": agents}, default=str).encode()
+            await self._send_response(writer, 200, "application/json", body)
+        except Exception as e:
+            logger.error(f"Error in db/agents: {e}")
+            body = json.dumps({"error": str(e)}).encode()
+            await self._send_response(writer, 500, "application/json", body)
+
+    async def _handle_db_teams(
+        self,
+        writer: asyncio.StreamWriter,
+        params: Dict[str, str],
+    ) -> None:
+        """Handle /api/db/teams - list teams from database."""
+        try:
+            teams = self.db.get_teams(parent_team=params.get("parent"))
+            body = json.dumps({"teams": teams}, default=str).encode()
+            await self._send_response(writer, 200, "application/json", body)
+        except Exception as e:
+            logger.error(f"Error in db/teams: {e}")
+            body = json.dumps({"error": str(e)}).encode()
+            await self._send_response(writer, 500, "application/json", body)
+
+    async def _handle_db_services(
+        self,
+        writer: asyncio.StreamWriter,
+        params: Dict[str, str],
+    ) -> None:
+        """Handle /api/db/services - list services from database."""
+        try:
+            services = self.db.get_services(
+                team_name=params.get("team"),
+                service_type=params.get("type"),
+                status=params.get("status"),
+            )
+            body = json.dumps({"services": services}, default=str).encode()
+            await self._send_response(writer, 200, "application/json", body)
+        except Exception as e:
+            logger.error(f"Error in db/services: {e}")
+            body = json.dumps({"error": str(e)}).encode()
+            await self._send_response(writer, 500, "application/json", body)
+
+    async def _handle_db_repos(
+        self,
+        writer: asyncio.StreamWriter,
+        params: Dict[str, str],
+    ) -> None:
+        """Handle /api/db/repos - list repos from database."""
+        try:
+            repos = self.db.get_repos(team_name=params.get("team"))
+            body = json.dumps({"repos": repos}, default=str).encode()
+            await self._send_response(writer, 200, "application/json", body)
+        except Exception as e:
+            logger.error(f"Error in db/repos: {e}")
+            body = json.dumps({"error": str(e)}).encode()
+            await self._send_response(writer, 500, "application/json", body)
+
+    async def _handle_db_stats(self, writer: asyncio.StreamWriter) -> None:
+        """Handle /api/db/stats - get aggregated statistics."""
+        try:
+            stats = self.db.get_stats()
+            body = json.dumps(stats, default=str).encode()
+            await self._send_response(writer, 200, "application/json", body)
+        except Exception as e:
+            logger.error(f"Error in db/stats: {e}")
+            body = json.dumps({"error": str(e)}).encode()
+            await self._send_response(writer, 500, "application/json", body)
+
+    async def _handle_db_search(
+        self,
+        writer: asyncio.StreamWriter,
+        params: Dict[str, str],
+    ) -> None:
+        """Handle /api/db/search - full-text search responses."""
+        try:
+            query = params.get("q", "")
+            if not query:
+                body = json.dumps({"error": "Missing 'q' parameter"}).encode()
+                await self._send_response(writer, 400, "application/json", body)
+                return
+
+            results = self.db.search_responses(
+                query=query,
+                limit=int(params.get("limit", 50)),
+            )
+            body = json.dumps({"results": results}, default=str).encode()
+            await self._send_response(writer, 200, "application/json", body)
+        except Exception as e:
+            logger.error(f"Error in db/search: {e}")
+            body = json.dumps({"error": str(e)}).encode()
+            await self._send_response(writer, 500, "application/json", body)
 
 
 # Global dashboard instance
