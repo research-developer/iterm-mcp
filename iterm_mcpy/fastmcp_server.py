@@ -54,6 +54,7 @@ from core.service_hooks import (
     get_service_hook_manager,
 )
 from core.memory import SQLiteMemoryStore
+from core.dashboard import start_dashboard, stop_dashboard
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -4639,17 +4640,45 @@ async def start_telemetry_dashboard(
 ) -> str:
     """Start a lightweight web server that streams telemetry JSON for external dashboards.
 
+    The dashboard provides:
+    - Real-time agent status cards with SSE updates
+    - Event stream showing notifications and activities
+    - Action buttons for focusing panes and sending commands via iterm2:// URLs
+    - Dark terminal theme matching iTerm2 aesthetic
+
     Args:
         port: Port to run the telemetry server on (default: 9999)
-        duration_seconds: How long to keep the server running (default: 300)
+        duration_seconds: How long to keep the server running (default: 300, 0 = indefinitely)
     """
     telemetry: TelemetryEmitter = ctx.request_context.lifespan_context["telemetry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        message = await _start_telemetry_server(port=port, duration=duration_seconds)
+        message = await start_dashboard(
+            telemetry=telemetry,
+            terminal=_terminal,
+            notification_manager=_notification_manager,
+            port=port,
+            duration=duration_seconds,
+        )
         logger.info(message)
-        return json.dumps({"status": "started", "message": message}, indent=2)
+
+        # Include setup instructions for iterm2:// URL handlers
+        setup_msg = (
+            f"\n\nTo enable iterm2:// URL actions, add to your shell profile:\n"
+            f"  export PATH=\"$PATH:$HOME/.iterm-mcp/bin\"\n\n"
+            f"Then open the dashboard in an iTerm2 Web Browser pane:\n"
+            f"  1. Create a new Web Browser profile in iTerm2 Preferences\n"
+            f"  2. Set URL to: http://localhost:{port}\n"
+            f"  3. Open a pane with the Web Browser profile"
+        )
+
+        return json.dumps({
+            "status": "started",
+            "message": message,
+            "url": f"http://localhost:{port}",
+            "setup": setup_msg,
+        }, indent=2)
     except Exception as e:
         logger.error(f"Error starting telemetry server: {e}")
         return json.dumps({"error": str(e)}, indent=2)
