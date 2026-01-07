@@ -160,6 +160,44 @@ class TestSuspendResumeAsync(unittest.TestCase):
 
         self.run_async(test_impl())
 
+    def test_toggle_when_not_suspended_suspends(self):
+        """Toggle on non-suspended session should suspend."""
+        async def test_impl():
+            self.session.send_control_character = AsyncMock()
+
+            # Not suspended initially
+            self.assertFalse(self.session.is_suspended)
+
+            # Simulate toggle logic: if not suspended, suspend
+            if self.session.is_suspended:
+                await self.session.resume()
+            else:
+                await self.session.suspend(agent="toggler")
+
+            self.assertTrue(self.session.is_suspended)
+            self.assertEqual(self.session.suspended_by, "toggler")
+
+        self.run_async(test_impl())
+
+    def test_toggle_when_suspended_resumes(self):
+        """Toggle on suspended session should resume."""
+        async def test_impl():
+            self.session.send_control_character = AsyncMock()
+
+            # Suspend first
+            await self.session.suspend(agent="original")
+            self.assertTrue(self.session.is_suspended)
+
+            # Simulate toggle logic: if suspended, resume
+            if self.session.is_suspended:
+                await self.session.resume()
+            else:
+                await self.session.suspend(agent="toggler")
+
+            self.assertFalse(self.session.is_suspended)
+
+        self.run_async(test_impl())
+
 
 class TestSuspendResumeIntegration(unittest.TestCase):
     """Integration tests for suspend/resume with real iTerm2 connection.

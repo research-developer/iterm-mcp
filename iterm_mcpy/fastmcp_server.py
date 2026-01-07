@@ -2277,8 +2277,29 @@ async def apply_session_modification(
             agent_registry.active_session = session.id
             changes.append("set_active")
 
-        # Handle suspend (must come before focus to allow suspend+focus pattern)
-        if modification.suspend:
+        # Handle suspend/resume (with toggle fallback if both are set)
+        if modification.suspend and modification.resume:
+            # Both set: toggle based on current state
+            if session.is_suspended:
+                try:
+                    await session.resume()
+                    changes.append("toggle->resume")
+                    logger.info(f"Toggled session {session.name}: resumed (was suspended)")
+                except RuntimeError as e:
+                    result.error = str(e)
+                    logger.warning(f"Could not resume session {session.name}: {e}")
+                    return result
+            else:
+                suspend_agent = modification.suspend_by or agent_name
+                try:
+                    await session.suspend(agent=suspend_agent)
+                    changes.append(f"toggle->suspend (by {suspend_agent or 'unknown'})")
+                    logger.info(f"Toggled session {session.name}: suspended (was running)")
+                except RuntimeError as e:
+                    result.error = str(e)
+                    logger.warning(f"Could not suspend session {session.name}: {e}")
+                    return result
+        elif modification.suspend:
             suspend_agent = modification.suspend_by or agent_name
             try:
                 await session.suspend(agent=suspend_agent)
@@ -2288,9 +2309,7 @@ async def apply_session_modification(
                 result.error = str(e)
                 logger.warning(f"Could not suspend session {session.name}: {e}")
                 return result
-
-        # Handle resume
-        if modification.resume:
+        elif modification.resume:
             try:
                 await session.resume()
                 changes.append("resume")
