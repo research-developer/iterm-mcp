@@ -171,12 +171,6 @@ class ItermDashboard {
         return icons[status] || '\u2022';  // bullet
     }
 
-    buildItermUrl(command, ...args) {
-        const encodedArgs = args.map(arg => encodeURIComponent(arg)).join('%20');
-        const fullCommand = encodeURIComponent(`${command} ${args.join(' ')}`);
-        return `iterm2:///command?c=${fullCommand}`;
-    }
-
     async focusAgent(agentName) {
         try {
             const response = await fetch(`/api/focus?agent=${encodeURIComponent(agentName)}`);

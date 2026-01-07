@@ -241,7 +241,8 @@ class DashboardDB:
             params.append(session_id)
         if since:
             query += " AND timestamp >= ?"
-            params.append(since.isoformat())
+            # Use space separator to match SQLite's CURRENT_TIMESTAMP format
+            params.append(since.strftime("%Y-%m-%d %H:%M:%S"))
 
         query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -629,18 +630,21 @@ class DashboardDB:
         bucket_minutes: int = 60,
     ) -> List[Dict[str, Any]]:
         """Get response counts over time for charting."""
+        # Validate hours to prevent SQL injection (must be positive integer)
+        hours = max(1, min(int(hours), 720))  # Cap at 30 days
         with self._connect() as conn:
             cursor = conn.execute(
-                f"""
+                """
                 SELECT
                     strftime('%Y-%m-%d %H:00:00', timestamp) as bucket,
                     response_type,
                     COUNT(*) as count
                 FROM responses
-                WHERE timestamp >= datetime('now', '-{hours} hours')
+                WHERE timestamp >= datetime('now', ? || ' hours')
                 GROUP BY bucket, response_type
                 ORDER BY bucket
-                """
+                """,
+                (f"-{hours}",),
             )
             return [dict(row) for row in cursor.fetchall()]
 

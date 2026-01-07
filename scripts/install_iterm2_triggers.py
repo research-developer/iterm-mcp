@@ -10,8 +10,6 @@ Usage:
     python install_iterm2_triggers.py
 """
 
-import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -27,12 +25,14 @@ def install_script():
     # Create Scripts directory if needed
     ITERM2_SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Create symlink
+    # Create symlink (use try/except to avoid TOCTOU race condition)
     target = ITERM2_SCRIPTS_DIR / "capture_claude_response.py"
 
-    if target.exists() or target.is_symlink():
-        print(f"  Removing existing: {target}")
+    try:
         target.unlink()
+        print(f"  Removed existing: {target}")
+    except FileNotFoundError:
+        pass  # File didn't exist, that's fine
 
     target.symlink_to(CAPTURE_SCRIPT)
     print(f"  Created symlink: {target} -> {CAPTURE_SCRIPT}")

@@ -54,7 +54,7 @@ from core.service_hooks import (
     get_service_hook_manager,
 )
 from core.memory import SQLiteMemoryStore
-from core.dashboard import start_dashboard, stop_dashboard
+from core.dashboard import start_dashboard
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -4643,7 +4643,7 @@ async def start_telemetry_dashboard(
     The dashboard provides:
     - Real-time agent status cards with SSE updates
     - Event stream showing notifications and activities
-    - Action buttons for focusing panes and sending commands via iterm2:// URLs
+    - Action buttons for focusing panes and sending commands via API calls
     - Dark terminal theme matching iTerm2 aesthetic
 
     Args:
@@ -4663,14 +4663,12 @@ async def start_telemetry_dashboard(
         )
         logger.info(message)
 
-        # Include setup instructions for iterm2:// URL handlers
+        # Include setup instructions
         setup_msg = (
-            f"\n\nTo enable iterm2:// URL actions, add to your shell profile:\n"
-            f"  export PATH=\"$PATH:$HOME/.iterm-mcp/bin\"\n\n"
-            f"Then open the dashboard in an iTerm2 Web Browser pane:\n"
-            f"  1. Create a new Web Browser profile in iTerm2 Preferences\n"
-            f"  2. Set URL to: http://localhost:{port}\n"
-            f"  3. Open a pane with the Web Browser profile"
+            f"\n\nOpen the dashboard at: http://localhost:{port}\n\n"
+            f"The dashboard uses API calls for agent control:\n"
+            f"  - /api/focus?agent=<name> - Focus an agent's pane\n"
+            f"  - /api/send?agent=<name>&command=<cmd> - Send command to agent"
         )
 
         return json.dumps({

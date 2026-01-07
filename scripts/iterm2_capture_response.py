@@ -15,12 +15,10 @@ Usage in iTerm2 Trigger:
 - Parameter: capture_claude_response(session.id)
 """
 
-import asyncio
 import json
 import logging
 import urllib.request
 import urllib.error
-from datetime import datetime
 from typing import Optional, Tuple
 
 import iterm2
