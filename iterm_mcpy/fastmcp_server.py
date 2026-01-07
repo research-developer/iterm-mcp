@@ -1878,121 +1878,6 @@ async def send_special_key(
 
 
 @mcp.tool()
-async def suspend_session(
-    target: SessionTarget,
-    ctx: Context,
-    agent: Optional[str] = None,
-) -> str:
-    """Suspend a session's running process with Ctrl+Z.
-
-    Use this to pause long-running commands without terminating them.
-    The process can be resumed later with resume_session.
-
-    Args:
-        target: Session to suspend (by session_id, name, or agent)
-        agent: Optional name of the agent performing the suspension
-    """
-    terminal = ctx.request_context.lifespan_context["terminal"]
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        target_model = ensure_model(SessionTarget, target)
-        sessions = await resolve_target_sessions(terminal, agent_registry, [target_model])
-        if not sessions:
-            return "No matching sessions found"
-
-        results = []
-        for session in sessions:
-            try:
-                await session.suspend(agent=agent)
-                results.append(f"{session.name}: Suspended successfully")
-                logger.info(f"Suspended session: {session.name} (by {agent or 'unknown'})")
-            except RuntimeError as e:
-                results.append(f"{session.name}: {e}")
-                logger.warning(f"Could not suspend session {session.name}: {e}")
-
-        return "\n".join(results)
-    except Exception as e:
-        logger.error(f"Error suspending session: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool()
-async def resume_session(
-    target: SessionTarget,
-    ctx: Context,
-) -> str:
-    """Resume a suspended session with 'fg'.
-
-    Brings the most recently suspended job back to foreground.
-
-    Args:
-        target: Session to resume (by session_id, name, or agent)
-    """
-    terminal = ctx.request_context.lifespan_context["terminal"]
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        target_model = ensure_model(SessionTarget, target)
-        sessions = await resolve_target_sessions(terminal, agent_registry, [target_model])
-        if not sessions:
-            return "No matching sessions found"
-
-        results = []
-        for session in sessions:
-            try:
-                await session.resume()
-                results.append(f"{session.name}: Resumed successfully")
-                logger.info(f"Resumed session: {session.name}")
-            except RuntimeError as e:
-                results.append(f"{session.name}: {e}")
-                logger.warning(f"Could not resume session {session.name}: {e}")
-
-        return "\n".join(results)
-    except Exception as e:
-        logger.error(f"Error resuming session: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool()
-async def list_suspended_sessions(ctx: Context) -> str:
-    """List all currently suspended sessions with their suspend info.
-
-    Returns information about all sessions that have a suspended process,
-    including when they were suspended and by which agent.
-    """
-    terminal = ctx.request_context.lifespan_context["terminal"]
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    sessions = list(terminal.sessions.values())
-    suspended = []
-
-    for session in sessions:
-        if getattr(session, "is_suspended", False):
-            agent_obj = agent_registry.get_agent_by_session(session.id)
-            suspended.append({
-                "session_id": session.id,
-                "name": session.name,
-                "agent": agent_obj.name if agent_obj else None,
-                "suspended_at": session.suspended_at.isoformat() if session.suspended_at else None,
-                "suspended_by": session.suspended_by,
-            })
-
-    logger.info(f"Found {len(suspended)} suspended sessions")
-
-    if not suspended:
-        return "No suspended sessions"
-
-    return json.dumps({
-        "suspended_sessions": suspended,
-        "count": len(suspended),
-    }, indent=2)
-
-
-@mcp.tool()
 async def check_session_status(request: SetActiveSessionRequest, ctx: Context) -> str:
     """Check status of a session."""
 
@@ -2392,6 +2277,29 @@ async def apply_session_modification(
             agent_registry.active_session = session.id
             changes.append("set_active")
 
+        # Handle suspend (must come before focus to allow suspend+focus pattern)
+        if modification.suspend:
+            suspend_agent = modification.suspend_by or agent_name
+            try:
+                await session.suspend(agent=suspend_agent)
+                changes.append(f"suspend (by {suspend_agent or 'unknown'})")
+                logger.info(f"Suspended session {session.name} by agent {suspend_agent}")
+            except RuntimeError as e:
+                result.error = str(e)
+                logger.warning(f"Could not suspend session {session.name}: {e}")
+                return result
+
+        # Handle resume
+        if modification.resume:
+            try:
+                await session.resume()
+                changes.append("resume")
+                logger.info(f"Resumed session {session.name}")
+            except RuntimeError as e:
+                result.error = str(e)
+                logger.warning(f"Could not resume session {session.name}: {e}")
+                return result
+
         # Handle focus with cooldown check
         if modification.focus:
             if focus_cooldown:
@@ -2464,11 +2372,12 @@ async def modify_sessions(
     request: ModifySessionsRequest,
     ctx: Context
 ) -> str:
-    """Modify multiple terminal sessions (appearance, focus, active state).
+    """Modify multiple terminal sessions (appearance, focus, active state, suspend/resume).
 
     This consolidated tool handles all session modifications in a single call:
     - Visual appearance: background color, tab color, cursor color, badge
     - Session state: set as active session, bring to foreground (focus)
+    - Process control: suspend (Ctrl+Z) or resume (fg) running processes
 
     Each modification entry specifies a target session (by agent, name, or session_id)
     and the properties to modify.
@@ -2491,6 +2400,15 @@ async def modify_sessions(
             {
                 "agent": "claude-3",
                 "reset": true
+            },
+            {
+                "agent": "long-running-agent",
+                "suspend": true,
+                "suspend_by": "orchestrator"
+            },
+            {
+                "agent": "paused-agent",
+                "resume": true
             }
         ]
     }
