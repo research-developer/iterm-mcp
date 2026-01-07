@@ -51,6 +51,21 @@ A comprehensive feedback system for AI agents using iterm-mcp to report issues a
 - Complete final epic review documentation ([8f48f58](../../commit/8f48f58))
 
 ### Changed
+
+#### Tool Consolidation (73 → 50 tools)
+
+Refactored 5 groups of related MCP tools into consolidated tools with operation parameters for better usability:
+
+- **Memory operations** (8 → 1 tool): `memory_store`, `memory_retrieve`, `memory_search`, `memory_list_keys`, `memory_delete`, `memory_list_namespaces`, `memory_clear_namespace`, `memory_stats` → `manage_memory`
+
+- **Service management** (6 → 1 tool): `list_services`, `start_service`, `stop_service`, `add_service`, `configure_service`, `get_inactive_services` → `manage_services`
+
+- **Session locking** (3 → 1 tool): `lock_session`, `unlock_session`, `request_session_access` → `manage_session_lock`
+
+- **Team operations** (5 → 1 tool): `create_team`, `list_teams`, `remove_team`, `assign_agent_to_team`, `remove_agent_from_team` → `manage_teams`
+
+- **Manager operations** (6 → 1 tool): `create_manager`, `list_managers`, `get_manager_info`, `remove_manager`, `add_worker_to_manager`, `remove_worker_from_manager` → `manage_managers`
+
 - Add .worktrees directory to .gitignore ([1399fbb](../../commit/1399fbb))
 - Update CI configuration for improved testing ([abd973e](../../commit/abd973e))
 - Add testing documentation updates ([abd973e](../../commit/abd973e))
