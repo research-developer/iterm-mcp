@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iTerm MCP Dashboard</title>
+    <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+    <div class="dashboard">
+        <!-- Header -->
+        <header class="header">
+            <h1 class="title">iTerm MCP</h1>
+            <div class="connection-status" id="connectionStatus">
+                <span class="status-dot disconnected"></span>
+                <span class="status-text">Connecting...</span>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Agent Grid Section -->
+            <section class="section agents-section">
+                <h2 class="section-title">Agents</h2>
+                <div class="agent-grid" id="agentGrid">
+                    <!-- Agent cards will be dynamically inserted here -->
+                    <div class="no-agents" id="noAgents">No agents registered</div>
+                </div>
+            </section>
+
+            <!-- Teams Section -->
+            <section class="section teams-section">
+                <h2 class="section-title">Teams</h2>
+                <div class="teams-list" id="teamsList">
+                    <!-- Team items will be dynamically inserted here -->
+                    <div class="no-teams" id="noTeams">No teams created</div>
+                </div>
+            </section>
+
+            <!-- Event Stream Section -->
+            <section class="section events-section">
+                <h2 class="section-title">
+                    Event Stream
+                    <button class="clear-btn" id="clearEvents" title="Clear events">Clear</button>
+                </h2>
+                <div class="event-stream" id="eventStream">
+                    <!-- Events will be dynamically inserted here -->
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer Stats -->
+        <footer class="footer">
+            <div class="stats">
+                <span class="stat">
+                    <span class="stat-label">Agents:</span>
+                    <span class="stat-value" id="agentCount">0</span>
+                </span>
+                <span class="stat">
+                    <span class="stat-label">Panes:</span>
+                    <span class="stat-value" id="paneCount">0</span>
+                </span>
+                <span class="stat">
+                    <span class="stat-label">Teams:</span>
+                    <span class="stat-value" id="teamCount">0</span>
+                </span>
+            </div>
+            <div class="last-update">
+                Last update: <span id="lastUpdate">--</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Agent Card Template -->
+    <template id="agentCardTemplate">
+        <div class="agent-card" data-agent-name="">
+            <div class="agent-header">
+                <span class="agent-status-icon"></span>
+                <span class="agent-name"></span>
+            </div>
+            <div class="agent-details">
+                <div class="agent-session">Session: <span class="session-id"></span></div>
+                <div class="agent-role">Role: <span class="role-name"></span></div>
+                <div class="agent-teams">Teams: <span class="team-names"></span></div>
+            </div>
+            <div class="agent-actions">
+                <a class="action-btn focus-btn" href="#" title="Focus this pane">Focus</a>
+                <a class="action-btn send-btn" href="#" title="Send command">Send</a>
+            </div>
+        </div>
+    </template>
+
+    <!-- Team Item Template -->
+    <template id="teamItemTemplate">
+        <div class="team-item" data-team-name="">
+            <span class="team-icon">&#128101;</span>
+            <span class="team-name"></span>
+            <span class="team-members">(<span class="member-count"></span> members)</span>
+        </div>
+    </template>
+
+    <!-- Event Item Template -->
+    <template id="eventItemTemplate">
+        <div class="event-item">
+            <span class="event-time"></span>
+            <span class="event-level"></span>
+            <span class="event-agent"></span>
+            <span class="event-message"></span>
+        </div>
+    </template>
+
+    <script src="/dashboard.js"></script>
+</body>
+</html>
