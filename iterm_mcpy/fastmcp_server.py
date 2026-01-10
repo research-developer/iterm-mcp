@@ -54,6 +54,7 @@ from core.service_hooks import (
     get_service_hook_manager,
 )
 from core.memory import SQLiteMemoryStore
+from core.dashboard import start_dashboard
 from core.models import (
     SessionTarget,
     SessionMessage,
@@ -120,6 +121,17 @@ from core.models import (
     SessionInfo,
     ListSessionsRequest,
     ListSessionsResponse,
+    # Consolidated operations
+    ManageMemoryRequest,
+    ManageMemoryResponse,
+    ManageServicesRequest,
+    ManageServicesResponse,
+    ManageSessionLockRequest,
+    ManageSessionLockResponse,
+    ManageTeamsRequest,
+    ManageTeamsResponse,
+    ManageManagersRequest,
+    ManageManagersResponse,
 )
 from core.manager import (
     SessionRole as ManagerSessionRole,
@@ -1161,6 +1173,9 @@ async def list_sessions(
             team=agent_obj.teams[0] if agent_obj and agent_obj.teams else None,
             teams=agent_obj.teams if agent_obj else [],
             is_processing=getattr(session, "is_processing", False),
+            suspended=getattr(session, "is_suspended", False),
+            suspended_at=getattr(session, "suspended_at", None),
+            suspended_by=getattr(session, "suspended_by", None),
             tags=session_tags,
             locked=is_locked,
             locked_by=lock_owner,
@@ -1202,73 +1217,134 @@ async def set_session_tags(
 
 
 @mcp.tool()
-async def lock_session(
+async def manage_session_lock(
+    request: ManageSessionLockRequest,
     ctx: Context,
-    session_id: str,
-    agent: str,
 ) -> str:
-    """Lock a session for an agent."""
+    """Manage session locks with a single consolidated tool.
+
+    Consolidates: lock_session, unlock_session, request_session_access
+
+    Operations:
+    - lock: Lock a session for an agent (requires agent)
+    - unlock: Unlock a session (agent optional, for owner verification)
+    - request_access: Request permission to write to locked session (requires agent)
+
+    Args:
+        request: The lock operation request with operation type and parameters
+
+    Returns:
+        JSON with operation results
+    """
     lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
     if not lock_manager:
-        return "Tag/lock manager unavailable"
+        response = ManageSessionLockResponse(
+            operation=request.operation,
+            success=False,
+            session_id=request.session_id,
+            error="Tag/lock manager unavailable"
+        )
+        return response.model_dump_json(indent=2)
 
-    acquired, owner = lock_manager.lock_session(session_id, agent)
-    status = "acquired" if acquired else "locked"
-    return json.dumps(
-        {"session_id": session_id, "locked_by": owner, "status": status},
-        indent=2,
-    )
+    try:
+        if request.operation == "lock":
+            if not request.agent:
+                response = ManageSessionLockResponse(
+                    operation=request.operation,
+                    success=False,
+                    session_id=request.session_id,
+                    error="agent is required for lock operation"
+                )
+                return response.model_dump_json(indent=2)
 
+            acquired, owner = lock_manager.lock_session(request.session_id, request.agent)
+            status = "acquired" if acquired else "locked"
+            response = ManageSessionLockResponse(
+                operation=request.operation,
+                success=acquired,
+                session_id=request.session_id,
+                data={
+                    "locked_by": owner,
+                    "status": status
+                }
+            )
+            return response.model_dump_json(indent=2)
 
-@mcp.tool()
-async def unlock_session(
-    ctx: Context,
-    session_id: str,
-    agent: Optional[str] = None,
-) -> str:
-    """Unlock a session (optionally enforcing owner match)."""
-    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
-    if not lock_manager:
-        return "Tag/lock manager unavailable"
+        elif request.operation == "unlock":
+            previous_owner = lock_manager.lock_owner(request.session_id)
+            success = lock_manager.unlock_session(request.session_id, request.agent)
+            current_owner = lock_manager.lock_owner(request.session_id)
+            response = ManageSessionLockResponse(
+                operation=request.operation,
+                success=success,
+                session_id=request.session_id,
+                data={
+                    "unlocked": success,
+                    "previous_owner": previous_owner,
+                    "locked_by": current_owner
+                }
+            )
+            return response.model_dump_json(indent=2)
 
-    previous_owner = lock_manager.lock_owner(session_id)
-    success = lock_manager.unlock_session(session_id, agent)
-    return json.dumps(
-        {
-            "session_id": session_id,
-            "unlocked": success,
-            "previous_owner": previous_owner,
-            "locked_by": lock_manager.lock_owner(session_id),
-        },
-        indent=2,
-    )
+        elif request.operation == "request_access":
+            if not request.agent:
+                response = ManageSessionLockResponse(
+                    operation=request.operation,
+                    success=False,
+                    session_id=request.session_id,
+                    error="agent is required for request_access operation"
+                )
+                return response.model_dump_json(indent=2)
 
+            notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
+            allowed, owner = lock_manager.check_permission(request.session_id, request.agent)
 
-@mcp.tool()
-async def request_session_access(
-    ctx: Context,
-    session_id: str,
-    agent: str,
-) -> str:
-    """Request permission to write to a locked session."""
-    lock_manager = ctx.request_context.lifespan_context.get("tag_lock_manager")
-    if not lock_manager:
-        return "Tag/lock manager unavailable"
+            if allowed:
+                response = ManageSessionLockResponse(
+                    operation=request.operation,
+                    success=True,
+                    session_id=request.session_id,
+                    data={"allowed": True}
+                )
+                return response.model_dump_json(indent=2)
 
-    notification_manager = ctx.request_context.lifespan_context.get("notification_manager")
-    allowed, owner = lock_manager.check_permission(session_id, agent)
-    if allowed:
-        return json.dumps({"session_id": session_id, "allowed": True}, indent=2)
+            # Notify the lock owner about the access request
+            await notify_lock_request(
+                notification_manager,
+                owner,
+                request.session_id,
+                request.agent,
+                action_hint="Respond by unlocking if approved",
+            )
 
-    await notify_lock_request(
-        notification_manager,
-        owner,
-        session_id,
-        agent,
-        action_hint="Respond by unlocking if approved",
-    )
+            response = ManageSessionLockResponse(
+                operation=request.operation,
+                success=False,
+                session_id=request.session_id,
+                data={
+                    "allowed": False,
+                    "locked_by": owner
+                }
+            )
+            return response.model_dump_json(indent=2)
 
-    return json.dumps({"session_id": session_id, "allowed": False, "locked_by": owner}, indent=2)
+        else:
+            response = ManageSessionLockResponse(
+                operation=request.operation,
+                success=False,
+                session_id=request.session_id,
+                error=f"Unknown operation: {request.operation}"
+            )
+            return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        response = ManageSessionLockResponse(
+            operation=request.operation,
+            success=False,
+            session_id=request.session_id,
+            error=str(e)
+        )
+        return response.model_dump_json(indent=2)
 
 
 @mcp.tool()
@@ -1945,204 +2021,233 @@ async def remove_agent(
 
 
 @mcp.tool()
-async def create_team(
-    request: CreateTeamRequest,
+async def manage_teams(
+    request: ManageTeamsRequest,
     ctx: Context,
-    repo_path: Optional[str] = None
 ) -> str:
-    """Create a new team.
+    """Manage teams with a single consolidated tool.
+
+    Consolidates: create_team, list_teams, remove_team, assign_agent_to_team, remove_agent_from_team
+
+    Operations:
+    - create: Create a new team (requires team_name)
+    - list: List all teams
+    - remove: Remove a team (requires team_name)
+    - assign_agent: Add an agent to a team (requires team_name and agent_name)
+    - remove_agent: Remove an agent from a team (requires team_name and agent_name)
 
     Args:
-        request: Team creation request
-        ctx: MCP context
-        repo_path: Optional repo path for service hook checks
-    """
+        request: The team operation request with operation type and parameters
 
+    Returns:
+        JSON with operation results
+    """
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     profile_manager = ctx.request_context.lifespan_context["profile_manager"]
     service_hook_manager = ctx.request_context.lifespan_context["service_hook_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        req = ensure_model(CreateTeamRequest, request)
+        if request.operation == "create":
+            if not request.team_name:
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="team_name is required for create operation"
+                )
+                return response.model_dump_json(indent=2)
 
-        # Check service hooks before creating team
-        hook_result = await service_hook_manager.pre_create_team_hook(
-            team_name=req.name,
-            repo_path=repo_path
-        )
+            # Check service hooks before creating team
+            hook_result = await service_hook_manager.pre_create_team_hook(
+                team_name=request.team_name,
+                repo_path=request.repo_path
+            )
 
-        # Build response with hook information
-        response_data = {}
+            # Build response with hook information
+            response_data = {}
 
-        # If hook requires prompt, return the hook result for agent to decide
-        if hook_result.prompt_required:
-            response_data["service_prompt"] = {
-                "message": hook_result.message,
-                "inactive_services": [
-                    {
-                        "name": s.name,
-                        "display_name": s.effective_display_name,
-                        "priority": s.priority.value,
-                    }
-                    for s in hook_result.inactive_services
-                ],
-                "action_required": True,
-            }
-            # Still create the team, but inform about services
-            logger.info(f"Service hook prompting for team '{req.name}': {hook_result.message}")
+            # If hook requires prompt, return the hook result for agent to decide
+            if hook_result.prompt_required:
+                response_data["service_prompt"] = {
+                    "message": hook_result.message,
+                    "inactive_services": [
+                        {
+                            "name": s.name,
+                            "display_name": s.effective_display_name,
+                            "priority": s.priority.value,
+                        }
+                        for s in hook_result.inactive_services
+                    ],
+                    "action_required": True,
+                }
+                logger.info(f"Service hook prompting for team '{request.team_name}': {hook_result.message}")
 
-        # If hook says don't proceed, return error
-        if not hook_result.proceed:
-            return json.dumps({
-                "error": hook_result.message,
-                "proceed": False,
-            }, indent=2)
+            # If hook says don't proceed, return error
+            if not hook_result.proceed:
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error=hook_result.message,
+                    data={"proceed": False}
+                )
+                return response.model_dump_json(indent=2)
 
-        # Add info about auto-started services
-        if hook_result.auto_started:
-            response_data["auto_started_services"] = [
-                s.name for s in hook_result.auto_started
-            ]
+            # Add info about auto-started services
+            if hook_result.auto_started:
+                response_data["auto_started_services"] = [
+                    s.name for s in hook_result.auto_started
+                ]
 
-        team = agent_registry.create_team(
-            name=req.name,
-            description=req.description,
-            parent_team=req.parent_team,
-        )
+            team = agent_registry.create_team(
+                name=request.team_name,
+                description=request.description,
+                parent_team=request.parent_team,
+            )
 
-        # Create a profile for the team with auto-assigned color
-        team_profile = profile_manager.get_or_create_team_profile(team.name)
-        profile_manager.save_profiles()
+            # Create a profile for the team with auto-assigned color
+            team_profile = profile_manager.get_or_create_team_profile(team.name)
+            profile_manager.save_profiles()
 
-        logger.info(f"Created team '{team.name}' with profile color hue={team_profile.color.hue:.1f}")
+            logger.info(f"Created team '{team.name}' with profile color hue={team_profile.color.hue:.1f}")
 
-        response_data.update({
-            "name": team.name,
-            "description": team.description,
-            "parent_team": team.parent_team,
-            "profile_guid": team_profile.guid,
-            "color_hue": round(team_profile.color.hue, 1)
-        })
+            response_data.update({
+                "name": team.name,
+                "description": team.description,
+                "parent_team": team.parent_team,
+                "profile_guid": team_profile.guid,
+                "color_hue": round(team_profile.color.hue, 1)
+            })
 
-        return json.dumps(response_data, indent=2)
-    except Exception as e:
-        logger.error(f"Error creating team: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
+            response = ManageTeamsResponse(
+                operation=request.operation,
+                success=True,
+                data=response_data
+            )
+            return response.model_dump_json(indent=2)
 
+        elif request.operation == "list":
+            teams = agent_registry.list_teams()
+            result = []
+            for t in teams:
+                team_info = {
+                    "name": t.name,
+                    "description": t.description,
+                    "parent_team": t.parent_team,
+                    "member_count": len(agent_registry.list_agents(team=t.name))
+                }
+                # Include profile info if available
+                team_profile = profile_manager.get_team_profile(t.name)
+                if team_profile:
+                    team_info["profile_guid"] = team_profile.guid
+                    team_info["color_hue"] = round(team_profile.color.hue, 1)
+                result.append(team_info)
 
-@mcp.tool()
-async def list_teams(ctx: Context) -> str:
-    """List all teams."""
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
-    logger = ctx.request_context.lifespan_context["logger"]
+            logger.info(f"Listed {len(result)} teams")
+            response = ManageTeamsResponse(
+                operation=request.operation,
+                success=True,
+                data={"teams": result, "count": len(result)}
+            )
+            return response.model_dump_json(indent=2)
 
-    try:
-        teams = agent_registry.list_teams()
-        result = []
-        for t in teams:
-            team_info = {
-                "name": t.name,
-                "description": t.description,
-                "parent_team": t.parent_team,
-                "member_count": len(agent_registry.list_agents(team=t.name))
-            }
-            # Include profile info if available
-            team_profile = profile_manager.get_team_profile(t.name)
-            if team_profile:
-                team_info["profile_guid"] = team_profile.guid
-                team_info["color_hue"] = round(team_profile.color.hue, 1)
-            result.append(team_info)
+        elif request.operation == "remove":
+            if not request.team_name:
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="team_name is required for remove operation"
+                )
+                return response.model_dump_json(indent=2)
 
-        logger.info(f"Listed {len(result)} teams")
-        return json.dumps(result, indent=2)
-    except Exception as e:
-        logger.error(f"Error listing teams: {e}")
-        return f"Error: {e}"
+            if agent_registry.remove_team(request.team_name):
+                # Also remove the team's profile
+                profile_removed = profile_manager.remove_team_profile(request.team_name)
+                if profile_removed:
+                    profile_manager.save_profiles()
+                    logger.info(f"Removed team '{request.team_name}' and its profile")
+                else:
+                    logger.info(f"Removed team '{request.team_name}' (no profile to remove)")
 
-
-@mcp.tool()
-async def remove_team(
-    team_name: str,
-    ctx: Context
-) -> str:
-    """Remove a team.
-
-    Args:
-        team_name: Name of the team to remove
-    """
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        if agent_registry.remove_team(team_name):
-            # Also remove the team's profile
-            profile_removed = profile_manager.remove_team_profile(team_name)
-            if profile_removed:
-                profile_manager.save_profiles()
-                logger.info(f"Removed team '{team_name}' and its profile")
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=True,
+                    data={"team_name": request.team_name, "profile_removed": profile_removed}
+                )
+                return response.model_dump_json(indent=2)
             else:
-                logger.info(f"Removed team '{team_name}' (no profile to remove)")
-            return f"Team '{team_name}' removed successfully"
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error=f"Team '{request.team_name}' not found"
+                )
+                return response.model_dump_json(indent=2)
+
+        elif request.operation == "assign_agent":
+            if not request.team_name or not request.agent_name:
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="team_name and agent_name are required for assign_agent operation"
+                )
+                return response.model_dump_json(indent=2)
+
+            if agent_registry.assign_to_team(request.agent_name, request.team_name):
+                logger.info(f"Added agent '{request.agent_name}' to team '{request.team_name}'")
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=True,
+                    data={"team_name": request.team_name, "agent_name": request.agent_name}
+                )
+                return response.model_dump_json(indent=2)
+            else:
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="Failed to add agent to team (agent not found or already member)"
+                )
+                return response.model_dump_json(indent=2)
+
+        elif request.operation == "remove_agent":
+            if not request.team_name or not request.agent_name:
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="team_name and agent_name are required for remove_agent operation"
+                )
+                return response.model_dump_json(indent=2)
+
+            if agent_registry.remove_from_team(request.agent_name, request.team_name):
+                logger.info(f"Removed agent '{request.agent_name}' from team '{request.team_name}'")
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=True,
+                    data={"team_name": request.team_name, "agent_name": request.agent_name}
+                )
+                return response.model_dump_json(indent=2)
+            else:
+                response = ManageTeamsResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="Failed to remove agent from team (agent not found or not a member)"
+                )
+                return response.model_dump_json(indent=2)
+
         else:
-            return f"Team '{team_name}' not found"
+            response = ManageTeamsResponse(
+                operation=request.operation,
+                success=False,
+                error=f"Unknown operation: {request.operation}"
+            )
+            return response.model_dump_json(indent=2)
+
     except Exception as e:
-        logger.error(f"Error removing team: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool()
-async def assign_agent_to_team(
-    agent_name: str,
-    team_name: str,
-    ctx: Context
-) -> str:
-    """Add an agent to a team.
-
-    Args:
-        agent_name: Agent name
-        team_name: Team name
-    """
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        if agent_registry.assign_to_team(agent_name, team_name):
-            logger.info(f"Added agent '{agent_name}' to team '{team_name}'")
-            return f"Agent '{agent_name}' added to team '{team_name}'"
-        else:
-            return f"Failed to add agent to team (agent not found or already member)"
-    except Exception as e:
-        logger.error(f"Error assigning agent to team: {e}")
-        return f"Error: {e}"
-
-
-@mcp.tool()
-async def remove_agent_from_team(
-    agent_name: str,
-    team_name: str,
-    ctx: Context
-) -> str:
-    """Remove an agent from a team.
-
-    Args:
-        agent_name: Agent name
-        team_name: Team name
-    """
-    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        if agent_registry.remove_from_team(agent_name, team_name):
-            logger.info(f"Removed agent '{agent_name}' from team '{team_name}'")
-            return f"Agent '{agent_name}' removed from team '{team_name}'"
-        else:
-            return f"Failed to remove agent from team (agent not found or not a member)"
-    except Exception as e:
-        logger.error(f"Error removing agent from team: {e}")
-        return f"Error: {e}"
+        logger.error(f"Error in manage_teams: {e}")
+        response = ManageTeamsResponse(
+            operation=request.operation,
+            success=False,
+            error=str(e)
+        )
+        return response.model_dump_json(indent=2)
 
 
 # ============================================================================
@@ -2172,6 +2277,48 @@ async def apply_session_modification(
         if modification.set_active:
             agent_registry.active_session = session.id
             changes.append("set_active")
+
+        # Handle suspend/resume (with toggle fallback if both are set)
+        if modification.suspend and modification.resume:
+            # Both set: toggle based on current state
+            if session.is_suspended:
+                try:
+                    await session.resume()
+                    changes.append("toggle->resume")
+                    logger.info(f"Toggled session {session.name}: resumed (was suspended)")
+                except RuntimeError as e:
+                    result.error = str(e)
+                    logger.warning(f"Could not resume session {session.name}: {e}")
+                    return result
+            else:
+                suspend_agent = modification.suspend_by or agent_name
+                try:
+                    await session.suspend(agent=suspend_agent)
+                    changes.append(f"toggle->suspend (by {suspend_agent or 'unknown'})")
+                    logger.info(f"Toggled session {session.name}: suspended (was running)")
+                except RuntimeError as e:
+                    result.error = str(e)
+                    logger.warning(f"Could not suspend session {session.name}: {e}")
+                    return result
+        elif modification.suspend:
+            suspend_agent = modification.suspend_by or agent_name
+            try:
+                await session.suspend(agent=suspend_agent)
+                changes.append(f"suspend (by {suspend_agent or 'unknown'})")
+                logger.info(f"Suspended session {session.name} by agent {suspend_agent}")
+            except RuntimeError as e:
+                result.error = str(e)
+                logger.warning(f"Could not suspend session {session.name}: {e}")
+                return result
+        elif modification.resume:
+            try:
+                await session.resume()
+                changes.append("resume")
+                logger.info(f"Resumed session {session.name}")
+            except RuntimeError as e:
+                result.error = str(e)
+                logger.warning(f"Could not resume session {session.name}: {e}")
+                return result
 
         # Handle focus with cooldown check
         if modification.focus:
@@ -2245,11 +2392,12 @@ async def modify_sessions(
     request: ModifySessionsRequest,
     ctx: Context
 ) -> str:
-    """Modify multiple terminal sessions (appearance, focus, active state).
+    """Modify multiple terminal sessions (appearance, focus, active state, suspend/resume).
 
     This consolidated tool handles all session modifications in a single call:
     - Visual appearance: background color, tab color, cursor color, badge
     - Session state: set as active session, bring to foreground (focus)
+    - Process control: suspend (Ctrl+Z) or resume (fg) running processes
 
     Each modification entry specifies a target session (by agent, name, or session_id)
     and the properties to modify.
@@ -2272,6 +2420,15 @@ async def modify_sessions(
             {
                 "agent": "claude-3",
                 "reset": true
+            },
+            {
+                "agent": "long-running-agent",
+                "suspend": true,
+                "suspend_by": "orchestrator"
+            },
+            {
+                "agent": "paused-agent",
+                "resume": true
             }
         ]
     }
@@ -3449,226 +3606,267 @@ async def get_feedback_config(
 
 
 # ============================================================================
-# SERVICE MANAGEMENT TOOLS
+# SERVICE MANAGEMENT TOOLS (consolidated)
 # ============================================================================
 
 @mcp.tool()
-async def list_services(
-    ctx: Context,
-    repo_path: Optional[str] = None,
-    min_priority: Optional[str] = None,
-    include_status: bool = True,
-) -> str:
-    """List configured services and their status.
+async def manage_services(request: ManageServicesRequest, ctx: Context) -> str:
+    """Unified service management - consolidates 6 service tools into one.
+
+    Operations:
+    - list: List configured services (optional: repo_path, min_priority, include_status)
+    - start: Start a service (requires service_name; optional: repo_path)
+    - stop: Stop a service (requires service_name)
+    - add: Add new service (requires service_name, command; optional: priority, display_name, port, etc.)
+    - configure: Update service config (requires service_name; optional: priority, port, command, etc.)
+    - list_inactive: Get services that should be running but aren't (requires repo_path)
 
     Args:
-        repo_path: Repository path to filter services for
-        min_priority: Minimum priority level to include (quiet, optional, preferred, required)
-        include_status: Whether to check running status (may be slower)
+        request: ManageServicesRequest with operation and relevant parameters
+
+    Returns:
+        JSON with operation result
     """
     service_manager = ctx.request_context.lifespan_context["service_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Parse priority if provided
-        priority = None
-        if min_priority:
-            priority = ServicePriority.from_string(min_priority)
+        op = request.operation
 
-        # Get services
-        if repo_path:
-            services = service_manager.get_merged_services(repo_path, priority)
+        # LIST operation
+        if op == "list":
+            priority = None
+            if request.min_priority:
+                priority = ServicePriority.from_string(request.min_priority)
+
+            if request.repo_path:
+                services = service_manager.get_merged_services(request.repo_path, priority)
+            else:
+                global_registry = service_manager.load_global_config()
+                services = global_registry.services
+                if priority:
+                    priority_order = [
+                        ServicePriority.QUIET,
+                        ServicePriority.OPTIONAL,
+                        ServicePriority.PREFERRED,
+                        ServicePriority.REQUIRED
+                    ]
+                    min_idx = priority_order.index(priority)
+                    services = [
+                        s for s in services
+                        if priority_order.index(s.priority) >= min_idx
+                    ]
+
+            result = []
+            for service in services:
+                info = {
+                    "name": service.name,
+                    "display_name": service.effective_display_name,
+                    "priority": service.priority.value,
+                    "command": service.command,
+                    "port": service.port,
+                    "working_directory": service.working_directory,
+                }
+                if request.include_status:
+                    is_running = await service_manager.check_service_running(service)
+                    info["is_running"] = is_running
+                result.append(info)
+
+            return ManageServicesResponse(
+                operation=op,
+                success=True,
+                data={"services": result, "count": len(result), "repo_path": request.repo_path}
+            ).model_dump_json(indent=2)
+
+        # START operation
+        elif op == "start":
+            if not request.service_name:
+                raise ValueError("service_name is required for start operation")
+
+            if request.repo_path:
+                services = service_manager.get_merged_services(request.repo_path)
+            else:
+                global_registry = service_manager.load_global_config()
+                services = global_registry.services
+
+            service = None
+            for s in services:
+                if s.name == request.service_name:
+                    service = s
+                    break
+
+            if not service:
+                return ManageServicesResponse(
+                    operation=op,
+                    success=False,
+                    error=f"Service '{request.service_name}' not found",
+                    data={"available_services": [s.name for s in services]}
+                ).model_dump_json(indent=2)
+
+            state = await service_manager.start_service(service, repo_path=request.repo_path)
+
+            return ManageServicesResponse(
+                operation=op,
+                success=state.is_running,
+                data={
+                    "service": request.service_name,
+                    "started": state.is_running,
+                    "session_id": state.session_id,
+                    "error": state.error_message,
+                }
+            ).model_dump_json(indent=2)
+
+        # STOP operation
+        elif op == "stop":
+            if not request.service_name:
+                raise ValueError("service_name is required for stop operation")
+
+            success = await service_manager.stop_service(request.service_name)
+
+            return ManageServicesResponse(
+                operation=op,
+                success=success,
+                data={"service": request.service_name, "stopped": success}
+            ).model_dump_json(indent=2)
+
+        # ADD operation
+        elif op == "add":
+            if not request.service_name:
+                raise ValueError("service_name is required for add operation")
+            if not request.command:
+                raise ValueError("command is required for add operation")
+
+            service = ServiceConfig(
+                name=request.service_name,
+                display_name=request.display_name,
+                command=request.command,
+                priority=ServicePriority.from_string(request.priority or "optional"),
+                port=request.port,
+                working_directory=request.working_directory,
+                repo_patterns=request.repo_patterns or [],
+            )
+
+            if request.scope == "repo":
+                if not request.repo_path:
+                    return ManageServicesResponse(
+                        operation=op,
+                        success=False,
+                        error="repo_path required when scope is 'repo'"
+                    ).model_dump_json(indent=2)
+
+                registry = service_manager.load_repo_config(request.repo_path)
+                registry.services = [s for s in registry.services if s.name != request.service_name]
+                registry.services.append(service)
+                service_manager.save_repo_config(request.repo_path, registry)
+            else:
+                registry = service_manager.load_global_config()
+                registry.services = [s for s in registry.services if s.name != request.service_name]
+                registry.services.append(service)
+                service_manager.save_global_config(registry)
+
+            logger.info(f"Added service '{request.service_name}' to {request.scope} config")
+
+            return ManageServicesResponse(
+                operation=op,
+                success=True,
+                data={"service": request.service_name, "scope": request.scope, "added": True}
+            ).model_dump_json(indent=2)
+
+        # CONFIGURE operation
+        elif op == "configure":
+            if not request.service_name:
+                raise ValueError("service_name is required for configure operation")
+
+            if request.scope == "repo":
+                if not request.repo_path:
+                    return ManageServicesResponse(
+                        operation=op,
+                        success=False,
+                        error="repo_path required when scope is 'repo'"
+                    ).model_dump_json(indent=2)
+                registry = service_manager.load_repo_config(request.repo_path)
+            else:
+                registry = service_manager.load_global_config()
+
+            found = False
+            for i, service in enumerate(registry.services):
+                if service.name == request.service_name:
+                    found = True
+                    updates = {}
+                    if request.priority:
+                        updates["priority"] = ServicePriority.from_string(request.priority)
+                    if request.port is not None:
+                        updates["port"] = request.port
+                    if request.command:
+                        updates["command"] = request.command
+                    if request.working_directory:
+                        updates["working_directory"] = request.working_directory
+
+                    updated_data = service.model_dump()
+                    updated_data.update(updates)
+                    registry.services[i] = ServiceConfig.model_validate(updated_data)
+                    break
+
+            if not found:
+                return ManageServicesResponse(
+                    operation=op,
+                    success=False,
+                    error=f"Service '{request.service_name}' not found in {request.scope} config"
+                ).model_dump_json(indent=2)
+
+            if request.scope == "repo":
+                service_manager.save_repo_config(request.repo_path, registry)
+            else:
+                service_manager.save_global_config(registry)
+
+            logger.info(f"Updated service '{request.service_name}' in {request.scope} config")
+
+            return ManageServicesResponse(
+                operation=op,
+                success=True,
+                data={"service": request.service_name, "scope": request.scope, "updated": True}
+            ).model_dump_json(indent=2)
+
+        # LIST_INACTIVE operation
+        elif op == "list_inactive":
+            if not request.repo_path:
+                raise ValueError("repo_path is required for list_inactive operation")
+
+            priority = None
+            if request.min_priority:
+                priority = ServicePriority.from_string(request.min_priority)
+
+            inactive = await service_manager.get_inactive_services(request.repo_path, priority)
+
+            result = []
+            for service in inactive:
+                result.append({
+                    "name": service.name,
+                    "display_name": service.effective_display_name,
+                    "priority": service.priority.value,
+                    "command": service.command,
+                })
+
+            return ManageServicesResponse(
+                operation=op,
+                success=True,
+                data={"inactive_services": result, "count": len(result), "repo_path": request.repo_path}
+            ).model_dump_json(indent=2)
+
         else:
-            global_registry = service_manager.load_global_config()
-            services = global_registry.services
-            if priority:
-                priority_order = [
-                    ServicePriority.QUIET,
-                    ServicePriority.OPTIONAL,
-                    ServicePriority.PREFERRED,
-                    ServicePriority.REQUIRED
-                ]
-                min_idx = priority_order.index(priority)
-                services = [
-                    s for s in services
-                    if priority_order.index(s.priority) >= min_idx
-                ]
-
-        result = []
-        for service in services:
-            info = {
-                "name": service.name,
-                "display_name": service.effective_display_name,
-                "priority": service.priority.value,
-                "command": service.command,
-                "port": service.port,
-                "working_directory": service.working_directory,
-            }
-
-            if include_status:
-                is_running = await service_manager.check_service_running(service)
-                info["is_running"] = is_running
-
-            result.append(info)
-
-        return json.dumps({
-            "services": result,
-            "count": len(result),
-            "repo_path": repo_path,
-        }, indent=2)
+            return ManageServicesResponse(
+                operation=op,
+                success=False,
+                error=f"Unknown operation: {op}"
+            ).model_dump_json(indent=2)
 
     except Exception as e:
-        logger.error(f"Error listing services: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def start_service(
-    ctx: Context,
-    service_name: str,
-    repo_path: Optional[str] = None,
-) -> str:
-    """Start a configured service.
-
-    Args:
-        service_name: Name of the service to start
-        repo_path: Repository path context
-    """
-    service_manager = ctx.request_context.lifespan_context["service_manager"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        # Find the service
-        if repo_path:
-            services = service_manager.get_merged_services(repo_path)
-        else:
-            global_registry = service_manager.load_global_config()
-            services = global_registry.services
-
-        service = None
-        for s in services:
-            if s.name == service_name:
-                service = s
-                break
-
-        if not service:
-            return json.dumps({
-                "error": f"Service '{service_name}' not found",
-                "available_services": [s.name for s in services],
-            }, indent=2)
-
-        # Start the service
-        state = await service_manager.start_service(service, repo_path=repo_path)
-
-        return json.dumps({
-            "service": service_name,
-            "started": state.is_running,
-            "session_id": state.session_id,
-            "error": state.error_message,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error starting service: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def stop_service(
-    ctx: Context,
-    service_name: str,
-) -> str:
-    """Stop a running service.
-
-    Args:
-        service_name: Name of the service to stop
-    """
-    service_manager = ctx.request_context.lifespan_context["service_manager"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        success = await service_manager.stop_service(service_name)
-
-        return json.dumps({
-            "service": service_name,
-            "stopped": success,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error stopping service: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def add_service(
-    ctx: Context,
-    name: str,
-    command: str,
-    priority: str = "optional",
-    display_name: Optional[str] = None,
-    port: Optional[int] = None,
-    working_directory: Optional[str] = None,
-    repo_patterns: Optional[List[str]] = None,
-    scope: str = "global",
-    repo_path: Optional[str] = None,
-) -> str:
-    """Add a new service definition.
-
-    Args:
-        name: Unique service identifier
-        command: Command to start the service
-        priority: Priority level (quiet, optional, preferred, required)
-        display_name: Human-readable name
-        port: Port the service listens on
-        working_directory: Working directory for the service
-        repo_patterns: Glob patterns to match repo paths
-        scope: Where to save ("global" or "repo")
-        repo_path: Required if scope is "repo"
-    """
-    service_manager = ctx.request_context.lifespan_context["service_manager"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        # Create service config
-        service = ServiceConfig(
-            name=name,
-            display_name=display_name,
-            command=command,
-            priority=ServicePriority.from_string(priority),
-            port=port,
-            working_directory=working_directory,
-            repo_patterns=repo_patterns or [],
-        )
-
-        # Add to appropriate registry
-        if scope == "repo":
-            if not repo_path:
-                return json.dumps({
-                    "error": "repo_path required when scope is 'repo'",
-                }, indent=2)
-
-            registry = service_manager.load_repo_config(repo_path)
-            # Remove existing service with same name
-            registry.services = [s for s in registry.services if s.name != name]
-            registry.services.append(service)
-            service_manager.save_repo_config(repo_path, registry)
-        else:
-            registry = service_manager.load_global_config()
-            # Remove existing service with same name
-            registry.services = [s for s in registry.services if s.name != name]
-            registry.services.append(service)
-            service_manager.save_global_config(registry)
-
-        logger.info(f"Added service '{name}' to {scope} config")
-
-        return json.dumps({
-            "service": name,
-            "scope": scope,
-            "added": True,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error adding service: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
+        logger.error(f"Error in manage_services ({request.operation}): {e}")
+        return ManageServicesResponse(
+            operation=request.operation,
+            success=False,
+            error=str(e)
+        ).model_dump_json(indent=2)
 
 
 # ============================================================================
@@ -3755,20 +3953,28 @@ def _setup_manager_callbacks(
 
 
 @mcp.tool()
-async def create_manager(
-    request: CreateManagerRequest,
+async def manage_managers(
+    request: ManageManagersRequest,
     ctx: Context,
 ) -> str:
-    """Create a manager agent for hierarchical task delegation.
+    """Manage manager agents with a single consolidated tool.
 
-    A manager agent coordinates other agents by delegating tasks to workers
-    based on their roles. This enables complex multi-step workflows.
+    Consolidates: create_manager, list_managers, get_manager_info, remove_manager,
+                  add_worker_to_manager, remove_worker_from_manager
+
+    Operations:
+    - create: Create a new manager (requires manager_name)
+    - list: List all managers
+    - get_info: Get info about a manager (requires manager_name)
+    - remove: Remove a manager (requires manager_name)
+    - add_worker: Add a worker to a manager (requires manager_name, worker_name)
+    - remove_worker: Remove a worker from a manager (requires manager_name, worker_name)
 
     Args:
-        request: Manager creation request with name, workers, and strategy
+        request: The manager operation request with operation type and parameters
 
     Returns:
-        JSON with created manager details
+        JSON with operation results
     """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
@@ -3776,118 +3982,206 @@ async def create_manager(
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        # Convert worker roles from strings to SessionRole
-        worker_roles = {}
-        for worker, role_str in request.worker_roles.items():
-            worker_roles[worker] = ManagerSessionRole(role_str)
+        if request.operation == "create":
+            if not request.manager_name:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="manager_name is required for create operation"
+                )
+                return response.model_dump_json(indent=2)
 
-        # Create the manager
-        manager = manager_registry.create_manager(
-            name=request.name,
-            workers=request.workers,
-            delegation_strategy=DelegationStrategy(request.delegation_strategy),
-            worker_roles=worker_roles,
-            metadata=request.metadata,
-        )
+            # Convert worker roles from strings to SessionRole
+            worker_roles = {}
+            for worker, role_str in request.worker_roles.items():
+                worker_roles[worker] = ManagerSessionRole(role_str)
 
-        # Set up execution callbacks
-        _setup_manager_callbacks(manager, terminal, agent_registry, logger)
+            # Create the manager
+            manager = manager_registry.create_manager(
+                name=request.manager_name,
+                workers=request.workers,
+                delegation_strategy=DelegationStrategy(request.delegation_strategy),
+                worker_roles=worker_roles,
+                metadata=request.metadata,
+            )
 
-        logger.info(f"Created manager '{request.name}' with {len(request.workers)} workers")
+            # Set up execution callbacks
+            _setup_manager_callbacks(manager, terminal, agent_registry, logger)
 
-        response = CreateManagerResponse(
-            name=manager.name,
-            workers=manager.workers,
-            delegation_strategy=manager.strategy.value,
-            created=True,
+            logger.info(f"Created manager '{request.manager_name}' with {len(request.workers)} workers")
+
+            response = ManageManagersResponse(
+                operation=request.operation,
+                success=True,
+                data={
+                    "name": manager.name,
+                    "workers": manager.workers,
+                    "delegation_strategy": manager.strategy.value,
+                    "created": True
+                }
+            )
+            return response.model_dump_json(indent=2)
+
+        elif request.operation == "list":
+            managers = manager_registry.list_managers()
+
+            result = []
+            for manager in managers:
+                result.append({
+                    "name": manager.name,
+                    "workers": manager.workers,
+                    "delegation_strategy": manager.strategy.value,
+                    "worker_count": len(manager.workers),
+                })
+
+            logger.info(f"Listed {len(managers)} managers")
+            response = ManageManagersResponse(
+                operation=request.operation,
+                success=True,
+                data={"managers": result, "count": len(result)}
+            )
+            return response.model_dump_json(indent=2)
+
+        elif request.operation == "get_info":
+            if not request.manager_name:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="manager_name is required for get_info operation"
+                )
+                return response.model_dump_json(indent=2)
+
+            manager = manager_registry.get_manager(request.manager_name)
+            if not manager:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error=f"Manager '{request.manager_name}' not found"
+                )
+                return response.model_dump_json(indent=2)
+
+            response = ManageManagersResponse(
+                operation=request.operation,
+                success=True,
+                data={
+                    "name": manager.name,
+                    "workers": manager.workers,
+                    "worker_roles": {k: v.value for k, v in manager.worker_roles.items()},
+                    "delegation_strategy": manager.strategy.value,
+                    "created_at": manager.created_at.isoformat(),
+                    "metadata": manager.metadata,
+                }
+            )
+            return response.model_dump_json(indent=2)
+
+        elif request.operation == "remove":
+            if not request.manager_name:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="manager_name is required for remove operation"
+                )
+                return response.model_dump_json(indent=2)
+
+            removed = manager_registry.remove_manager(request.manager_name)
+
+            if removed:
+                logger.info(f"Removed manager '{request.manager_name}'")
+            else:
+                logger.warning(f"Manager '{request.manager_name}' not found")
+
+            response = ManageManagersResponse(
+                operation=request.operation,
+                success=removed,
+                data={"manager_name": request.manager_name}
+            )
+            return response.model_dump_json(indent=2)
+
+        elif request.operation == "add_worker":
+            if not request.manager_name or not request.worker_name:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="manager_name and worker_name are required for add_worker operation"
+                )
+                return response.model_dump_json(indent=2)
+
+            manager = manager_registry.get_manager(request.manager_name)
+            if not manager:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error=f"Manager '{request.manager_name}' not found"
+                )
+                return response.model_dump_json(indent=2)
+
+            role = ManagerSessionRole(request.worker_role) if request.worker_role else None
+            manager.add_worker(request.worker_name, role)
+
+            logger.info(f"Added worker '{request.worker_name}' to manager '{request.manager_name}'")
+
+            response = ManageManagersResponse(
+                operation=request.operation,
+                success=True,
+                data={
+                    "manager_name": request.manager_name,
+                    "worker_name": request.worker_name,
+                    "role": request.worker_role
+                }
+            )
+            return response.model_dump_json(indent=2)
+
+        elif request.operation == "remove_worker":
+            if not request.manager_name or not request.worker_name:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error="manager_name and worker_name are required for remove_worker operation"
+                )
+                return response.model_dump_json(indent=2)
+
+            manager = manager_registry.get_manager(request.manager_name)
+            if not manager:
+                response = ManageManagersResponse(
+                    operation=request.operation,
+                    success=False,
+                    error=f"Manager '{request.manager_name}' not found"
+                )
+                return response.model_dump_json(indent=2)
+
+            removed = manager.remove_worker(request.worker_name)
+
+            if removed:
+                logger.info(f"Removed worker '{request.worker_name}' from manager '{request.manager_name}'")
+            else:
+                logger.warning(f"Worker '{request.worker_name}' not found in manager '{request.manager_name}'")
+
+            response = ManageManagersResponse(
+                operation=request.operation,
+                success=removed,
+                data={
+                    "manager_name": request.manager_name,
+                    "worker_name": request.worker_name
+                }
+            )
+            return response.model_dump_json(indent=2)
+
+        else:
+            response = ManageManagersResponse(
+                operation=request.operation,
+                success=False,
+                error=f"Unknown operation: {request.operation}"
+            )
+            return response.model_dump_json(indent=2)
+
+    except Exception as e:
+        logger.error(f"Error in manage_managers: {e}")
+        response = ManageManagersResponse(
+            operation=request.operation,
+            success=False,
+            error=str(e)
         )
         return response.model_dump_json(indent=2)
-
-    except Exception as e:
-        logger.error(f"Error creating manager: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def configure_service(
-    ctx: Context,
-    service_name: str,
-    priority: Optional[str] = None,
-    port: Optional[int] = None,
-    command: Optional[str] = None,
-    working_directory: Optional[str] = None,
-    scope: str = "global",
-    repo_path: Optional[str] = None,
-) -> str:
-    """Update configuration for an existing service.
-
-    Args:
-        service_name: Name of the service to configure
-        priority: New priority level
-        port: New port number
-        command: New command
-        working_directory: New working directory
-        scope: Where to save changes ("global" or "repo")
-        repo_path: Required if scope is "repo"
-    """
-    service_manager = ctx.request_context.lifespan_context["service_manager"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        # Load the appropriate registry
-        if scope == "repo":
-            if not repo_path:
-                return json.dumps({
-                    "error": "repo_path required when scope is 'repo'",
-                }, indent=2)
-            registry = service_manager.load_repo_config(repo_path)
-        else:
-            registry = service_manager.load_global_config()
-
-        # Find and update the service
-        found = False
-        for i, service in enumerate(registry.services):
-            if service.name == service_name:
-                found = True
-                updates = {}
-
-                if priority:
-                    updates["priority"] = ServicePriority.from_string(priority)
-                if port is not None:
-                    updates["port"] = port
-                if command:
-                    updates["command"] = command
-                if working_directory:
-                    updates["working_directory"] = working_directory
-
-                # Create updated service
-                updated_data = service.model_dump()
-                updated_data.update(updates)
-                registry.services[i] = ServiceConfig.model_validate(updated_data)
-                break
-
-        if not found:
-            return json.dumps({
-                "error": f"Service '{service_name}' not found in {scope} config",
-            }, indent=2)
-
-        # Save changes
-        if scope == "repo":
-            service_manager.save_repo_config(repo_path, registry)
-        else:
-            service_manager.save_global_config(registry)
-
-        logger.info(f"Updated service '{service_name}' in {scope} config")
-
-        return json.dumps({
-            "service": service_name,
-            "scope": scope,
-            "updated": True,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error configuring service: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
 
 
 @mcp.tool()
@@ -4043,45 +4337,6 @@ async def execute_plan(
         logger.error(f"Error executing plan: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
-
-@mcp.tool()
-async def add_worker_to_manager(
-    request: AddWorkerRequest,
-    ctx: Context,
-) -> str:
-    """Add a worker agent to a manager.
-
-    Args:
-        request: Request with manager name, worker name, and optional role
-
-    Returns:
-        JSON with success status
-    """
-    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        manager = manager_registry.get_manager(request.manager)
-        if not manager:
-            return json.dumps({"error": f"Manager '{request.manager}' not found"}, indent=2)
-
-        role = ManagerSessionRole(request.role) if request.role else None
-        manager.add_worker(request.worker, role)
-
-        logger.info(f"Added worker '{request.worker}' to manager '{request.manager}'")
-
-        return json.dumps({
-            "success": True,
-            "manager": request.manager,
-            "worker": request.worker,
-            "role": request.role,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error adding worker to manager: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
 # ============================================================================
 # ROLE MANAGEMENT TOOLS
 # ============================================================================
@@ -4148,88 +4403,6 @@ async def assign_session_role(
     except Exception as e:
         logger.error(f"Error assigning role: {e}")
         return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def get_inactive_services(
-    ctx: Context,
-    repo_path: str,
-    min_priority: Optional[str] = None,
-) -> str:
-    """Get services that should be running but aren't.
-
-    Args:
-        repo_path: Repository path to check services for
-        min_priority: Minimum priority level to check
-    """
-    service_manager = ctx.request_context.lifespan_context["service_manager"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        priority = None
-        if min_priority:
-            priority = ServicePriority.from_string(min_priority)
-
-        inactive = await service_manager.get_inactive_services(repo_path, priority)
-
-        result = []
-        for service in inactive:
-            result.append({
-                "name": service.name,
-                "display_name": service.effective_display_name,
-                "priority": service.priority.value,
-                "command": service.command,
-            })
-
-        return json.dumps({
-            "inactive_services": result,
-            "count": len(result),
-            "repo_path": repo_path,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error getting inactive services: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def remove_worker_from_manager(
-    request: RemoveWorkerRequest,
-    ctx: Context,
-) -> str:
-    """Remove a worker agent from a manager.
-
-    Args:
-        request: Request with manager and worker names
-
-    Returns:
-        JSON with success status
-    """
-    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        manager = manager_registry.get_manager(request.manager)
-        if not manager:
-            return json.dumps({"error": f"Manager '{request.manager}' not found"}, indent=2)
-
-        removed = manager.remove_worker(request.worker)
-
-        if removed:
-            logger.info(f"Removed worker '{request.worker}' from manager '{request.manager}'")
-        else:
-            logger.warning(f"Worker '{request.worker}' not found in manager '{request.manager}'")
-
-        return json.dumps({
-            "success": removed,
-            "manager": request.manager,
-            "worker": request.worker,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error removing worker from manager: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
 
 @mcp.tool()
 async def get_session_role(
@@ -4298,73 +4471,6 @@ async def remove_session_role(
         logger.error(f"Error removing session role: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
-
-@mcp.tool()
-async def get_manager_info(
-    manager_name: str,
-    ctx: Context,
-) -> str:
-    """Get information about a manager agent.
-
-    Args:
-        manager_name: Name of the manager to get info for
-
-    Returns:
-        JSON with manager details
-    """
-    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        manager = manager_registry.get_manager(manager_name)
-        if not manager:
-            return json.dumps({"error": f"Manager '{manager_name}' not found"}, indent=2)
-
-        response = ManagerInfoResponse(
-            name=manager.name,
-            workers=manager.workers,
-            worker_roles={k: v.value for k, v in manager.worker_roles.items()},
-            delegation_strategy=manager.strategy.value,
-            created_at=manager.created_at.isoformat(),
-            metadata=manager.metadata,
-        )
-        return response.model_dump_json(indent=2)
-
-    except Exception as e:
-        logger.error(f"Error getting manager info: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def list_managers(ctx: Context) -> str:
-    """List all registered manager agents.
-
-    Returns:
-        JSON with list of manager summaries
-    """
-    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        managers = manager_registry.list_managers()
-
-        result = []
-        for manager in managers:
-            result.append({
-                "name": manager.name,
-                "workers": manager.workers,
-                "delegation_strategy": manager.strategy.value,
-                "worker_count": len(manager.workers),
-            })
-
-        logger.info(f"Listed {len(managers)} managers")
-        return json.dumps({"managers": result, "count": len(result)}, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error listing managers: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
 @mcp.tool()
 async def list_session_roles(
     ctx: Context,
@@ -4409,45 +4515,6 @@ async def list_session_roles(
     except Exception as e:
         logger.error(f"Error listing session roles: {e}")
         return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def remove_manager(
-    manager_name: str,
-    ctx: Context,
-) -> str:
-    """Remove a manager agent.
-
-    Args:
-        manager_name: Name of the manager to remove
-
-    Returns:
-        JSON with success status
-    """
-    manager_registry: ManagerRegistry = ctx.request_context.lifespan_context["manager_registry"]
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    try:
-        removed = manager_registry.remove_manager(manager_name)
-
-        if removed:
-            logger.info(f"Removed manager '{manager_name}'")
-        else:
-            logger.warning(f"Manager '{manager_name}' not found")
-
-        return json.dumps({
-            "success": removed,
-            "manager": manager_name,
-        }, indent=2)
-
-    except Exception as e:
-        logger.error(f"Error removing manager: {e}")
-        return json.dumps({
-            "success": False,
-            "manager": manager_name,
-            "error": str(e),
-        }, indent=2)
-
 
 @mcp.tool()
 async def list_available_roles(
@@ -4573,17 +4640,43 @@ async def start_telemetry_dashboard(
 ) -> str:
     """Start a lightweight web server that streams telemetry JSON for external dashboards.
 
+    The dashboard provides:
+    - Real-time agent status cards with SSE updates
+    - Event stream showing notifications and activities
+    - Action buttons for focusing panes and sending commands via API calls
+    - Dark terminal theme matching iTerm2 aesthetic
+
     Args:
         port: Port to run the telemetry server on (default: 9999)
-        duration_seconds: How long to keep the server running (default: 300)
+        duration_seconds: How long to keep the server running (default: 300, 0 = indefinitely)
     """
     telemetry: TelemetryEmitter = ctx.request_context.lifespan_context["telemetry"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
-        message = await _start_telemetry_server(port=port, duration=duration_seconds)
+        message = await start_dashboard(
+            telemetry=telemetry,
+            terminal=_terminal,
+            notification_manager=_notification_manager,
+            port=port,
+            duration=duration_seconds,
+        )
         logger.info(message)
-        return json.dumps({"status": "started", "message": message}, indent=2)
+
+        # Include setup instructions
+        setup_msg = (
+            f"\n\nOpen the dashboard at: http://localhost:{port}\n\n"
+            f"The dashboard uses API calls for agent control:\n"
+            f"  - /api/focus?agent=<name> - Focus an agent's pane\n"
+            f"  - /api/send?agent=<name>&command=<cmd> - Send command to agent"
+        )
+
+        return json.dumps({
+            "status": "started",
+            "message": message,
+            "url": f"http://localhost:{port}",
+            "setup": setup_msg,
+        }, indent=2)
     except Exception as e:
         logger.error(f"Error starting telemetry server: {e}")
         return json.dumps({"error": str(e)}, indent=2)
@@ -4793,104 +4886,244 @@ def _validate_key(key: str) -> None:
 
 
 @mcp.tool()
-async def memory_store(
-    ctx: Context,
-    namespace: List[str],
-    key: str,
-    value: Any,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> str:
-    """Store a value in the cross-agent memory store.
+async def manage_memory(request: ManageMemoryRequest, ctx: Context) -> str:
+    """Unified memory store operations - consolidates 8 memory tools into one.
 
-    Enables agents to share context, learn from past interactions, and maintain
-    long-term knowledge. Uses namespace-based organization to prevent cross-project
-    contamination.
+    Operations:
+    - store: Save a value (requires namespace, key, value; optional metadata)
+    - retrieve: Get a value (requires namespace, key)
+    - search: Full-text search (requires namespace, query; optional limit)
+    - list_keys: List all keys in namespace (requires namespace)
+    - list_namespaces: List namespaces (optional namespace as prefix filter)
+    - delete: Delete a key (requires namespace, key)
+    - clear: Clear namespace (requires namespace, confirm=True)
+    - stats: Get store statistics (no params required)
 
     Args:
-        namespace: Hierarchical namespace (e.g., ["project-x", "build-agent", "memories"])
-        key: Unique key within the namespace
-        value: JSON-serializable value to store (string, dict, list, etc.)
-        metadata: Optional metadata tags (e.g., {"source": "build", "type": "error"})
+        request: ManageMemoryRequest with operation and relevant parameters
 
     Returns:
-        JSON confirmation with stored memory details
+        JSON with operation result
     """
     memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
     logger = ctx.request_context.lifespan_context["logger"]
 
     if not memory_store_instance:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+        return ManageMemoryResponse(
+            operation=request.operation,
+            success=False,
+            error="Memory store not initialized"
+        ).model_dump_json(indent=2)
 
     try:
-        # Validate inputs
-        _validate_namespace(namespace)
-        _validate_key(key)
+        op = request.operation
 
-        # Convert namespace list to tuple for the store
-        ns_tuple = tuple(namespace)
-        await memory_store_instance.store(ns_tuple, key, value, metadata)
-        logger.info(f"Stored memory: {'/'.join(namespace)}/{key}")
+        # STORE operation
+        if op == "store":
+            if not request.namespace:
+                raise ValueError("namespace is required for store operation")
+            if not request.key:
+                raise ValueError("key is required for store operation")
+            if request.value is None:
+                raise ValueError("value is required for store operation")
 
-        return json.dumps({
-            "status": "stored",
-            "namespace": namespace,
-            "key": key,
-            "metadata": metadata or {}
-        }, indent=2)
-    except Exception as e:
-        logger.error(f"Error storing memory: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
+            _validate_namespace(request.namespace)
+            _validate_key(request.key)
+            ns_tuple = tuple(request.namespace)
+            await memory_store_instance.store(ns_tuple, request.key, request.value, request.metadata)
+            logger.info(f"Stored memory: {'/'.join(request.namespace)}/{request.key}")
 
+            return ManageMemoryResponse(
+                operation=op,
+                success=True,
+                data={
+                    "status": "stored",
+                    "namespace": request.namespace,
+                    "key": request.key,
+                    "metadata": request.metadata or {}
+                }
+            ).model_dump_json(indent=2)
 
-@mcp.tool()
-async def memory_retrieve(
-    ctx: Context,
-    namespace: List[str],
-    key: str,
-) -> str:
-    """Retrieve a specific memory by namespace and key.
+        # RETRIEVE operation
+        elif op == "retrieve":
+            if not request.namespace:
+                raise ValueError("namespace is required for retrieve operation")
+            if not request.key:
+                raise ValueError("key is required for retrieve operation")
 
-    Args:
-        namespace: Hierarchical namespace (e.g., ["project-x", "build-agent"])
-        key: The key to retrieve
+            _validate_namespace(request.namespace)
+            _validate_key(request.key)
+            ns_tuple = tuple(request.namespace)
+            memory = await memory_store_instance.retrieve(ns_tuple, request.key)
 
-    Returns:
-        JSON with the memory value and metadata, or null if not found
-    """
-    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
-    logger = ctx.request_context.lifespan_context["logger"]
+            if memory:
+                logger.info(f"Retrieved memory: {'/'.join(request.namespace)}/{request.key}")
+                return ManageMemoryResponse(
+                    operation=op,
+                    success=True,
+                    data={
+                        "found": True,
+                        "key": memory.key,
+                        "value": memory.value,
+                        "timestamp": memory.timestamp.isoformat(),
+                        "metadata": memory.metadata,
+                        "namespace": list(memory.namespace)
+                    }
+                ).model_dump_json(indent=2)
+            else:
+                logger.info(f"Memory not found: {'/'.join(request.namespace)}/{request.key}")
+                return ManageMemoryResponse(
+                    operation=op,
+                    success=True,
+                    data={"found": False, "namespace": request.namespace, "key": request.key}
+                ).model_dump_json(indent=2)
 
-    if not memory_store_instance:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
+        # SEARCH operation
+        elif op == "search":
+            if not request.namespace:
+                raise ValueError("namespace is required for search operation")
+            if not request.query:
+                raise ValueError("query is required for search operation")
 
-    try:
-        # Validate inputs
-        _validate_namespace(namespace)
-        _validate_key(key)
+            _validate_namespace(request.namespace)
+            ns_tuple = tuple(request.namespace)
+            results = await memory_store_instance.search(ns_tuple, request.query, request.limit)
+            logger.info(f"Memory search '{request.query}' in {'/'.join(request.namespace)}: {len(results)} results")
 
-        ns_tuple = tuple(namespace)
-        memory = await memory_store_instance.retrieve(ns_tuple, key)
+            return ManageMemoryResponse(
+                operation=op,
+                success=True,
+                data={
+                    "query": request.query,
+                    "namespace": request.namespace,
+                    "count": len(results),
+                    "results": [
+                        {
+                            "key": r.memory.key,
+                            "value": r.memory.value,
+                            "score": r.score,
+                            "match_context": r.match_context,
+                            "timestamp": r.memory.timestamp.isoformat(),
+                            "metadata": r.memory.metadata,
+                            "namespace": list(r.memory.namespace)
+                        }
+                        for r in results
+                    ]
+                }
+            ).model_dump_json(indent=2)
 
-        if memory:
-            logger.info(f"Retrieved memory: {'/'.join(namespace)}/{key}")
-            return json.dumps({
-                "found": True,
-                "key": memory.key,
-                "value": memory.value,
-                "timestamp": memory.timestamp.isoformat(),
-                "metadata": memory.metadata,
-                "namespace": list(memory.namespace)
-            }, indent=2)
+        # LIST_KEYS operation
+        elif op == "list_keys":
+            if not request.namespace:
+                raise ValueError("namespace is required for list_keys operation")
+
+            _validate_namespace(request.namespace)
+            ns_tuple = tuple(request.namespace)
+            keys = await memory_store_instance.list_keys(ns_tuple)
+            logger.info(f"Listed {len(keys)} keys in namespace {'/'.join(request.namespace)}")
+
+            return ManageMemoryResponse(
+                operation=op,
+                success=True,
+                data={"namespace": request.namespace, "count": len(keys), "keys": keys}
+            ).model_dump_json(indent=2)
+
+        # LIST_NAMESPACES operation
+        elif op == "list_namespaces":
+            if request.namespace:
+                _validate_namespace(request.namespace)
+            prefix_tuple = tuple(request.namespace) if request.namespace else None
+            namespaces = await memory_store_instance.list_namespaces(prefix_tuple)
+            logger.info(f"Listed {len(namespaces)} namespaces")
+
+            return ManageMemoryResponse(
+                operation=op,
+                success=True,
+                data={
+                    "prefix": request.namespace,
+                    "count": len(namespaces),
+                    "namespaces": [list(ns) for ns in namespaces]
+                }
+            ).model_dump_json(indent=2)
+
+        # DELETE operation
+        elif op == "delete":
+            if not request.namespace:
+                raise ValueError("namespace is required for delete operation")
+            if not request.key:
+                raise ValueError("key is required for delete operation")
+
+            _validate_namespace(request.namespace)
+            _validate_key(request.key)
+            ns_tuple = tuple(request.namespace)
+            deleted = await memory_store_instance.delete(ns_tuple, request.key)
+
+            if deleted:
+                logger.info(f"Deleted memory: {'/'.join(request.namespace)}/{request.key}")
+            else:
+                logger.info(f"Memory not found for deletion: {'/'.join(request.namespace)}/{request.key}")
+
+            return ManageMemoryResponse(
+                operation=op,
+                success=True,
+                data={
+                    "deleted": deleted,
+                    "namespace": request.namespace,
+                    "key": request.key,
+                    "message": None if deleted else "Memory not found"
+                }
+            ).model_dump_json(indent=2)
+
+        # CLEAR operation
+        elif op == "clear":
+            if not request.namespace:
+                raise ValueError("namespace is required for clear operation")
+
+            _validate_namespace(request.namespace)
+
+            if not request.confirm:
+                return ManageMemoryResponse(
+                    operation=op,
+                    success=False,
+                    error="Confirmation required. Set confirm=True to clear namespace. This permanently deletes all memories.",
+                    data={"namespace": request.namespace}
+                ).model_dump_json(indent=2)
+
+            ns_tuple = tuple(request.namespace)
+            count = await memory_store_instance.clear_namespace(ns_tuple)
+            logger.info(f"Cleared namespace {'/'.join(request.namespace)}: {count} memories deleted")
+
+            return ManageMemoryResponse(
+                operation=op,
+                success=True,
+                data={"cleared": True, "namespace": request.namespace, "deleted_count": count}
+            ).model_dump_json(indent=2)
+
+        # STATS operation
+        elif op == "stats":
+            stats = await memory_store_instance.get_stats()
+            logger.info("Retrieved memory store stats")
+
+            return ManageMemoryResponse(
+                operation=op,
+                success=True,
+                data=stats
+            ).model_dump_json(indent=2)
+
         else:
-            logger.info(f"Memory not found: {'/'.join(namespace)}/{key}")
-            return json.dumps({
-                "found": False,
-                "namespace": namespace,
-                "key": key
-            }, indent=2)
+            return ManageMemoryResponse(
+                operation=op,
+                success=False,
+                error=f"Unknown operation: {op}"
+            ).model_dump_json(indent=2)
+
     except Exception as e:
-        logger.error(f"Error retrieving memory: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
+        logger.error(f"Error in manage_memory ({request.operation}): {e}")
+        return ManageMemoryResponse(
+            operation=request.operation,
+            success=False,
+            error=str(e)
+        ).model_dump_json(indent=2)
 
 
 @mcp.tool()
@@ -4954,62 +5187,6 @@ async def get_workflow_event_history(
 
 
 @mcp.tool()
-async def memory_search(
-    ctx: Context,
-    namespace: List[str],
-    query: str,
-    limit: int = 10,
-) -> str:
-    """Search for memories matching a query using full-text search.
-
-    Uses FTS5 full-text search for efficient semantic matching across
-    keys, values, and metadata within the specified namespace.
-
-    Args:
-        namespace: Namespace prefix to search within (can be partial for broader search)
-        query: Search query string (e.g., "npm build errors", "deployment config")
-        limit: Maximum number of results to return (default: 10)
-
-    Returns:
-        JSON array of matching memories with relevance scores
-    """
-    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    if not memory_store_instance:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
-
-    try:
-        # Validate namespace (query doesn't need validation - it's for search)
-        _validate_namespace(namespace)
-
-        ns_tuple = tuple(namespace)
-        results = await memory_store_instance.search(ns_tuple, query, limit)
-        logger.info(f"Memory search '{query}' in {'/'.join(namespace)}: {len(results)} results")
-
-        return json.dumps({
-            "query": query,
-            "namespace": namespace,
-            "count": len(results),
-            "results": [
-                {
-                    "key": r.memory.key,
-                    "value": r.memory.value,
-                    "score": r.score,
-                    "match_context": r.match_context,
-                    "timestamp": r.memory.timestamp.isoformat(),
-                    "metadata": r.memory.metadata,
-                    "namespace": list(r.memory.namespace)
-                }
-                for r in results
-            ]
-        }, indent=2)
-    except Exception as e:
-        logger.error(f"Error searching memories: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
 async def subscribe_to_output_pattern(
     ctx: Context,
     pattern: str,
@@ -5059,196 +5236,6 @@ async def subscribe_to_output_pattern(
         return json.dumps({"error": f"Invalid regex pattern: {e}"}, indent=2)
     except Exception as e:
         logger.error(f"Error creating pattern subscription: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def memory_list_keys(
-    ctx: Context,
-    namespace: List[str],
-) -> str:
-    """List all keys in a namespace.
-
-    Args:
-        namespace: Hierarchical namespace to list keys from
-
-    Returns:
-        JSON array of keys in the namespace
-    """
-    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    if not memory_store_instance:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
-
-    try:
-        _validate_namespace(namespace)
-        ns_tuple = tuple(namespace)
-        keys = await memory_store_instance.list_keys(ns_tuple)
-        logger.info(f"Listed {len(keys)} keys in namespace {'/'.join(namespace)}")
-
-        return json.dumps({
-            "namespace": namespace,
-            "count": len(keys),
-            "keys": keys
-        }, indent=2)
-    except Exception as e:
-        logger.error(f"Error listing memory keys: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def memory_delete(
-    ctx: Context,
-    namespace: List[str],
-    key: str,
-) -> str:
-    """Delete a memory by namespace and key.
-
-    Args:
-        namespace: Hierarchical namespace
-        key: The key to delete
-
-    Returns:
-        JSON confirmation of deletion
-    """
-    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    if not memory_store_instance:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
-
-    try:
-        _validate_namespace(namespace)
-        _validate_key(key)
-        ns_tuple = tuple(namespace)
-        deleted = await memory_store_instance.delete(ns_tuple, key)
-
-        if deleted:
-            logger.info(f"Deleted memory: {'/'.join(namespace)}/{key}")
-            return json.dumps({
-                "deleted": True,
-                "namespace": namespace,
-                "key": key
-            }, indent=2)
-        else:
-            logger.info(f"Memory not found for deletion: {'/'.join(namespace)}/{key}")
-            return json.dumps({
-                "deleted": False,
-                "namespace": namespace,
-                "key": key,
-                "message": "Memory not found"
-            }, indent=2)
-    except Exception as e:
-        logger.error(f"Error deleting memory: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def memory_list_namespaces(
-    ctx: Context,
-    prefix: Optional[List[str]] = None,
-) -> str:
-    """List all namespaces in the memory store.
-
-    Args:
-        prefix: Optional namespace prefix to filter by
-
-    Returns:
-        JSON array of namespace tuples
-    """
-    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    if not memory_store_instance:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
-
-    try:
-        if prefix:
-            _validate_namespace(prefix)
-        prefix_tuple = tuple(prefix) if prefix else None
-        namespaces = await memory_store_instance.list_namespaces(prefix_tuple)
-        logger.info(f"Listed {len(namespaces)} namespaces")
-
-        return json.dumps({
-            "prefix": prefix,
-            "count": len(namespaces),
-            "namespaces": [list(ns) for ns in namespaces]
-        }, indent=2)
-    except Exception as e:
-        logger.error(f"Error listing namespaces: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def memory_clear_namespace(
-    ctx: Context,
-    namespace: List[str],
-    confirm: bool = False,
-) -> str:
-    """Clear all memories in a namespace.
-
-    WARNING: This permanently deletes all memories in the specified namespace.
-    You must set confirm=True to actually perform the deletion.
-
-    Args:
-        namespace: Hierarchical namespace to clear
-        confirm: Must be True to confirm deletion (safety measure)
-
-    Returns:
-        JSON with count of deleted memories
-    """
-    memory_store_instance = ctx.request_context.lifespan_context.get("memory_store")
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    if not memory_store_instance:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
-
-    try:
-        _validate_namespace(namespace)
-
-        if not confirm:
-            return json.dumps({
-                "error": "Confirmation required",
-                "message": "Set confirm=True to clear namespace. This permanently deletes all memories.",
-                "namespace": namespace
-            }, indent=2)
-
-        ns_tuple = tuple(namespace)
-        count = await memory_store_instance.clear_namespace(ns_tuple)
-        logger.info(f"Cleared namespace {'/'.join(namespace)}: {count} memories deleted")
-
-        return json.dumps({
-            "cleared": True,
-            "namespace": namespace,
-            "deleted_count": count
-        }, indent=2)
-    except Exception as e:
-        logger.error(f"Error clearing namespace: {e}")
-        return json.dumps({"error": str(e)}, indent=2)
-
-
-@mcp.tool()
-async def memory_stats(
-    ctx: Context,
-) -> str:
-    """Get statistics about the memory store.
-
-    Returns:
-        JSON with memory store statistics (total memories, namespaces, etc.)
-    """
-    memory_store = ctx.request_context.lifespan_context.get("memory_store")
-    logger = ctx.request_context.lifespan_context["logger"]
-
-    if not memory_store:
-        return json.dumps({"error": "Memory store not initialized"}, indent=2)
-
-    try:
-        stats = await memory_store.get_stats()
-        logger.info("Retrieved memory store stats")
-        return json.dumps(stats, indent=2)
-    except Exception as e:
-        logger.error(f"Error getting memory stats: {e}")
         return json.dumps({"error": str(e)}, indent=2)
 
 

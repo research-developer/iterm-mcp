@@ -1,0 +1,415 @@
+/* iTerm MCP Dashboard - Dark Terminal Theme */
+
+:root {
+    /* Base colors */
+    --bg-primary: #1e1e1e;
+    --bg-secondary: #252526;
+    --bg-tertiary: #2d2d30;
+    --bg-hover: #3e3e42;
+
+    /* Text colors */
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0a0;
+    --text-muted: #6e6e6e;
+
+    /* Status colors */
+    --status-success: #4ec9b0;
+    --status-warning: #dcdcaa;
+    --status-error: #f14c4c;
+    --status-info: #569cd6;
+    --status-blocked: #c586c0;
+
+    /* Accent colors */
+    --accent-primary: #569cd6;
+    --accent-secondary: #4ec9b0;
+    --border-color: #3e3e42;
+
+    /* Font */
+    --font-mono: 'SF Mono', 'Monaco', 'Consolas', 'Liberation Mono', 'Courier New', monospace;
+
+    /* Spacing */
+    --spacing-xs: 4px;
+    --spacing-sm: 8px;
+    --spacing-md: 12px;
+    --spacing-lg: 16px;
+    --spacing-xl: 24px;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.5;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+}
+
+/* Dashboard Layout */
+.dashboard {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    padding: var(--spacing-md);
+}
+
+/* Header */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: var(--spacing-md);
+}
+
+.title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent-primary);
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-size: 12px;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    transition: background-color 0.3s ease;
+}
+
+.status-dot.connected {
+    background-color: var(--status-success);
+    box-shadow: 0 0 6px var(--status-success);
+}
+
+.status-dot.disconnected {
+    background-color: var(--status-error);
+}
+
+.status-dot.reconnecting {
+    background-color: var(--status-warning);
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Main Content */
+.main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-lg);
+    overflow: hidden;
+}
+
+/* Sections */
+.section {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.section-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    padding: var(--spacing-sm) var(--spacing-md);
+    background-color: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.clear-btn {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 8px;
+    background: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.clear-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+/* Agent Grid */
+.agents-section {
+    flex: 0 0 auto;
+}
+
+.agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--spacing-md);
+    padding: var(--spacing-md);
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.no-agents, .no-teams {
+    color: var(--text-muted);
+    font-style: italic;
+    padding: var(--spacing-md);
+    text-align: center;
+}
+
+/* Agent Card */
+.agent-card {
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: var(--spacing-md);
+    transition: all 0.2s ease;
+}
+
+.agent-card:hover {
+    border-color: var(--accent-primary);
+    background-color: var(--bg-hover);
+}
+
+.agent-header {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-sm);
+}
+
+.agent-status-icon {
+    font-size: 14px;
+}
+
+.agent-name {
+    font-weight: 600;
+    color: var(--accent-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-details {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-bottom: var(--spacing-sm);
+}
+
+.agent-details > div {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-actions {
+    display: flex;
+    gap: var(--spacing-sm);
+    margin-top: var(--spacing-sm);
+    padding-top: var(--spacing-sm);
+    border-top: 1px solid var(--border-color);
+}
+
+.action-btn {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 4px 8px;
+    text-align: center;
+    text-decoration: none;
+    border-radius: 3px;
+    transition: all 0.2s ease;
+}
+
+.focus-btn {
+    background-color: var(--accent-primary);
+    color: var(--bg-primary);
+}
+
+.focus-btn:hover {
+    background-color: #6bb3f0;
+}
+
+.send-btn {
+    background-color: transparent;
+    border: 1px solid var(--accent-primary);
+    color: var(--accent-primary);
+}
+
+.send-btn:hover {
+    background-color: var(--accent-primary);
+    color: var(--bg-primary);
+}
+
+/* Teams Section */
+.teams-section {
+    flex: 0 0 auto;
+}
+
+.teams-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-md);
+    max-height: 100px;
+    overflow-y: auto;
+}
+
+.team-item {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    background-color: var(--bg-tertiary);
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-radius: 3px;
+    font-size: 12px;
+}
+
+.team-icon {
+    font-size: 12px;
+}
+
+.team-name {
+    color: var(--text-primary);
+}
+
+.team-members {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+/* Event Stream */
+.events-section {
+    flex: 1;
+    min-height: 150px;
+    display: flex;
+    flex-direction: column;
+}
+
+.event-stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--spacing-sm);
+    font-size: 11px;
+}
+
+.event-item {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    gap: var(--spacing-sm);
+    align-items: flex-start;
+}
+
+.event-item:last-child {
+    border-bottom: none;
+}
+
+.event-item:hover {
+    background-color: var(--bg-hover);
+}
+
+.event-time {
+    color: var(--text-muted);
+    flex-shrink: 0;
+    font-size: 10px;
+}
+
+.event-level {
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.event-level.info { color: var(--status-info); }
+.event-level.warning { color: var(--status-warning); }
+.event-level.error { color: var(--status-error); }
+.event-level.success { color: var(--status-success); }
+.event-level.blocked { color: var(--status-blocked); }
+
+.event-agent {
+    color: var(--accent-secondary);
+    flex-shrink: 0;
+    font-weight: 600;
+}
+
+.event-message {
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
+/* Footer */
+.footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: var(--spacing-md);
+    border-top: 1px solid var(--border-color);
+    margin-top: var(--spacing-md);
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.stats {
+    display: flex;
+    gap: var(--spacing-lg);
+}
+
+.stat {
+    display: flex;
+    gap: var(--spacing-xs);
+}
+
+.stat-value {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--bg-tertiary);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--border-color);
+}
+
+/* Responsive */
+@media (max-width: 400px) {
+    .agent-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .stats {
+        flex-direction: column;
+        gap: var(--spacing-xs);
+    }
+}

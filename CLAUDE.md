@@ -231,6 +231,8 @@ git worktree remove .worktrees/<name>
 ### MCP Server Implementation
 
 #### Tools Provided
+
+**Core Terminal Tools:**
 - **write_to_terminal**: Send commands to named sessions
 - **read_terminal_output**: Read output from terminal sessions (with line limit options)
 - **send_control_character**: Send Ctrl+C and other control sequences
@@ -240,6 +242,17 @@ git worktree remove .worktrees/<name>
 - **create_layout**: Create a new window with predefined pane arrangement
 - **get_session_by_persistent_id**: Reconnect to existing sessions by persistent ID
 - **set_session_max_lines**: Configure output line limits per session
+
+**Consolidated Management Tools (operation-based):**
+- **manage_memory**: Memory store operations (store, retrieve, search, list_keys, delete, list_namespaces, clear_namespace, stats)
+- **manage_services**: Service management (list, start, stop, add, configure, get_inactive)
+- **manage_session_lock**: Session locking (lock, unlock, request_access)
+- **manage_teams**: Team operations (create, list, remove, assign_agent, remove_agent)
+- **manage_managers**: Manager operations (create, list, get_info, remove, add_worker, remove_worker)
+
+**Orchestration Tools:**
+- **delegate_task**: Delegate tasks through managers to workers
+- **execute_plan**: Execute multi-step task plans
 
 #### Key Features
 - Named sessions with persistent identity across restarts

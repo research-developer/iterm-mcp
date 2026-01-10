@@ -212,6 +212,11 @@ class ItermSession:
         self._monitor_task = None
         self._monitor_callbacks = []
         self._last_screen_update = time.time()
+
+        # Suspension state
+        self._suspended = False
+        self._suspended_at: Optional[datetime] = None
+        self._suspended_by: Optional[str] = None
     
     @property
     def id(self) -> str:
@@ -260,7 +265,99 @@ class ItermSession:
                 f"Error checking is_processing for session {self.id} ({self._name}): {str(e)}"
             )
             return False
-    
+
+    @property
+    def is_suspended(self) -> bool:
+        """Check if the session has a suspended process (via Ctrl+Z)."""
+        return self._suspended
+
+    @property
+    def suspended_at(self) -> Optional[datetime]:
+        """Get the timestamp when the session was suspended."""
+        return self._suspended_at
+
+    @property
+    def suspended_by(self) -> Optional[str]:
+        """Get the agent that suspended this session."""
+        return self._suspended_by
+
+    @trace_operation("session.suspend")
+    async def suspend(self, agent: Optional[str] = None) -> None:
+        """Suspend the current foreground process by sending Ctrl+Z.
+
+        This sends a SIGTSTP signal to the foreground process, pausing it.
+        The process can be resumed later with resume().
+
+        Args:
+            agent: Optional name of the agent suspending this session
+
+        Raises:
+            RuntimeError: If the session is already suspended
+        """
+        if self._suspended:
+            raise RuntimeError(
+                f"Session {self.id} ({self._name}) is already suspended"
+            )
+
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            suspended_by=agent or "unknown",
+        )
+
+        # Send Ctrl+Z to suspend
+        await self.send_control_character("z")
+
+        self._suspended = True
+        self._suspended_at = datetime.now(timezone.utc)
+        self._suspended_by = agent
+
+        if self.logger:
+            self.logger.log_control_character("Z (suspend)")
+
+        add_span_event("session_suspended", {
+            "agent": agent or "unknown",
+            "timestamp": self._suspended_at.isoformat(),
+        })
+
+    @trace_operation("session.resume")
+    async def resume(self) -> None:
+        """Resume the most recently suspended process by sending 'fg'.
+
+        This brings the most recently suspended job back to the foreground.
+
+        Raises:
+            RuntimeError: If the session is not suspended
+        """
+        if not self._suspended:
+            raise RuntimeError(
+                f"Session {self.id} ({self._name}) is not suspended"
+            )
+
+        add_span_attributes(
+            session_id=self.id,
+            session_name=self._name,
+            was_suspended_by=self._suspended_by or "unknown",
+        )
+
+        suspended_duration = None
+        if self._suspended_at:
+            suspended_duration = (datetime.now(timezone.utc) - self._suspended_at).total_seconds()
+
+        # Send 'fg' to resume
+        await self.session.async_send_text("fg\n")
+
+        self._suspended = False
+        self._suspended_at = None
+        self._suspended_by = None
+
+        if self.logger:
+            self.logger.log_text_sent("fg", executed=True)
+
+        add_span_event("session_resumed", {
+            "suspended_duration_seconds": suspended_duration,
+        })
+
     def set_logger(self, logger: ItermSessionLogger) -> None:
         """Set the logger for this session.
         
