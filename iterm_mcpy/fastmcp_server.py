@@ -1035,6 +1035,226 @@ async def execute_cascade_request(
 # SESSION MANAGEMENT TOOLS
 # ============================================================================
 
+# Path shortcuts for compact display
+PATH_SHORTCUTS = {
+    os.path.expanduser("~/MCP/iterm-mcp"): "$ITERM_MCP",
+    os.path.expanduser("~/research-developer"): "$MY_REPOS",
+    os.path.expanduser("~"): "$HOME",
+}
+
+
+def _apply_shortcuts(path: Optional[str], shortcuts: Dict[str, str]) -> Optional[str]:
+    """Apply path shortcuts for compact display.
+
+    Args:
+        path: Full path to shorten
+        shortcuts: Dict mapping full paths to shortcut names
+
+    Returns:
+        Shortened path with shortcuts applied
+    """
+    if not path:
+        return None
+
+    # Sort by length (longest first) to match most specific paths first
+    sorted_shortcuts = sorted(shortcuts.items(), key=lambda x: -len(x[0]))
+
+    for full_path, shortcut in sorted_shortcuts:
+        if path.startswith(full_path):
+            remainder = path[len(full_path):]
+            if remainder.startswith("/"):
+                remainder = remainder[1:]
+            if remainder:
+                return f"{shortcut}/{remainder}"
+            return shortcut
+
+    return path
+
+
+def _humanize_time(dt: Optional[datetime]) -> str:
+    """Convert datetime to human-readable relative time.
+
+    Args:
+        dt: Datetime to convert
+
+    Returns:
+        Human-readable string like "2m", "1h", "3d"
+    """
+    if not dt:
+        return ""
+
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    delta = now - dt
+    seconds = int(delta.total_seconds())
+
+    if seconds < 60:
+        return "now"
+    elif seconds < 3600:
+        return f"{seconds // 60}m"
+    elif seconds < 86400:
+        return f"{seconds // 3600}h"
+    else:
+        return f"{seconds // 86400}d"
+
+
+def _extract_last_message(screen_content: str) -> Optional[str]:
+    """Extract the last Claude message from terminal output.
+
+    Looks for Claude output markers and extracts the most recent message.
+
+    Args:
+        screen_content: Recent terminal output
+
+    Returns:
+        Truncated last message or None
+    """
+    if not screen_content:
+        return None
+
+    # Look for Claude output patterns (⏺ marker or similar)
+    lines = screen_content.strip().split('\n')
+
+    # Find the last Claude output line (starts with ⏺ or has certain patterns)
+    for line in reversed(lines):
+        line = line.strip()
+        # Skip empty lines and prompts
+        if not line or line.startswith('❯') or line.startswith('$'):
+            continue
+        # Skip tool calls and system output
+        if '(MCP)' in line or 'Bash(' in line or 'Read(' in line:
+            continue
+        # Skip lines that are just status indicators
+        if line.startswith('⏺') and '(' in line and ')' in line:
+            continue
+        # This looks like actual Claude output
+        if len(line) > 10:  # Meaningful content
+            # Truncate and add ellipsis
+            if len(line) > 40:
+                return f'"{line[:37]}..."'
+            return f'"{line}"'
+
+    return None
+
+
+STATUS_ICONS = {
+    "processing": "🔄",
+    "locked": "🔒",
+    "agent": "🤖",
+    "monitoring": "👁",
+    "suspended": "⏸",
+    "idle": "·",
+}
+
+
+def _get_status_icon(session_info: SessionInfo) -> str:
+    """Get status icon for a session."""
+    if session_info.is_processing:
+        return STATUS_ICONS["processing"]
+    if session_info.suspended:
+        return STATUS_ICONS["suspended"]
+    if session_info.locked:
+        return STATUS_ICONS["locked"]
+    if session_info.agent:
+        return STATUS_ICONS["agent"]
+    return STATUS_ICONS["idle"]
+
+
+def _format_grouped_output(
+    sessions: List[SessionInfo],
+    shortcuts: bool = True,
+    include_message: bool = True,
+) -> str:
+    """Format sessions grouped by directory.
+
+    Args:
+        sessions: List of SessionInfo objects
+        shortcuts: Whether to apply path shortcuts
+        include_message: Whether to include last message
+
+    Returns:
+        Formatted string with sessions grouped by directory
+    """
+    if not sessions:
+        return "No sessions found"
+
+    # Apply shortcuts
+    shortcut_map = PATH_SHORTCUTS if shortcuts else {}
+
+    # Group sessions by base directory
+    groups: Dict[str, List[SessionInfo]] = {}
+    for session in sessions:
+        # Get base directory (project root, not full cwd)
+        cwd = session.cwd
+        if cwd:
+            # Find the project root (stop at common project directories)
+            base_dir = _apply_shortcuts(cwd, shortcut_map) or cwd
+            # For worktrees, group under the parent project
+            if "/.worktrees/" in (cwd or ""):
+                parts = cwd.split("/.worktrees/")
+                base_dir = _apply_shortcuts(parts[0], shortcut_map) or parts[0]
+        else:
+            base_dir = "(unknown)"
+
+        if base_dir not in groups:
+            groups[base_dir] = []
+        groups[base_dir].append(session)
+
+    # Sort groups by number of sessions (descending)
+    sorted_groups = sorted(groups.items(), key=lambda x: (-len(x[1]), x[0]))
+
+    # Count unique directories for header
+    dir_count = len(sorted_groups)
+
+    # Build output
+    lines = [f"SESSIONS ({len(sessions)} total, {dir_count} directories)"]
+    lines.append("─" * 80)
+
+    for base_dir, group_sessions in sorted_groups:
+        # Group header
+        lines.append(f"\n{base_dir} ({len(group_sessions)} sessions)")
+
+        for session in group_sessions:
+            # Session name (truncate to 18 chars)
+            name = session.name
+            if len(name) > 18:
+                name = name[:15] + "..."
+
+            # Relative path within group (show worktree or ".")
+            rel_path = "."
+            if session.cwd and "/.worktrees/" in session.cwd:
+                parts = session.cwd.split("/.worktrees/")
+                if len(parts) > 1:
+                    rel_path = f".worktrees/{parts[1][:12]}"
+            elif session.cwd:
+                # For non-worktree, show relative to base
+                cwd_short = _apply_shortcuts(session.cwd, shortcut_map)
+                if cwd_short and cwd_short != base_dir:
+                    # Get the part after base_dir
+                    if cwd_short.startswith(base_dir + "/"):
+                        rel_path = cwd_short[len(base_dir) + 1:]
+
+            # Status icon
+            status = _get_status_icon(session)
+
+            # Time since last activity
+            activity = _humanize_time(session.last_activity) if session.last_activity else ""
+
+            # Last message or git branch
+            extra = ""
+            if include_message and session.last_message:
+                extra = session.last_message[:40]
+            elif session.git_branch:
+                extra = f"[{session.git_branch}]"
+            elif session.tags:
+                extra = f"[{', '.join(session.tags[:2])}]"
+
+            # Format line: "  name     rel_path     status  time  extra"
+            line = f"  {name:<18}  {rel_path:<22}  {status:<4}  {activity:<5}  {extra}"
+            lines.append(line.rstrip())
+
+    return "\n".join(lines)
+
+
 def _format_compact_session(session_info: SessionInfo) -> str:
     """Format a session in compact one-line format.
 
@@ -1070,7 +1290,10 @@ async def list_sessions(
     match: str = "any",
     locked: Optional[bool] = None,
     locked_by: Optional[str] = None,
-    format: str = "full",
+    format: str = "grouped",
+    group_by: str = "directory",
+    include_message: bool = True,
+    shortcuts: bool = True,
 ) -> str:
     """List all available terminal sessions with agent info.
 
@@ -1081,7 +1304,10 @@ async def list_sessions(
         match: How to match multiple tags: 'any' (OR) or 'all' (AND)
         locked: Filter by lock status (True = only locked, False = only unlocked)
         locked_by: Filter by lock owner
-        format: Output format: 'full' for JSON, 'compact' for one-line-per-session
+        format: Output format: 'grouped' (default, by directory), 'compact' (flat list), 'full'/'json' (full JSON)
+        group_by: How to group sessions: 'directory' (by cwd), 'team', or 'none'
+        include_message: Include last Claude message in output
+        shortcuts: Apply path shortcuts ($MY_REPOS, etc.)
     """
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
@@ -1164,6 +1390,40 @@ async def list_sessions(
             if lock_owner != locked_by:
                 continue
 
+        # Gather extended session context (for grouped format)
+        session_cwd = None
+        last_message = None
+        last_activity_dt = None
+        process_name = None
+
+        # Gather extended info for all formats (can be slow for many sessions)
+        if format in ("grouped", "compact", "full", "json"):
+            try:
+                # Get CWD from session
+                session_cwd = await session.get_cwd()
+            except Exception as e:
+                logger.debug(f"Error getting CWD for session {session.id}: {e}")
+
+            try:
+                # Get screen content for last message
+                screen_content = await session.get_screen_contents(max_lines=15)
+                last_message = _extract_last_message(screen_content)
+            except Exception as e:
+                logger.debug(f"Error getting screen for session {session.id}: {e}")
+
+            # Convert last_update_time to datetime
+            try:
+                last_update = getattr(session, "last_update_time", None)
+                if last_update:
+                    last_activity_dt = datetime.fromtimestamp(last_update)
+            except Exception:
+                pass
+
+            # Extract process name from session name (e.g., "name (process)")
+            name = session.name
+            if "(" in name and name.endswith(")"):
+                process_name = name[name.rfind("(") + 1:-1]
+
         # Build SessionInfo
         session_info = SessionInfo(
             session_id=session.id,
@@ -1181,13 +1441,22 @@ async def list_sessions(
             locked_by=lock_owner,
             locked_at=lock_time,
             pending_access_requests=pending_requests,
+            # Extended context
+            cwd=session_cwd,
+            last_activity=last_activity_dt,
+            last_message=last_message,
+            process_name=process_name,
         )
         result.append(session_info)
 
     logger.info(f"Found {len(result)} active sessions")
 
     # Format output
-    if format == "compact":
+    if format == "grouped":
+        # New grouped format (default)
+        return _format_grouped_output(result, shortcuts=shortcuts, include_message=include_message)
+    elif format == "compact":
+        # Legacy compact format (flat list)
         lines = [_format_compact_session(s) for s in result]
         return "\n".join(lines) if lines else "No sessions found"
     else:

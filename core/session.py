@@ -217,6 +217,10 @@ class ItermSession:
         self._suspended = False
         self._suspended_at: Optional[datetime] = None
         self._suspended_by: Optional[str] = None
+
+        # CWD tracking
+        self._cached_cwd: Optional[str] = None
+        self._cwd_updated_at: float = 0
     
     @property
     def id(self) -> str:
@@ -788,6 +792,102 @@ class ItermSession:
     def last_update_time(self) -> float:
         """Get the timestamp of the last screen update."""
         return self._last_screen_update
+
+    @property
+    def cached_cwd(self) -> Optional[str]:
+        """Get the cached current working directory."""
+        return self._cached_cwd
+
+    def update_cwd_cache(self, cwd: str) -> None:
+        """Update the cached CWD (called when cd commands are detected)."""
+        self._cached_cwd = cwd
+        self._cwd_updated_at = time.time()
+
+    def parse_prompt_cwd(self, screen_content: str) -> Optional[str]:
+        """Parse CWD from terminal prompt.
+
+        Tries multiple common prompt patterns to extract the current directory.
+
+        Args:
+            screen_content: Recent terminal output
+
+        Returns:
+            Extracted CWD path or None if not found
+        """
+        # Patterns to try (most specific first)
+        patterns = [
+            # MaxBook :: ~/path 123 » or (env) MaxBook :: ~/path 123 »
+            r"(?:\([^)]+\)\s+)?MaxBook\s+::\s+([~/][^\s]+)\s+\d+\s*»",
+            # Starship git prompt: ~/path on branch ⇣⇡ *? ── (with status line)
+            r"^([~/][^\s]+)\s+on\s+[^\s]+\s*(?:⇣|⇡|\*|\?|!|\d)*\s*─",
+            # Git prompt: ~/path on branch (simple)
+            r"^([~/][^\s]+)\s+on\s+\S+",
+            # Claude Code header: ▘▘ ▝▝  ~/path
+            r"▝▝\s+([~/][^\s]+)",
+            # Standard PS1: user@host:~/path$
+            r"@[^:]+:([~/][^\s$]+)\$",
+            # Simple: ~/path followed by prompt char
+            r"^([~/][^\s]+)\s*(?:»|>|❯|\$)\s*$",
+            # Path in brackets [/path/to/dir]
+            r"\[(/[^\]]+)\]",
+            # Absolute path at start (fallback)
+            r"^(/Users/[^\s]+?)(?:\s|$)",
+        ]
+
+        # Get last few lines of content
+        lines = screen_content.strip().split('\n')
+        recent_lines = lines[-10:] if len(lines) > 10 else lines
+
+        for line in reversed(recent_lines):
+            for pattern in patterns:
+                match = re.search(pattern, line)
+                if match:
+                    cwd = match.group(1)
+                    # Expand ~ to full path
+                    if cwd.startswith('~'):
+                        cwd = os.path.expanduser(cwd)
+                    return cwd
+
+        return None
+
+    async def get_cwd(self, force_refresh: bool = False) -> Optional[str]:
+        """Get the current working directory of the session.
+
+        Uses iTerm2's native async_get_variable("path") API when available,
+        falls back to prompt parsing if that fails.
+
+        Args:
+            force_refresh: If True, always try to fetch fresh value
+
+        Returns:
+            Current working directory path or None
+        """
+        # If we have a recent cached value (< 30 seconds) and not forcing refresh, use it
+        if not force_refresh and self._cached_cwd:
+            if time.time() - self._cwd_updated_at < 30:
+                return self._cached_cwd
+
+        # Try iTerm2's native API first (requires shell integration)
+        try:
+            cwd = await self.session.async_get_variable("path")
+            if cwd:
+                self.update_cwd_cache(cwd)
+                return cwd
+        except Exception as e:
+            _logger.debug(f"async_get_variable('path') failed: {e}")
+
+        # Fallback: parse from terminal prompt
+        try:
+            screen_content = await self.get_screen_contents(max_lines=20)
+            parsed_cwd = self.parse_prompt_cwd(screen_content)
+            if parsed_cwd:
+                self.update_cwd_cache(parsed_cwd)
+                return parsed_cwd
+        except Exception as e:
+            _logger.debug(f"Error parsing CWD from screen: {e}")
+
+        # Return cached value even if stale
+        return self._cached_cwd
 
     async def set_background_color(self, red: int, green: int, blue: int, alpha: int = 255) -> None:
         """Set the background color of the session.

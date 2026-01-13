@@ -933,6 +933,13 @@ class SessionInfo(BaseModel):
     locked_at: Optional[datetime] = Field(default=None, description="When the lock was acquired")
     pending_access_requests: int = Field(default=0, description="Number of pending access requests")
 
+    # Extended session context (for compact display)
+    cwd: Optional[str] = Field(default=None, description="Current working directory")
+    last_activity: Optional[datetime] = Field(default=None, description="Time of last output change")
+    last_message: Optional[str] = Field(default=None, description="Last Claude response (truncated)")
+    git_branch: Optional[str] = Field(default=None, description="Current git branch if in a repo")
+    process_name: Optional[str] = Field(default=None, description="Running process name")
+
 
 class ListSessionsRequest(BaseModel):
     """Request parameters for list_sessions with filtering."""
@@ -950,10 +957,20 @@ class ListSessionsRequest(BaseModel):
     locked_by: Optional[str] = Field(default=None, description="Filter by lock owner")
 
     # Output format
-    format: Literal["full", "compact"] = Field(
-        default="full",
-        description="Output format: 'full' for JSON, 'compact' for one-line-per-session"
+    format: Literal["full", "compact", "grouped", "json"] = Field(
+        default="grouped",
+        description="Output format: 'grouped' (default, by directory), 'compact' (flat list), 'full'/'json' (full JSON)"
     )
+
+    # Grouping options (for grouped format)
+    group_by: Literal["directory", "team", "none"] = Field(
+        default="directory",
+        description="How to group sessions: 'directory' (by cwd), 'team', or 'none'"
+    )
+
+    # Display options
+    include_message: bool = Field(default=True, description="Include last Claude message in output")
+    shortcuts: bool = Field(default=True, description="Apply path shortcuts ($MY_REPOS, etc.)")
 
     # Existing filter
     agents_only: bool = Field(default=False, description="Only show sessions with registered agents")
