@@ -1036,11 +1036,31 @@ async def execute_cascade_request(
 # ============================================================================
 
 # Path shortcuts for compact display
-PATH_SHORTCUTS = {
-    os.path.expanduser("~/MCP/iterm-mcp"): "$ITERM_MCP",
-    os.path.expanduser("~/research-developer"): "$MY_REPOS",
-    os.path.expanduser("~"): "$HOME",
-}
+# Users can customize by setting ITERM_MCP_PATH_SHORTCUTS environment variable
+# Format: "/path1=$ALIAS1,/path2=$ALIAS2"
+def _get_path_shortcuts() -> Dict[str, str]:
+    """Get path shortcuts from environment or defaults.
+
+    Returns:
+        Dict mapping full paths to shortcut names
+    """
+    # Default shortcuts
+    shortcuts = {
+        os.path.expanduser("~"): "$HOME",
+    }
+
+    # Add from environment variable if set
+    # Format: "/path1=$ALIAS1,/path2=$ALIAS2"
+    env_shortcuts = os.environ.get("ITERM_MCP_PATH_SHORTCUTS", "")
+    if env_shortcuts:
+        for pair in env_shortcuts.split(","):
+            if "=" in pair:
+                path, alias = pair.split("=", 1)
+                shortcuts[os.path.expanduser(path.strip())] = alias.strip()
+
+    return shortcuts
+
+PATH_SHORTCUTS = _get_path_shortcuts()
 
 
 def _apply_shortcuts(path: Optional[str], shortcuts: Dict[str, str]) -> Optional[str]:
@@ -1163,16 +1183,18 @@ def _format_grouped_output(
     sessions: List[SessionInfo],
     shortcuts: bool = True,
     include_message: bool = True,
+    group_by: str = "directory",
 ) -> str:
-    """Format sessions grouped by directory.
+    """Format sessions grouped by directory, team, or ungrouped.
 
     Args:
         sessions: List of SessionInfo objects
         shortcuts: Whether to apply path shortcuts
         include_message: Whether to include last message
+        group_by: How to group sessions: 'directory', 'team', or 'none'
 
     Returns:
-        Formatted string with sessions grouped by directory
+        Formatted string with sessions grouped accordingly
     """
     if not sessions:
         return "No sessions found"
@@ -1180,38 +1202,53 @@ def _format_grouped_output(
     # Apply shortcuts
     shortcut_map = PATH_SHORTCUTS if shortcuts else {}
 
-    # Group sessions by base directory
+    # Group sessions based on group_by parameter
     groups: Dict[str, List[SessionInfo]] = {}
     for session in sessions:
-        # Get base directory (project root, not full cwd)
-        cwd = session.cwd
-        if cwd:
-            # Find the project root (stop at common project directories)
-            base_dir = _apply_shortcuts(cwd, shortcut_map) or cwd
-            # For worktrees, group under the parent project
-            if "/.worktrees/" in (cwd or ""):
-                parts = cwd.split("/.worktrees/")
-                base_dir = _apply_shortcuts(parts[0], shortcut_map) or parts[0]
+        if group_by == "team":
+            # Group by team
+            group_key = session.team or "(no team)"
+        elif group_by == "none":
+            # No grouping - single group
+            group_key = "All Sessions"
         else:
-            base_dir = "(unknown)"
+            # Default: group by directory
+            cwd = session.cwd
+            if cwd:
+                # Find the project root (stop at common project directories)
+                group_key = _apply_shortcuts(cwd, shortcut_map) or cwd
+                # For worktrees, group under the parent project
+                if "/.worktrees/" in (cwd or ""):
+                    parts = cwd.split("/.worktrees/")
+                    group_key = _apply_shortcuts(parts[0], shortcut_map) or parts[0]
+            else:
+                group_key = "(unknown)"
 
-        if base_dir not in groups:
-            groups[base_dir] = []
-        groups[base_dir].append(session)
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(session)
 
     # Sort groups by number of sessions (descending)
     sorted_groups = sorted(groups.items(), key=lambda x: (-len(x[1]), x[0]))
 
-    # Count unique directories for header
-    dir_count = len(sorted_groups)
+    # Count unique groups for header
+    group_count = len(sorted_groups)
 
-    # Build output
-    lines = [f"SESSIONS ({len(sessions)} total, {dir_count} directories)"]
+    # Build header based on group_by type
+    if group_by == "team":
+        header = f"SESSIONS ({len(sessions)} total, {group_count} teams)"
+    elif group_by == "none":
+        header = f"SESSIONS ({len(sessions)} total)"
+    else:
+        header = f"SESSIONS ({len(sessions)} total, {group_count} directories)"
+
+    lines = [header]
     lines.append("─" * 80)
 
-    for base_dir, group_sessions in sorted_groups:
-        # Group header
-        lines.append(f"\n{base_dir} ({len(group_sessions)} sessions)")
+    for group_name, group_sessions in sorted_groups:
+        # Group header (skip for "none" grouping)
+        if group_by != "none":
+            lines.append(f"\n{group_name} ({len(group_sessions)} sessions)")
 
         for session in group_sessions:
             # Session name (truncate to 18 chars)
@@ -1226,12 +1263,12 @@ def _format_grouped_output(
                 if len(parts) > 1:
                     rel_path = f".worktrees/{parts[1][:12]}"
             elif session.cwd:
-                # For non-worktree, show relative to base
+                # For non-worktree, show relative to group
                 cwd_short = _apply_shortcuts(session.cwd, shortcut_map)
-                if cwd_short and cwd_short != base_dir:
-                    # Get the part after base_dir
-                    if cwd_short.startswith(base_dir + "/"):
-                        rel_path = cwd_short[len(base_dir) + 1:]
+                if cwd_short and cwd_short != group_name:
+                    # Get the part after group_name
+                    if cwd_short.startswith(group_name + "/"):
+                        rel_path = cwd_short[len(group_name) + 1:]
 
             # Status icon
             status = _get_status_icon(session)
@@ -1454,7 +1491,12 @@ async def list_sessions(
     # Format output
     if format == "grouped":
         # New grouped format (default)
-        return _format_grouped_output(result, shortcuts=shortcuts, include_message=include_message)
+        return _format_grouped_output(
+            result,
+            shortcuts=shortcuts,
+            include_message=include_message,
+            group_by=group_by
+        )
     elif format == "compact":
         # Legacy compact format (flat list)
         lines = [_format_compact_session(s) for s in result]

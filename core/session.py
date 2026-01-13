@@ -20,6 +20,9 @@ from utils.otel import trace_operation, add_span_attributes, add_span_event
 # Logger for session module
 _logger = logging.getLogger("iterm-mcp-session")
 
+# Cache time-to-live for CWD in seconds
+CWD_CACHE_TTL_SECONDS = 30
+
 
 @dataclass
 class ExpectResult:
@@ -816,8 +819,9 @@ class ItermSession:
         """
         # Patterns to try (most specific first)
         patterns = [
-            # MaxBook :: ~/path 123 » or (env) MaxBook :: ~/path 123 »
-            r"(?:\([^)]+\)\s+)?MaxBook\s+::\s+([~/][^\s]+)\s+\d+\s*»",
+            # hostname :: ~/path 123 » or (env) hostname :: ~/path 123 »
+            # (common pattern for oh-my-zsh and similar prompts)
+            r"(?:\([^)]+\)\s+)?\w+\s+::\s+([~/][^\s]+)\s+\d+\s*»",
             # Starship git prompt: ~/path on branch ⇣⇡ *? ── (with status line)
             r"^([~/][^\s]+)\s+on\s+[^\s]+\s*(?:⇣|⇡|\*|\?|!|\d)*\s*─",
             # Git prompt: ~/path on branch (simple)
@@ -862,9 +866,9 @@ class ItermSession:
         Returns:
             Current working directory path or None
         """
-        # If we have a recent cached value (< 30 seconds) and not forcing refresh, use it
+        # If we have a recent cached value and not forcing refresh, use it
         if not force_refresh and self._cached_cwd:
-            if time.time() - self._cwd_updated_at < 30:
+            if time.time() - self._cwd_updated_at < CWD_CACHE_TTL_SECONDS:
                 return self._cached_cwd
 
         # Try iTerm2's native API first (requires shell integration)

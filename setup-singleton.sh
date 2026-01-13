@@ -31,33 +31,41 @@ echo ""
 
 # Step 2: Wait for daemon to be ready
 echo -e "${GREEN}[2/4]${NC} Waiting for daemon to be ready..."
+DAEMON_READY=false
 for i in {1..10}; do
-    if curl -s -o /dev/null -w "%{http_code}" "${DAEMON_URL}" 2>/dev/null | grep -qE "200|405"; then
-        echo -e "  ${GREEN}✓${NC} Daemon is responding"
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${DAEMON_URL}" 2>/dev/null) || HTTP_CODE="000"
+    if [[ "${HTTP_CODE}" =~ ^(200|405)$ ]]; then
+        echo -e "  ${GREEN}✓${NC} Daemon is responding (HTTP ${HTTP_CODE})"
+        DAEMON_READY=true
         break
-    fi
-    if [ $i -eq 10 ]; then
-        echo -e "  ${YELLOW}⚠${NC} Daemon may still be starting. Check: tail -f ~/.iterm-mcp/daemon.log"
     fi
     sleep 1
 done
+if [[ "${DAEMON_READY}" != "true" ]]; then
+    echo -e "  ${YELLOW}⚠${NC} Daemon may still be starting. Check: tail -f ~/.iterm-mcp/daemon.log"
+fi
 echo ""
 
 # Step 3: Remove old stdio-based MCP config
 echo -e "${GREEN}[3/4]${NC} Checking for existing MCP configurations..."
 
 # Check if there's an old iTerm config
-OLD_CONFIGS=$(claude mcp list 2>/dev/null | grep -i "iterm" || true)
+OLD_CONFIGS=$(claude mcp list 2>/dev/null | grep -i "iterm" || echo "")
 if [[ -n "${OLD_CONFIGS}" ]]; then
     echo -e "  ${YELLOW}Found existing iTerm configs:${NC}"
     echo "${OLD_CONFIGS}" | sed 's/^/    /'
     echo ""
 
     # Extract server names that contain 'iterm' (case insensitive)
-    for name in $(claude mcp list 2>/dev/null | grep -ioE "^[^ ]+iterm[^ ]*" || true); do
-        echo -e "  Removing old config: ${name}"
-        claude mcp remove "${name}" --yes 2>/dev/null || true
+    # Use while-read to handle names with special characters properly
+    claude mcp list 2>/dev/null | grep -ioE "^[^ ]+iterm[^ ]*" | while IFS= read -r name; do
+        if [[ -n "${name}" ]]; then
+            echo -e "  Removing old config: ${name}"
+            claude mcp remove "${name}" --yes 2>/dev/null || true
+        fi
     done
+else
+    echo -e "  ${GREEN}✓${NC} No existing iTerm configs found"
 fi
 echo ""
 
