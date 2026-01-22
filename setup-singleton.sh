@@ -82,7 +82,13 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}Setup complete!${NC}"
 echo ""
 echo "Daemon status:"
-"${SCRIPT_DIR}/iterm-mcp-daemon" status 2>/dev/null || true
+if launchctl list com.iterm-mcp.daemon &>/dev/null; then
+    echo "  Service: loaded"
+    PID=$(launchctl list com.iterm-mcp.daemon 2>/dev/null | grep PID | awk '{print $2}')
+    [[ -n "${PID}" && "${PID}" != "-" ]] && echo "  PID: ${PID}"
+else
+    echo "  Service: not loaded"
+fi
 echo ""
 echo "Current MCP config:"
 claude mcp list 2>/dev/null | head -10
@@ -94,6 +100,9 @@ echo "  • Single iTerm2 connection"
 echo "  • Shared session cache"
 echo ""
 echo -e "${YELLOW}To revert to stdio mode:${NC}"
-echo "  launchctl unload ~/Library/LaunchAgents/com.iterm-mcp.daemon.plist"
-echo "  claude mcp remove ${SERVER_NAME}"
-echo "  # Then re-add with command/args format"
+echo "  1. Stop the daemon:"
+echo "     launchctl bootout gui/\$(id -u) ~/Library/LaunchAgents/com.iterm-mcp.daemon.plist"
+echo "  2. Remove HTTP config:"
+echo "     claude mcp remove ${SERVER_NAME}"
+echo "  3. Re-add with stdio transport:"
+echo "     claude mcp add ${SERVER_NAME} -- python -m server.main"
