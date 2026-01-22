@@ -1117,10 +1117,17 @@ def _humanize_time(dt: Optional[datetime]) -> str:
         return f"{seconds // 86400}d"
 
 
+# Constants for message extraction
+MAX_LAST_MESSAGE_LENGTH = 40
+MIN_MEANINGFUL_CONTENT_LENGTH = 10
+
+
 def _extract_last_message(screen_content: str) -> Optional[str]:
     """Extract the last Claude message from terminal output.
 
-    Looks for Claude output markers and extracts the most recent message.
+    Scans terminal output for meaningful content, skipping Claude's status
+    indicators (⏺ markers), tool calls, and shell prompts to find actual
+    message text.
 
     Args:
         screen_content: Recent terminal output
@@ -1131,10 +1138,9 @@ def _extract_last_message(screen_content: str) -> Optional[str]:
     if not screen_content:
         return None
 
-    # Look for Claude output patterns (⏺ marker or similar)
     lines = screen_content.strip().split('\n')
 
-    # Find the last Claude output line (starts with ⏺ or has certain patterns)
+    # Find the last meaningful output line (skip status markers and prompts)
     for line in reversed(lines):
         line = line.strip()
         # Skip empty lines and prompts
@@ -1143,14 +1149,14 @@ def _extract_last_message(screen_content: str) -> Optional[str]:
         # Skip tool calls and system output
         if '(MCP)' in line or 'Bash(' in line or 'Read(' in line:
             continue
-        # Skip lines that are just status indicators
+        # Skip lines that are just status indicators (⏺ with parentheses = tool status)
         if line.startswith('⏺') and '(' in line and ')' in line:
             continue
         # This looks like actual Claude output
-        if len(line) > 10:  # Meaningful content
+        if len(line) > MIN_MEANINGFUL_CONTENT_LENGTH:
             # Truncate and add ellipsis
-            if len(line) > 40:
-                return f'"{line[:37]}..."'
+            if len(line) > MAX_LAST_MESSAGE_LENGTH:
+                return f'"{line[:MAX_LAST_MESSAGE_LENGTH - 3]}..."'
             return f'"{line}"'
 
     return None
@@ -1261,7 +1267,12 @@ def _format_grouped_output(
             if session.cwd and "/.worktrees/" in session.cwd:
                 parts = session.cwd.split("/.worktrees/")
                 if len(parts) > 1:
-                    rel_path = f".worktrees/{parts[1][:12]}"
+                    # Use more of the worktree path for better identification
+                    worktree_name = parts[1]
+                    max_len = 18  # Leave room for ".worktrees/" prefix
+                    if len(worktree_name) > max_len:
+                        worktree_name = worktree_name[:max_len - 3] + "..."
+                    rel_path = f".worktrees/{worktree_name}"
             elif session.cwd:
                 # For non-worktree, show relative to group
                 cwd_short = _apply_shortcuts(session.cwd, shortcut_map)
@@ -1339,7 +1350,8 @@ async def list_sessions(
         match: How to match multiple tags: 'any' (OR) or 'all' (AND)
         locked: Filter by lock status (True = only locked, False = only unlocked)
         locked_by: Filter by lock owner
-        format: Output format: 'grouped' (default, by directory), 'compact' (flat list), 'full'/'json' (full JSON)
+        format: Output format: 'grouped' (default, by directory), 'compact' (flat list),
+            'full'/'json' (equivalent; both return full JSON for backward compatibility)
         group_by: How to group sessions: 'directory' (by cwd), 'team', or 'none'
         include_message: Include last Claude message in output
         shortcuts: Apply path shortcuts ($MY_REPOS, etc.)
@@ -1451,8 +1463,8 @@ async def list_sessions(
                 last_update = getattr(session, "last_update_time", None)
                 if last_update:
                     last_activity_dt = datetime.fromtimestamp(last_update)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error converting last_update_time for session {session.id}: {e}")
 
             # Extract process name from session name (e.g., "name (process)")
             name = session.name
