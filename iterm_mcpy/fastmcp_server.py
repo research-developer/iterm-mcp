@@ -1276,12 +1276,10 @@ def _format_grouped_output(
             # Time since last activity
             activity = _humanize_time(session.last_activity) if session.last_activity else ""
 
-            # Last message or git branch
+            # Last message or tags
             extra = ""
             if include_message and session.last_message:
                 extra = session.last_message[:40]
-            elif session.git_branch:
-                extra = f"[{session.git_branch}]"
             elif session.tags:
                 extra = f"[{', '.join(session.tags[:2])}]"
 

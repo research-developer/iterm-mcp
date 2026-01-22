@@ -937,9 +937,6 @@ class SessionInfo(BaseModel):
     cwd: Optional[str] = Field(default=None, description="Current working directory")
     last_activity: Optional[datetime] = Field(default=None, description="Time of last output change")
     last_message: Optional[str] = Field(default=None, description="Last Claude response (truncated)")
-    # Note: git_branch is not currently populated in list_sessions but is reserved for future use.
-    # It could be populated by running `git branch --show-current` in the session's cwd.
-    git_branch: Optional[str] = Field(default=None, description="Current git branch if in a repo")
     process_name: Optional[str] = Field(default=None, description="Running process name")
 
 
