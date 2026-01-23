@@ -480,6 +480,57 @@ mcp = FastMCP(
 
 
 # ============================================================================
+# OAUTH METADATA ENDPOINTS (for HTTP transport compatibility)
+# ============================================================================
+# These routes return proper JSON 404 responses for OAuth discovery endpoints.
+# Without these, the MCP client receives plain text "Not Found" which it cannot
+# parse as JSON, causing: "Invalid OAuth error response: SyntaxError"
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
+async def oauth_authorization_server_metadata(request: Request) -> JSONResponse:
+    """Return JSON 404 for OAuth authorization server metadata.
+
+    The MCP client checks this endpoint for OAuth configuration.
+    Returning a proper JSON response allows the client to proceed without auth.
+    """
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "not_found",
+            "error_description": "OAuth authorization server metadata not configured"
+        }
+    )
+
+
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+async def oauth_protected_resource_metadata(request: Request) -> JSONResponse:
+    """Return JSON 404 for OAuth protected resource metadata (root path)."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "not_found",
+            "error_description": "OAuth protected resource metadata not configured"
+        }
+    )
+
+
+@mcp.custom_route("/.well-known/oauth-protected-resource/mcp", methods=["GET"])
+async def oauth_protected_resource_mcp_metadata(request: Request) -> JSONResponse:
+    """Return JSON 404 for OAuth protected resource metadata (MCP path)."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "error": "not_found",
+            "error_description": "OAuth protected resource metadata not configured"
+        }
+    )
+
+
+# ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
 
