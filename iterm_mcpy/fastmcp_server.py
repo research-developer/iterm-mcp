@@ -1838,12 +1838,13 @@ async def split_session(request: SplitSessionRequest, ctx: Context) -> str:
     - left: New pane appears to the left of the target
     - right: New pane appears to the right of the target
 
-    Supports optional agent registration, team assignment, and initial command execution.
+    Supports optional agent registration, team assignment, role assignment, and initial command execution.
     """
 
     terminal = ctx.request_context.lifespan_context["terminal"]
     agent_registry = ctx.request_context.lifespan_context["agent_registry"]
     profile_manager = ctx.request_context.lifespan_context.get("profile_manager")
+    role_manager: RoleManager = ctx.request_context.lifespan_context["role_manager"]
     logger = ctx.request_context.lifespan_context["logger"]
 
     try:
@@ -1929,13 +1930,28 @@ async def split_session(request: SplitSessionRequest, ctx: Context) -> str:
         if split_request.monitor:
             await new_session.start_monitoring(update_interval=0.2)
 
+        # Assign role if specified
+        assigned_role = None
+        if split_request.role:
+            try:
+                role_manager.assign_role(
+                    session_id=new_session.id,
+                    role=split_request.role,
+                    role_config=split_request.role_config,
+                )
+                assigned_role = split_request.role.value
+                logger.info(f"Assigned role '{assigned_role}' to split session {new_session.id}")
+            except Exception as e:
+                logger.warning(f"Could not assign role to split session: {e}")
+
         response = SplitSessionResponse(
             session_id=new_session.id,
             name=new_session.name,
             agent=agent_name,
             persistent_id=new_session.persistent_id or "",
             source_session_id=source_session.id,
-            direction=split_request.direction
+            direction=split_request.direction,
+            role=assigned_role
         )
 
         logger.info(f"Split session {source_session.id} ({split_request.direction}) -> {new_session.id}")

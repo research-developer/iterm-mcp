@@ -1398,3 +1398,4 @@ class SplitSessionResponse(BaseModel):
     persistent_id: str = Field(..., description="Persistent ID for reconnection")
     source_session_id: str = Field(..., description="Source session that was split")
     direction: str = Field(..., description="Direction of the split")
+    role: Optional[str] = Field(default=None, description="Assigned role if any")

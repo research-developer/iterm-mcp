@@ -366,10 +366,18 @@ class ItermTerminal:
                 if name in new_session_name:
                     break
                     
-                print(f"Attempt {attempt+1}: Failed to set session name to '{name}', current name: '{new_session_name}'")
+                # Log retry attempt if logging is enabled
+                if self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_RETRY",
+                        f"Attempt {attempt+1}: Failed to set session name to '{name}', current name: '{new_session_name}'"
+                    )
                 # If we've tried multiple times and failed, log a warning
-                if attempt == 2:
-                    print(f"WARNING: Failed to set session name to '{name}' after 3 attempts")
+                if attempt == 2 and self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_FAILED",
+                        f"Failed to set session name to '{name}' after 3 attempts"
+                    )
         
         # Add logger if logging is enabled
         if self.enable_logging and hasattr(self, "log_manager"):
@@ -478,10 +486,18 @@ class ItermTerminal:
                 if name in new_session_name:
                     break
 
-                print(f"Attempt {attempt+1}: Failed to set session name to '{name}', current name: '{new_session_name}'")
+                # Log retry attempt if logging is enabled
+                if self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_RETRY",
+                        f"Attempt {attempt+1}: Failed to set session name to '{name}', current name: '{new_session_name}'"
+                    )
                 # If we've tried multiple times and failed, log a warning
-                if attempt == 2:
-                    print(f"WARNING: Failed to set session name to '{name}' after 3 attempts")
+                if attempt == 2 and self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_FAILED",
+                        f"Failed to set session name to '{name}' after 3 attempts"
+                    )
 
         # Add logger if logging is enabled
         if self.enable_logging and hasattr(self, "log_manager"):
