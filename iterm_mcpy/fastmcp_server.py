@@ -68,6 +68,8 @@ from core.models import (
     CreateSessionsRequest,
     CreatedSession,
     CreateSessionsResponse,
+    SplitSessionRequest,
+    SplitSessionResponse,
     CascadeMessageRequest,
     CascadeResult,
     CascadeMessageResponse,
@@ -1820,6 +1822,137 @@ async def create_sessions(request: CreateSessionsRequest, ctx: Context) -> str:
     except Exception as e:
         logger.error(f"Error creating sessions: {e}")
         return f"Error: {e}"
+
+
+@mcp.tool()
+async def split_session(request: SplitSessionRequest, ctx: Context) -> str:
+    """Split an existing session in a specific direction (above/below/left/right).
+    
+    Creates a new pane relative to the target session, with optional agent registration,
+    command execution, and team assignment.
+    
+    Args:
+        request: Configuration for the split including target session, direction,
+                 name, profile, command, agent, and team settings.
+    
+    Returns:
+        JSON string with details about the newly created session.
+    """
+    terminal = ctx.request_context.lifespan_context["terminal"]
+    agent_registry = ctx.request_context.lifespan_context["agent_registry"]
+    profile_manager = ctx.request_context.lifespan_context["profile_manager"]
+    logger = ctx.request_context.lifespan_context["logger"]
+
+    try:
+        split_request = ensure_model(SplitSessionRequest, request)
+        
+        # Resolve the target session
+        target_sessions = await resolve_target_sessions(
+            terminal, agent_registry, [split_request.target]
+        )
+        
+        if not target_sessions:
+            error_msg = "Target session not found"
+            logger.error(error_msg)
+            return json.dumps({"error": error_msg}, indent=2)
+        
+        if len(target_sessions) > 1:
+            error_msg = f"Target resolved to multiple sessions ({len(target_sessions)}). Please use a more specific target."
+            logger.error(error_msg)
+            return json.dumps({"error": error_msg}, indent=2)
+        
+        source_session = target_sessions[0]
+        logger.info(
+            f"Splitting session {source_session.name} ({source_session.id}) "
+            f"in direction '{split_request.direction}'"
+        )
+        
+        # Create the split with the specified direction
+        new_session = await terminal.split_session_directional(
+            session_id=source_session.id,
+            direction=split_request.direction,
+            name=split_request.name,
+            profile=split_request.profile,
+        )
+        
+        agent_name = None
+        team_name = None
+        
+        # Register agent if specified
+        if split_request.agent:
+            teams = [split_request.team] if split_request.team else []
+            team_name = split_request.team
+            agent_registry.register_agent(
+                name=split_request.agent,
+                session_id=new_session.id,
+                teams=teams,
+            )
+            agent_name = split_request.agent
+            logger.info(f"Registered agent '{agent_name}' for new session")
+            
+            # Apply team profile colors if agent is in a team
+            if team_name and profile_manager:
+                team_profile = profile_manager.get_or_create_team_profile(team_name)
+                profile_manager.save_profiles()
+                # Apply the team's tab color to the session
+                r, g, b = team_profile.color.to_rgb()
+                try:
+                    await new_session.session.async_set_profile_properties(
+                        iterm2.LocalWriteOnlyProfile(
+                            values={
+                                "Tab Color": {
+                                    "Red Component": r,
+                                    "Green Component": g,
+                                    "Blue Component": b,
+                                    "Color Space": "sRGB"
+                                }
+                            }
+                        )
+                    )
+                    logger.debug(f"Applied team '{team_name}' color to session {new_session.name}")
+                except Exception as e:
+                    logger.warning(f"Could not apply team color to session: {e}")
+        
+        # Launch AI agent CLI if agent_type specified
+        if split_request.agent_type:
+            cli_command = AGENT_CLI_COMMANDS.get(split_request.agent_type)
+            if cli_command:
+                logger.info(
+                    f"Launching {split_request.agent_type} agent in session "
+                    f"{new_session.name}: {cli_command}"
+                )
+                await new_session.execute_command(cli_command)
+            else:
+                logger.warning(f"Unknown agent type: {split_request.agent_type}")
+        elif split_request.command:
+            # Only run custom command if no agent_type (agent_type takes precedence)
+            logger.info(f"Executing command in new session: {split_request.command}")
+            await new_session.execute_command(split_request.command)
+        
+        # Start monitoring if requested
+        if split_request.monitor:
+            await new_session.start_monitoring(update_interval=0.2)
+            logger.info(f"Started monitoring for session {new_session.name}")
+        
+        # Create response
+        response = SplitSessionResponse(
+            session_id=new_session.id,
+            name=new_session.name,
+            agent=agent_name,
+            persistent_id=new_session.persistent_id,
+            source_session_id=source_session.id,
+        )
+        
+        logger.info(
+            f"Successfully split session. New session: {new_session.name} ({new_session.id})"
+        )
+        return response.model_dump_json(indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error splitting session: {e}")
+        import traceback
+        traceback.print_exc()
+        return json.dumps({"error": str(e)}, indent=2)
 
 
 # ============================================================================

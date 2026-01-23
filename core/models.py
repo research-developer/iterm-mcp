@@ -331,6 +331,65 @@ class CreateSessionsResponse(BaseModel):
     window_id: str = Field(default="", description="Window ID containing sessions")
 
 
+class SplitSessionRequest(BaseModel):
+    """Request to split an existing session in a specific direction."""
+
+    target: SessionTarget = Field(
+        ...,
+        description="Target session to split (by session_id, agent, or name)"
+    )
+    direction: Literal["above", "below", "left", "right"] = Field(
+        ...,
+        description="Direction to create the split pane relative to target session"
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="Name for the new session"
+    )
+    profile: Optional[str] = Field(
+        default=None,
+        description="iTerm2 profile to use for the new session"
+    )
+    command: Optional[str] = Field(
+        default=None,
+        description="Initial command to run in the new session"
+    )
+    agent: Optional[str] = Field(
+        default=None,
+        description="Agent name to register for the new session"
+    )
+    agent_type: Optional[AgentType] = Field(
+        default=None,
+        description="AI agent CLI to launch: claude, gemini, codex, or copilot"
+    )
+    team: Optional[str] = Field(
+        default=None,
+        description="Team to assign agent to"
+    )
+    monitor: bool = Field(
+        default=False,
+        description="Start monitoring the new session"
+    )
+    role: Optional[SessionRole] = Field(
+        default=None,
+        description="Role for the new session (e.g., BUILDER, DEBUGGER, DEVOPS)"
+    )
+    role_config: Optional[RoleConfig] = Field(
+        default=None,
+        description="Custom role configuration (overrides default for the role)"
+    )
+
+
+class SplitSessionResponse(BaseModel):
+    """Response from splitting a session."""
+
+    session_id: str = Field(..., description="The new session ID")
+    name: str = Field(..., description="Session name")
+    agent: Optional[str] = Field(default=None, description="Registered agent name")
+    persistent_id: str = Field(..., description="Persistent ID for reconnection")
+    source_session_id: str = Field(..., description="The session that was split")
+
+
 class WriteResult(BaseModel):
     """Result of writing to a single session."""
 
