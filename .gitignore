@@ -81,3 +81,6 @@ Untitled*.ipynb
 
 # Generated files (created at install time from templates)
 com.iterm-mcp.daemon.plist
+
+# Local iTerm configuration
+.iterm/
