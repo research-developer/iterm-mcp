@@ -4,14 +4,11 @@ This module tests the wait_for_agent MCP tool that allows orchestrators
 to wait for subagents to complete with graceful timeout handling.
 """
 
-import asyncio
 import json
 import shutil
 import tempfile
 import unittest
-from datetime import datetime
-from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock
 
 from core.models import WaitForAgentRequest, WaitResult
 from core.agents import AgentRegistry
