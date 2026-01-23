@@ -22,6 +22,8 @@ from core.models import (
     Playbook,
     PlaybookCommand,
     OrchestrateRequest,
+    WaitForAgentRequest,
+    WaitResult,
 )
 
 
@@ -425,6 +427,184 @@ class TestPlaybookModels(unittest.TestCase):
         self.assertEqual(request.playbook.commands[0].name, "setup")
         self.assertEqual(request.playbook.commands[0].parallel, False)
         self.assertIsNotNone(request.playbook.cascade.broadcast)
+
+
+class TestWaitForAgentRequest(unittest.TestCase):
+    """Test WaitForAgentRequest model."""
+
+    def test_minimal_request(self):
+        """Test minimal request with just agent name."""
+        request = WaitForAgentRequest(agent="codex-1")
+        self.assertEqual(request.agent, "codex-1")
+        self.assertEqual(request.wait_up_to, 30)  # default
+        self.assertTrue(request.return_output)  # default
+        self.assertTrue(request.summary_on_timeout)  # default
+
+    def test_custom_timeout(self):
+        """Test request with custom timeout."""
+        request = WaitForAgentRequest(agent="agent-1", wait_up_to=60)
+        self.assertEqual(request.wait_up_to, 60)
+
+    def test_minimum_timeout(self):
+        """Test minimum timeout value (1 second)."""
+        request = WaitForAgentRequest(agent="agent-1", wait_up_to=1)
+        self.assertEqual(request.wait_up_to, 1)
+
+    def test_maximum_timeout(self):
+        """Test maximum timeout value (600 seconds = 10 minutes)."""
+        request = WaitForAgentRequest(agent="agent-1", wait_up_to=600)
+        self.assertEqual(request.wait_up_to, 600)
+
+    def test_timeout_below_minimum_raises_error(self):
+        """Test that timeout below 1 raises validation error."""
+        with self.assertRaises(ValidationError):
+            WaitForAgentRequest(agent="agent-1", wait_up_to=0)
+
+    def test_timeout_above_maximum_raises_error(self):
+        """Test that timeout above 600 raises validation error."""
+        with self.assertRaises(ValidationError):
+            WaitForAgentRequest(agent="agent-1", wait_up_to=601)
+
+    def test_disable_output(self):
+        """Test disabling output return."""
+        request = WaitForAgentRequest(agent="agent-1", return_output=False)
+        self.assertFalse(request.return_output)
+
+    def test_disable_summary(self):
+        """Test disabling summary on timeout."""
+        request = WaitForAgentRequest(agent="agent-1", summary_on_timeout=False)
+        self.assertFalse(request.summary_on_timeout)
+
+    def test_full_request(self):
+        """Test fully specified request."""
+        request = WaitForAgentRequest(
+            agent="build-agent",
+            wait_up_to=120,
+            return_output=True,
+            summary_on_timeout=True
+        )
+        self.assertEqual(request.agent, "build-agent")
+        self.assertEqual(request.wait_up_to, 120)
+        self.assertTrue(request.return_output)
+        self.assertTrue(request.summary_on_timeout)
+
+
+class TestWaitResult(unittest.TestCase):
+    """Test WaitResult model."""
+
+    def test_completed_result(self):
+        """Test result when agent completed successfully."""
+        result = WaitResult(
+            agent="codex-1",
+            completed=True,
+            timed_out=False,
+            elapsed_seconds=5.2,
+            status="idle",
+            output="Build complete\nAll tests passed",
+            summary="Agent completed successfully",
+            can_continue_waiting=False
+        )
+        self.assertTrue(result.completed)
+        self.assertFalse(result.timed_out)
+        self.assertEqual(result.status, "idle")
+        self.assertFalse(result.can_continue_waiting)
+
+    def test_timeout_result(self):
+        """Test result when wait timed out."""
+        result = WaitResult(
+            agent="codex-1",
+            completed=False,
+            timed_out=True,
+            elapsed_seconds=30.0,
+            status="running",
+            output="Building modules... 847/1203 complete",
+            summary="Build in progress: 70% complete",
+            can_continue_waiting=True
+        )
+        self.assertFalse(result.completed)
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.status, "running")
+        self.assertTrue(result.can_continue_waiting)
+
+    def test_error_result(self):
+        """Test result when error occurred."""
+        result = WaitResult(
+            agent="unknown-agent",
+            completed=False,
+            timed_out=False,
+            elapsed_seconds=0,
+            status="error",
+            summary="Agent 'unknown-agent' not found",
+            can_continue_waiting=False
+        )
+        self.assertEqual(result.status, "error")
+        self.assertFalse(result.can_continue_waiting)
+
+    def test_blocked_status(self):
+        """Test result with blocked status."""
+        result = WaitResult(
+            agent="blocked-agent",
+            completed=False,
+            timed_out=True,
+            elapsed_seconds=30.0,
+            status="blocked",
+            summary="Waiting for user input",
+            can_continue_waiting=True
+        )
+        self.assertEqual(result.status, "blocked")
+
+    def test_unknown_status(self):
+        """Test result with unknown status."""
+        result = WaitResult(
+            agent="mystery-agent",
+            completed=False,
+            timed_out=False,
+            elapsed_seconds=0,
+            status="unknown",
+            summary="Session not found",
+            can_continue_waiting=False
+        )
+        self.assertEqual(result.status, "unknown")
+
+    def test_optional_output(self):
+        """Test result with no output."""
+        result = WaitResult(
+            agent="agent-1",
+            completed=True,
+            timed_out=False,
+            elapsed_seconds=2.5,
+            status="idle",
+            can_continue_waiting=False
+        )
+        self.assertIsNone(result.output)
+
+    def test_optional_summary(self):
+        """Test result with no summary."""
+        result = WaitResult(
+            agent="agent-1",
+            completed=True,
+            timed_out=False,
+            elapsed_seconds=2.5,
+            status="idle",
+            can_continue_waiting=False
+        )
+        self.assertIsNone(result.summary)
+
+    def test_json_serialization(self):
+        """Test JSON serialization works correctly."""
+        result = WaitResult(
+            agent="codex-1",
+            completed=True,
+            timed_out=False,
+            elapsed_seconds=10.5,
+            status="idle",
+            output="Done",
+            summary="Task completed",
+            can_continue_waiting=False
+        )
+        json_str = result.model_dump_json()
+        self.assertIn('"agent":"codex-1"', json_str.replace(" ", ""))
+        self.assertIn('"completed":true', json_str.replace(" ", ""))
 
 
 if __name__ == "__main__":

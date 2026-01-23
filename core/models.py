@@ -933,6 +933,12 @@ class SessionInfo(BaseModel):
     locked_at: Optional[datetime] = Field(default=None, description="When the lock was acquired")
     pending_access_requests: int = Field(default=0, description="Number of pending access requests")
 
+    # Extended session context (for compact display)
+    cwd: Optional[str] = Field(default=None, description="Current working directory")
+    last_activity: Optional[datetime] = Field(default=None, description="Time of last output change")
+    last_message: Optional[str] = Field(default=None, description="Last Claude response (truncated)")
+    process_name: Optional[str] = Field(default=None, description="Running process name")
+
 
 class ListSessionsRequest(BaseModel):
     """Request parameters for list_sessions with filtering."""
@@ -950,10 +956,20 @@ class ListSessionsRequest(BaseModel):
     locked_by: Optional[str] = Field(default=None, description="Filter by lock owner")
 
     # Output format
-    format: Literal["full", "compact"] = Field(
-        default="full",
-        description="Output format: 'full' for JSON, 'compact' for one-line-per-session"
+    format: Literal["full", "compact", "grouped", "json"] = Field(
+        default="grouped",
+        description="Output format: 'grouped' (default, by directory), 'compact' (flat list), 'full'/'json' (full JSON)"
     )
+
+    # Grouping options (for grouped format)
+    group_by: Literal["directory", "team", "none"] = Field(
+        default="directory",
+        description="How to group sessions: 'directory' (by cwd), 'team', or 'none'"
+    )
+
+    # Display options
+    include_message: bool = Field(default=True, description="Include last Claude message in output")
+    shortcuts: bool = Field(default=True, description="Apply path shortcuts ($MY_REPOS, etc.)")
 
     # Existing filter
     agents_only: bool = Field(default=False, description="Only show sessions with registered agents")
@@ -1305,3 +1321,81 @@ class ManageManagersResponse(BaseModel):
         default=None,
         description="Error message if operation failed"
     )
+
+
+# ============================================================================
+# SPLIT SESSION MODELS (Issue #85)
+# ============================================================================
+
+SplitDirection = Literal["above", "below", "left", "right"]
+
+
+class SplitSessionRequest(BaseModel):
+    """Request to split an existing session in a specific direction.
+
+    Creates a new pane by splitting an existing session. The direction
+    determines where the new pane appears relative to the target session.
+
+    Direction mapping to iTerm2 API:
+    - above: vertical=False, before=True
+    - below: vertical=False, before=False
+    - left: vertical=True, before=True
+    - right: vertical=True, before=False
+    """
+
+    target: SessionTarget = Field(
+        ...,
+        description="Target session to split (by session_id, agent, or name)"
+    )
+    direction: SplitDirection = Field(
+        ...,
+        description="Direction to split: 'above', 'below', 'left', or 'right'"
+    )
+    name: Optional[str] = Field(
+        default=None,
+        description="Name for the new session"
+    )
+    profile: Optional[str] = Field(
+        default=None,
+        description="iTerm2 profile to use for the new session"
+    )
+    command: Optional[str] = Field(
+        default=None,
+        description="Initial command to run in the new session"
+    )
+    agent: Optional[str] = Field(
+        default=None,
+        description="Agent name to register for the new session"
+    )
+    agent_type: Optional[AgentType] = Field(
+        default=None,
+        description="AI agent CLI to launch: claude, gemini, codex, or copilot"
+    )
+    team: Optional[str] = Field(
+        default=None,
+        description="Team to assign the agent to"
+    )
+    monitor: bool = Field(
+        default=False,
+        description="Start monitoring the new session"
+    )
+    role: Optional[SessionRole] = Field(
+        default=None,
+        description="Role for the new session (e.g., BUILDER, DEBUGGER, DEVOPS)"
+    )
+    role_config: Optional[RoleConfig] = Field(
+        default=None,
+        description="Custom role configuration (overrides default for the role)"
+    )
+
+
+class SplitSessionResponse(BaseModel):
+    """Response from splitting a session."""
+
+    session_id: str = Field(..., description="New session ID")
+    name: str = Field(..., description="Session name")
+    agent: Optional[str] = Field(default=None, description="Agent name if registered")
+    persistent_id: str = Field(..., description="Persistent ID for reconnection")
+    source_session_id: str = Field(..., description="Source session that was split")
+    direction: str = Field(..., description="Direction of the split")
+    role: Optional[str] = Field(default=None, description="Assigned role if any")

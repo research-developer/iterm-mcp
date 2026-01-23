@@ -366,10 +366,18 @@ class ItermTerminal:
                 if name in new_session_name:
                     break
                     
-                print(f"Attempt {attempt+1}: Failed to set session name to '{name}', current name: '{new_session_name}'")
+                # Log retry attempt if logging is enabled
+                if self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_RETRY",
+                        f"Attempt {attempt+1}: Failed to set session name to '{name}', current name: '{new_session_name}'"
+                    )
                 # If we've tried multiple times and failed, log a warning
-                if attempt == 2:
-                    print(f"WARNING: Failed to set session name to '{name}' after 3 attempts")
+                if attempt == 2 and self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_FAILED",
+                        f"Failed to set session name to '{name}' after 3 attempts"
+                    )
         
         # Add logger if logging is enabled
         if self.enable_logging and hasattr(self, "log_manager"):
@@ -388,9 +396,128 @@ class ItermTerminal:
             )
             
         self.sessions[iterm_session.id] = iterm_session
-        
+
         return iterm_session
-    
+
+    async def split_session_directional(
+        self,
+        session_id: str,
+        direction: Literal["above", "below", "left", "right"],
+        name: Optional[str] = None,
+        profile: Optional[str] = None
+    ) -> ItermSession:
+        """Split an existing session in a specific direction.
+
+        Creates a new pane by splitting an existing session. The direction
+        determines where the new pane appears relative to the target session.
+
+        Args:
+            session_id: The ID of the session to split
+            direction: Direction to split:
+                - "above": New pane appears above the target
+                - "below": New pane appears below the target
+                - "left": New pane appears to the left of the target
+                - "right": New pane appears to the right of the target
+            name: Optional name for the new session
+            profile: Optional iTerm2 profile to use. If None, uses the "MCP Agent"
+                     profile if it exists.
+
+        Returns:
+            The session for the new pane
+
+        Raises:
+            ValueError: If the session is not found or direction is invalid
+        """
+        # Get the source session
+        source_session = await self.get_session_by_id(session_id)
+        if not source_session:
+            raise ValueError(f"Session with ID {session_id} not found")
+
+        # Map direction to iTerm2 API parameters
+        direction_map = {
+            "above": {"vertical": False, "before": True},
+            "below": {"vertical": False, "before": False},
+            "left": {"vertical": True, "before": True},
+            "right": {"vertical": True, "before": False},
+        }
+
+        if direction not in direction_map:
+            raise ValueError(f"Invalid direction: {direction}. Use one of: above, below, left, right")
+
+        params = direction_map[direction]
+        vertical = params["vertical"]
+        before = params["before"]
+
+        # Use MCP Agent profile by default if available
+        profile_to_use = profile or "MCP Agent"
+
+        # Create a new split pane with the specified profile and direction
+        try:
+            new_session = await source_session.session.async_split_pane(
+                vertical=vertical,
+                before=before,
+                profile=profile_to_use
+            )
+        except Exception:
+            # Fall back to using profile customizations if profile doesn't exist
+            profile_customizations = iterm2.LocalWriteOnlyProfile()
+            new_session = await source_session.session.async_split_pane(
+                vertical=vertical,
+                before=before,
+                profile_customizations=profile_customizations
+            )
+
+        # Create a new ItermSession with logger and add to the dictionary
+        iterm_session = ItermSession(
+            session=new_session,
+            name=name,
+            max_lines=self.default_max_lines
+        )
+
+        # Try to set the name multiple times in case there's a race condition
+        if name:
+            # Set name and verify
+            for attempt in range(3):
+                await iterm_session.set_name(name)
+                await asyncio.sleep(0.2)  # Give iTerm2 time to set the name
+
+                # Refresh the session object
+                new_session_name = new_session.name
+                if name in new_session_name:
+                    break
+
+                # Log retry attempt if logging is enabled
+                if self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_RETRY",
+                        f"Attempt {attempt+1}: Failed to set session name to '{name}', current name: '{new_session_name}'"
+                    )
+                # If we've tried multiple times and failed, log a warning
+                if attempt == 2 and self.enable_logging and hasattr(self, "log_manager"):
+                    self.log_manager.log_app_event(
+                        "NAME_SET_FAILED",
+                        f"Failed to set session name to '{name}' after 3 attempts"
+                    )
+
+        # Add logger if logging is enabled
+        if self.enable_logging and hasattr(self, "log_manager"):
+            session_logger = self.log_manager.get_session_logger(
+                session_id=iterm_session.id,
+                session_name=iterm_session.name,
+                persistent_id=iterm_session.persistent_id
+            )
+            iterm_session.set_logger(session_logger)
+
+            # Log directional split pane creation event
+            self.log_manager.log_app_event(
+                "PANE_SPLIT_DIRECTIONAL",
+                f"Created new split pane ({direction}): {iterm_session.name} ({iterm_session.id}) - Persistent ID: {iterm_session.persistent_id}"
+            )
+
+        self.sessions[iterm_session.id] = iterm_session
+
+        return iterm_session
+
     async def focus_session(self, session_id: str) -> None:
         """Focus on a specific session.
         
