@@ -417,7 +417,8 @@ class TestWaitForAgentRealImplementation(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         """Set up mocks for each test."""
-        # Import here to avoid module-level import issues
+        # Import function here to avoid circular dependency issues during module loading
+        # (wait_for_agent depends on models which may not be fully initialized at import time)
         from iterm_mcpy.fastmcp_server import wait_for_agent
         self.wait_for_agent = wait_for_agent
         
@@ -723,9 +724,8 @@ class TestWaitForAgentRealImplementation(unittest.IsolatedAsyncioTestCase):
         # Should have called get_screen_contents multiple times
         self.assertGreater(call_count, 2)
 
-    async def test_notification_side_effects(self):
-        """Test that notifications are properly added for different scenarios."""
-        # Test 1: Completion notification
+    async def test_completion_notification(self):
+        """Test that success notification is added when agent completes."""
         self.agent_registry.register_agent(
             name="complete-agent",
             session_id="session-1",
@@ -743,11 +743,9 @@ class TestWaitForAgentRealImplementation(unittest.IsolatedAsyncioTestCase):
         last_call = self.mock_notification_manager.add_simple.call_args
         self.assertEqual(last_call.kwargs["level"], "success")
         self.assertEqual(last_call.kwargs["agent"], "complete-agent")
-        
-        # Reset mock for next test
-        self.mock_notification_manager.reset_mock()
-        
-        # Test 2: Timeout notification
+
+    async def test_timeout_notification(self):
+        """Test that info notification is added when wait times out."""
         self.agent_registry.register_agent(
             name="timeout-agent",
             session_id="session-2",
