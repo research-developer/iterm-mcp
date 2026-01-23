@@ -5,6 +5,8 @@ to wait for subagents to complete with graceful timeout handling.
 """
 
 import json
+import shutil
+import tempfile
 import unittest
 
 from core.models import WaitForAgentRequest, WaitResult
@@ -128,13 +130,13 @@ class TestAgentRegistryForWait(unittest.TestCase):
     """Test agent registry operations relevant to wait_for_agent."""
 
     def setUp(self):
-        """Set up test agent registry."""
-        self.registry = AgentRegistry()
+        """Create temporary directory for registry data."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.registry = AgentRegistry(data_dir=self.temp_dir)
 
     def tearDown(self):
-        """Clean up registry after tests."""
-        self.registry._agents.clear()
-        self.registry._teams.clear()
+        """Clean up temporary directory."""
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_agent_lookup_for_wait(self):
         """Test looking up an agent before waiting."""
