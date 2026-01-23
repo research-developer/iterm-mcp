@@ -1910,7 +1910,7 @@ async def split_session(request: SplitSessionRequest, ctx: Context) -> str:
                         )
                     )
                     logger.debug(f"Applied team '{team_name}' color to session {new_session.name}")
-                except Exception as e:
+                except (iterm2.rpc.RPCException, AttributeError) as e:
                     logger.warning(f"Could not apply team color to session: {e}")
         
         # Launch AI agent CLI if agent_type specified
