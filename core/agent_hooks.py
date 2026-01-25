@@ -35,7 +35,8 @@ if TYPE_CHECKING:
 # ============================================================================
 
 # Precompiled UUID pattern for efficient session ID validation
-# Both iTerm session IDs and Claude session IDs use standard UUID format
+# Claude Code session IDs use standard UUID format. Note: iTerm session IDs
+# may use shorter formats (e.g., "w0t0p0s0"), so this validates UUID-style IDs only.
 # Examples: "550e8400-e29b-41d4-a716-446655440000", "f9a88c53-2c5f-405c-a2f7-0907bf35e318"
 SESSION_ID_PATTERN = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
@@ -266,9 +267,10 @@ class AgentHookManager:
             agent_registry: Agent registry for team assignment.
             logger: Optional logger instance.
         """
+        # Initialize logger first (needed by _load_global_config)
+        self.logger = logger or logging.getLogger("iterm-mcp.agent_hooks")
         self.config = config or self._load_global_config()
         self.agent_registry = agent_registry
-        self.logger = logger or logging.getLogger("iterm-mcp.agent_hooks")
 
         # Track current path per session to detect changes
         self._session_paths: Dict[str, str] = {}

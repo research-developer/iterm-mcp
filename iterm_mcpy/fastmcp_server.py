@@ -5897,7 +5897,9 @@ async def manage_agent_hooks(request: ManageAgentHooksRequest, ctx: Context) -> 
                 ).model_dump_json(indent=2)
 
             from core.iterm_path_monitor import set_user_variable
+            connection = ctx.request_context.lifespan_context["connection"]
             success = await set_user_variable(
+                connection,
                 request.session_id,
                 request.variable_name,
                 request.variable_value or ""
@@ -5931,7 +5933,8 @@ async def manage_agent_hooks(request: ManageAgentHooksRequest, ctx: Context) -> 
                 ).model_dump_json(indent=2)
 
             from core.iterm_path_monitor import get_user_variable
-            value = await get_user_variable(request.session_id, request.variable_name)
+            connection = ctx.request_context.lifespan_context["connection"]
+            value = await get_user_variable(connection, request.session_id, request.variable_name)
             logger.info(f"Got variable {request.variable_name} from session {request.session_id}: {value}")
 
             return ManageAgentHooksResponse(

@@ -1,8 +1,6 @@
 """Tests for agent lifecycle hooks."""
 
-import asyncio
 import json
-import os
 import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
@@ -11,7 +9,6 @@ from core.agent_hooks import (
     AgentHookManager,
     ColorSpec,
     GlobalHooksConfig,
-    HookActionResult,
     HookEvent,
     HookEventType,
     RepoHooksConfig,
@@ -126,8 +123,12 @@ class TestAgentHookManager(IsolatedAsyncioTestCase):
 
     def test_find_repo_root_not_found(self):
         """Test finding repo root when not in a repo."""
+        # Use a controlled temp directory that we know has no repo markers
+        no_repo_dir = Path(self.temp_dir) / "no-repo"
+        no_repo_dir.mkdir(exist_ok=True)
+
         manager = AgentHookManager()
-        found_root = manager.find_repo_root("/tmp")
+        found_root = manager.find_repo_root(str(no_repo_dir))
         self.assertIsNone(found_root)
 
     def test_load_repo_config(self):
@@ -431,5 +432,5 @@ class TestManageAgentHooksModels(IsolatedAsyncioTestCase):
 
 
 if __name__ == "__main__":
-    import unittest
-    unittest.main()
+    from unittest import main
+    main()

@@ -21,9 +21,7 @@ if TYPE_CHECKING:
 
 from .agent_hooks import (
     AgentHookManager,
-    ColorSpec,
     HookActionResult,
-    RepoHooksConfig,
     SessionStyle,
     get_agent_hook_manager,
 )
@@ -111,6 +109,7 @@ class PathMonitor:
                 try:
                     await task
                 except asyncio.CancelledError:
+                    # Task cancellation is expected during shutdown; ignore.
                     pass
 
         self._monitor_tasks.clear()
@@ -168,9 +167,9 @@ class PathMonitor:
             Agent name if found, None otherwise.
         """
         if self.hook_manager.agent_registry:
-            for agent in self.hook_manager.agent_registry._agents.values():
-                if agent.session_id == session_id:
-                    return agent.name
+            agent = self.hook_manager.agent_registry.get_agent_by_session(session_id)
+            if agent:
+                return agent.name
         return None
 
     async def _assign_to_team(
@@ -192,15 +191,15 @@ class PathMonitor:
 
         registry = self.hook_manager.agent_registry
 
-        # Ensure team exists
-        if team_name not in registry._teams:
-            from .agents import Team
-            registry.create_team(team_name, f"Auto-created for repo")
+        # Ensure team exists using public API
+        team = registry.get_team(team_name)
+        if not team:
+            registry.create_team(team_name, "Auto-created for repo")
 
-        # If we know the agent, add to team
-        if agent_name and agent_name in registry._agents:
-            agent = registry._agents[agent_name]
-            if team_name not in agent.teams:
+        # If we know the agent, add to team using public API
+        if agent_name:
+            agent = registry.get_agent(agent_name)
+            if agent and team_name not in agent.teams:
                 registry.assign_to_team(agent_name, team_name)
                 logger.info(f"Assigned agent {agent_name} to team {team_name}")
 
@@ -278,8 +277,9 @@ async def apply_session_style(
             logger.warning(f"Session {session_id} not found")
             return False
 
-        # Get current profile
-        profile = await session.async_get_profile()
+        # Use LocalWriteOnlyProfile to apply changes to this session only
+        # without affecting the underlying profile (per-session styling)
+        profile = iterm2.LocalWriteOnlyProfile()
 
         # Apply background color
         if style.background_color:
@@ -289,7 +289,7 @@ async def apply_session_style(
                 style.background_color.b,
                 style.background_color.a
             )
-            await profile.async_set_background_color(color)
+            profile.set_background_color(color)
 
         # Apply tab color
         if style.tab_color:
@@ -298,8 +298,8 @@ async def apply_session_style(
                 style.tab_color.g,
                 style.tab_color.b,
             )
-            await profile.async_set_tab_color(color)
-            await profile.async_set_use_tab_color(True)
+            profile.set_tab_color(color)
+            profile.set_use_tab_color(True)
 
         # Apply cursor color
         if style.cursor_color:
@@ -308,11 +308,11 @@ async def apply_session_style(
                 style.cursor_color.g,
                 style.cursor_color.b,
             )
-            await profile.async_set_cursor_color(color)
+            profile.set_cursor_color(color)
 
         # Apply background image
         if style.background_image:
-            await profile.async_set_background_image_location(style.background_image)
+            profile.set_background_image_location(style.background_image)
 
         # Apply badge
         if style.badge:
@@ -322,9 +322,12 @@ async def apply_session_style(
                 badge_text = badge_text.replace("{repo}", repo_name)
             if team_name:
                 badge_text = badge_text.replace("{team}", team_name)
-            await profile.async_set_badge_text(badge_text)
+            profile.set_badge_text(badge_text)
 
-        # Apply profile if specified
+        # Apply the profile changes to this session only
+        await session.async_set_profile_properties(profile)
+
+        # Apply profile if specified (full profile switch)
         if style.profile:
             profiles = await iterm2.PartialProfile.async_query(connection)
             for p in profiles:
