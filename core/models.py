@@ -1399,3 +1399,99 @@ class SplitSessionResponse(BaseModel):
     source_session_id: str = Field(..., description="Source session that was split")
     direction: str = Field(..., description="Direction of the split")
     role: Optional[str] = Field(default=None, description="Assigned role if any")
+
+
+# ============================================================================
+# AGENT HOOKS MANAGEMENT
+# ============================================================================
+
+AgentHooksOperationType = Literal[
+    "get_config",
+    "update_config",
+    "get_repo_config",
+    "trigger_path_change",
+    "get_stats",
+    "set_variable",
+    "get_variable",
+]
+
+
+class ManageAgentHooksRequest(BaseModel):
+    """Unified request for agent hooks operations.
+
+    Operations:
+    - get_config: Get current global hooks configuration
+    - update_config: Update global hooks configuration
+    - get_repo_config: Get hooks config for a specific repo
+    - trigger_path_change: Manually trigger path change hook for a session
+    - get_stats: Get hook manager statistics
+    - set_variable: Set a hook override variable on a session
+    - get_variable: Get a hook override variable from a session
+    """
+    operation: AgentHooksOperationType = Field(
+        ...,
+        description="Operation: get_config, update_config, get_repo_config, trigger_path_change, get_stats, set_variable, get_variable"
+    )
+
+    # For update_config
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="Enable/disable hooks globally"
+    )
+    auto_team_assignment: Optional[bool] = Field(
+        default=None,
+        description="Enable/disable auto team assignment"
+    )
+    fallback_team_from_repo: Optional[bool] = Field(
+        default=None,
+        description="Use repo name as team fallback"
+    )
+    pass_session_id_default: Optional[bool] = Field(
+        default=None,
+        description="Default for passing session ID"
+    )
+
+    # For get_repo_config
+    repo_path: Optional[str] = Field(
+        default=None,
+        description="Repository path (for get_repo_config)"
+    )
+
+    # For trigger_path_change
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Session ID (for trigger_path_change, set_variable, get_variable)"
+    )
+    new_path: Optional[str] = Field(
+        default=None,
+        description="New path (for trigger_path_change)"
+    )
+    agent_name: Optional[str] = Field(
+        default=None,
+        description="Agent name (for trigger_path_change)"
+    )
+
+    # For set_variable / get_variable
+    variable_name: Optional[str] = Field(
+        default=None,
+        description="Variable name for set/get operations (e.g., 'hooks_enabled', 'team_override')"
+    )
+    variable_value: Optional[str] = Field(
+        default=None,
+        description="Variable value for set operation"
+    )
+
+
+class ManageAgentHooksResponse(BaseModel):
+    """Response from agent hooks operations."""
+
+    operation: str = Field(..., description="The operation that was performed")
+    success: bool = Field(..., description="Whether the operation succeeded")
+    data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Operation-specific response data"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if operation failed"
+    )
