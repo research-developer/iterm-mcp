@@ -884,7 +884,7 @@ async def execute_write_request(
 
         try:
             if message.execute:
-                await session.execute_command(message.content)
+                await session.execute_command(message.content, use_encoding=message.use_encoding)
             else:
                 await session.send_text(message.content, execute=False)
 
