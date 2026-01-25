@@ -62,6 +62,26 @@ from .service_hooks import (
     ServiceHookManager,
     get_service_hook_manager,
 )
+from .agent_hooks import (
+    # Session ID patterns and utilities
+    SESSION_ID_PATTERN,
+    SESSION_ID_SEARCH_PATTERN,
+    is_valid_session_id,
+    extract_session_ids,
+    # Configuration models
+    ColorSpec as AgentHookColorSpec,
+    SessionStyle,
+    RepoHooksConfig,
+    GlobalHooksConfig,
+    # Event types
+    HookEventType,
+    HookEvent,
+    HookActionResult,
+    # Core class
+    AgentHookManager,
+    get_agent_hook_manager,
+    reset_agent_hook_manager,
+)
 from .models import (
     # Role-based session specialization
     SessionRole,
@@ -301,6 +321,21 @@ __all__ = [
     'HookResult',
     'ServiceHookManager',
     'get_service_hook_manager',
+    # Agent hooks
+    'SESSION_ID_PATTERN',
+    'SESSION_ID_SEARCH_PATTERN',
+    'is_valid_session_id',
+    'extract_session_ids',
+    'AgentHookColorSpec',
+    'SessionStyle',
+    'RepoHooksConfig',
+    'GlobalHooksConfig',
+    'HookEventType',
+    'HookEvent',
+    'HookActionResult',
+    'AgentHookManager',
+    'get_agent_hook_manager',
+    'reset_agent_hook_manager',
     # Manager agent classes
     'ManagerSessionRole',
     'TaskStatus',
