@@ -9,7 +9,24 @@ When working with multiple terminal sessions and agents, it's useful to track wh
 1. **Captures Session IDs**: Automatically records the iTerm session ID in each commit
 2. **Links Commits to Sessions**: Stores session metadata using git notes
 3. **GitHub PR Comment Integration**: Retrieves commit information from PR comments
-4. **Agent Notifications**: Routes notifications to the specific terminal/agent that created code
+4. **Code Snippet Extraction**: Shows exactly which code was commented on
+5. **Agent Notifications**: Routes notifications to the specific terminal/agent that created code
+
+## Key Question Answered
+
+**"When a comment is made in GitHub on a PR, is it possible to automatically know which commit that code came from?"**
+
+**Answer: Yes!** GitHub PR review comments include:
+- The commit SHA where the comment was made (`original_commit_id`)
+- The file path (`path`)
+- The line number(s) (`line`, `original_line`, `original_start_line`)
+- The diff context (`diff_hunk`)
+
+This information is available via the GitHub API and can be used to:
+1. Identify the exact commit
+2. Extract the code snippet being discussed
+3. Look up which terminal session created that commit
+4. Route notifications to the responsible agent/developer
 
 ## Components
 
@@ -33,6 +50,7 @@ The `core/git_integration.py` module provides:
 
 - **`scripts/query-session.py`**: Query session information from commits
 - **`scripts/install-git-hooks.sh`**: Install hooks in any git repository
+- **`scripts/get-pr-comment-snippet.py`**: Extract code snippet and commit info from PR comments
 
 ## Installation
 
@@ -114,6 +132,20 @@ export GITHUB_TOKEN="your_github_token"
 
 # Query by comment ID
 python scripts/query-session.py from-github owner repo comment_id
+```
+
+#### Extract code snippet from PR comment:
+
+```bash
+# Get the full context of what was commented on
+python scripts/get-pr-comment-snippet.py owner repo comment_id
+
+# Example output shows:
+# - The commit SHA
+# - File path and line numbers
+# - The comment text
+# - The actual code snippet with context
+# - How to find the session that created it
 ```
 
 ### Sharing Session Metadata
